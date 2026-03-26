@@ -1,12 +1,12 @@
 {
   "name": "overmind",
   "version": "0.1.0",
-  "description": "Overmind multi-agent orchestration for Claude Code",
+  "description": "Multi-agent orchestration framework with neural_link coordination and brain memory",
   "author": { "name": "Overmind contributors" },
   "repository": "https://github.com/fresha/overmind",
   "homepage": "https://github.com/fresha/overmind",
   "license": "MIT",
-  "keywords": ["claude-code", "plugin", "multi-agent", "orchestration"],
-  "hooks": "./hooks/hooks.json",
-  "mcpServers": "./.mcp.json"
+  "keywords": ["claude-code", "plugin", "multi-agent", "orchestration", "neural-link", "brain"],
+  "skills": "./skills/",
+  "mcpServers": "./mcp-bridge.json"
 }

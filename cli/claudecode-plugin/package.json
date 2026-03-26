@@ -2,9 +2,13 @@
   "name": "overmind-claudecode",
   "version": "0.1.0",
   "type": "module",
+  "description": "Overmind multi-agent orchestration for Claude Code",
   "main": "dist/index.js",
+  "type": "module",
   "scripts": {
-    "build": "tsc"
+    "build": "node scripts/build-mcp-bridge.mjs",
+    "predev": "npm run build",
+    "dev": "node dist/mcp-bridge.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.26.0",
@@ -12,6 +16,7 @@
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
+    "esbuild": "^0.24.0",
     "typescript": "^5.3.0"
   }
 }

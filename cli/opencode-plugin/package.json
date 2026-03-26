@@ -1,11 +1,7 @@
 {
   "name": "overmind-opencode-plugin",
   "version": "0.1.0",
-  "type": "module",
-  "dependencies": {
-    "@opencode-ai/plugin": "workspace:*"
-  },
-  "devDependencies": {
-    "typescript": "^5.3.0"
-  }
+  "description": "Overmind plugin for OpenCode",
+  "main": "index.cjs",
+  "dependencies": {}
 }
