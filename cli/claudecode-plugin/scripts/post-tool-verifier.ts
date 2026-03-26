@@ -23,16 +23,14 @@ interface HookData {
 }
 
 const BASH_ERROR_PATTERNS = [
-  /error:/i,
-  /failed/i,
-  /cannot/i,
+  /^error:/im,
   /permission denied/i,
   /command not found/i,
-  /no such file/i,
+  /no such file or directory/i,
   /exit code: [1-9]/i,
   /exit status [1-9]/i,
-  /fatal:/i,
-  /abort/i,
+  /^fatal:/im,
+  /\baborted\b/i,
 ];
 
 const WRITE_ERROR_PATTERNS = [
@@ -114,13 +112,13 @@ function generateMessage(toolName: string, toolOutput: string): string | undefin
       if (detectWriteFailure(toolOutput)) {
         return "Edit operation failed. Verify file exists and content matches exactly.";
       }
-      return "Code modified. Verify changes work as expected before marking complete.";
+      break;
 
     case "Write":
       if (detectWriteFailure(toolOutput)) {
         return "Write operation failed. Check file permissions and directory existence.";
       }
-      return "File written. Test the changes to ensure they work correctly.";
+      break;
 
     case "TodoWrite":
       if (/created|added/i.test(toolOutput)) {
