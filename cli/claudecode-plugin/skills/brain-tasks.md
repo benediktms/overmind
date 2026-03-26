@@ -1,7 +1,12 @@
 ---
 name: brain-tasks
 description: Guidelines for task creation and updates via brain. Use when creating tickets for multi-step features, bugs that can't be fixed immediately, or work that needs tracking.
-triggers: task_created, task_updated, task_completed, create_ticket, track_work
+triggers:
+  - task_created
+  - task_updated
+  - task_completed
+  - create_ticket
+  - track_work
 ---
 
 # Brain Task Management

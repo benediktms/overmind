@@ -1,7 +1,12 @@
 ---
 name: brain-memory
 description: Guidelines for recording important context to brain memory. Use when you discover important architecture decisions, external API behavior, or business logic that should be preserved.
-triggers: external_discovery, decision_made, architecture_decision, api_behavior, important_context
+triggers:
+  - external_discovery
+  - decision_made
+  - architecture_decision
+  - api_behavior
+  - important_context
 ---
 
 # Brain Memory Recording
