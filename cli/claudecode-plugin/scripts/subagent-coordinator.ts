@@ -35,11 +35,11 @@ async function sendMessage(kind: string, summary: string, body: Record<string, u
   }
 }
 
-function outputHookResult(additionalContext?: string): void {
+function outputHookResult(additionalContext?: string, eventName = "SubagentStart"): void {
   const result: Record<string, unknown> = { continue: true };
   if (additionalContext) {
     result.hookSpecificOutput = {
-      hookEventName: "SubagentStart",
+      hookEventName: eventName,
       additionalContext,
     };
   } else {
@@ -49,6 +49,7 @@ function outputHookResult(additionalContext?: string): void {
 }
 
 async function main(): Promise<void> {
+  const action = Deno.args[0] ?? "start";
   const input = await readStdin();
   if (!input.trim()) {
     outputHookResult();
@@ -65,19 +66,35 @@ async function main(): Promise<void> {
 
   const agentId = data.agentId ?? data.agent_type ?? "unknown";
   const agentName = data.agent_name ?? agentId;
+  const directory = data.cwd ?? data.directory ?? Deno.cwd();
+  const sessionId = data.session_id ?? data.sessionId ?? "unknown";
 
-  await sendMessage("finding", `Subagent started: ${agentName}`, {
-    agentId: PARTICIPANT_ID,
-    agentType: agentId,
-    agentName,
-    directory: data.cwd ?? data.directory ?? Deno.cwd(),
-    sessionId: data.session_id ?? data.sessionId ?? "unknown",
-  });
-
-  outputHookResult(
-    `[OVERMIND] Subagent tracking active: ${agentName}\n` +
-    `Room: ${ROOM_ID || "not configured"}\n`
-  );
+  if (action === "stop") {
+    await sendMessage("handoff", `Subagent completed: ${agentName}`, {
+      agentId: PARTICIPANT_ID,
+      agentType: agentId,
+      agentName,
+      directory,
+      sessionId,
+    });
+    outputHookResult(
+      `[OVERMIND] Subagent completed: ${agentName}\n` +
+      `Room: ${ROOM_ID || "not configured"}\n`,
+      "SubagentStop"
+    );
+  } else {
+    await sendMessage("finding", `Subagent started: ${agentName}`, {
+      agentId: PARTICIPANT_ID,
+      agentType: agentId,
+      agentName,
+      directory,
+      sessionId,
+    });
+    outputHookResult(
+      `[OVERMIND] Subagent tracking active: ${agentName}\n` +
+      `Room: ${ROOM_ID || "not configured"}\n`
+    );
+  }
 }
 
 main();
