@@ -1,0 +1,59 @@
+name = "overmind"
+version = "0.1.0"
+
+[modes]
+default = "scout"
+
+[modes.scout]
+description = "Lead agent with parallel adjuncts for context gathering"
+max_adjuncts = 4
+
+[modes.relay]
+description = "Sequential pipeline: plan -> exec -> verify -> fix"
+allow_fix_loop = true
+
+[modes.swarm]
+description = "Parallel execution with verify/fix loops"
+max_parallel = 8
+allow_fix_loop = true
+
+[agents]
+default = "cortex"
+
+[agents.cortex]
+name = "Cortex"
+description = "Architecture, debugging, high-IQ backup"
+model = "claude-sonnet-4-20250514"
+system_prompt = "You are Cortex, a senior architect and debugging specialist."
+
+[agents.archivist]
+name = "Archivist"
+description = "Documentation, codebase exploration"
+model = "claude-sonnet-4-20250514"
+system_prompt = "You are Archivist, a documentation and exploration specialist."
+
+[agents.probe]
+name = "Probe"
+description = "Fast contextual grep, file mapping"
+model = "claude-haiku-4-20250514"
+system_prompt = "You are Probe, a fast reconnaissance agent."
+
+[agents.liaison]
+name = "Liaison"
+description = "UI/UX, external communication"
+model = "claude-sonnet-4-20250514"
+system_prompt = "You are Liaison, a communications and UI/UX specialist."
+
+[brain]
+enabled = true
+brain_name = "overmind"
+task_prefix = "OVR"
+
+[neural_link]
+enabled = true
+http_url = "http://localhost:9961/mcp"
+room_ttl_seconds = 3600
+
+[skills]
+auto_inject = true
+project_overrides = true
