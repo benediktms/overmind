@@ -11,7 +11,7 @@
 
 import { readStdin } from "./lib/stdin.ts";
 
-interface HookData {
+export interface HookData {
   prompt?: string;
   message?: { content?: string };
   parts?: Array<{ type: string; text?: string }>;
@@ -44,7 +44,7 @@ const DONE_PATTERNS = [
   /\bwe('re|\s+are)\s+(done|finished|complete)\b/i,
 ];
 
-function extractPrompt(input: HookData): string {
+export function extractPrompt(input: HookData): string {
   if (input.prompt) return input.prompt;
   if (input.message?.content) return input.message.content;
   if (Array.isArray(input.parts)) {
@@ -56,7 +56,7 @@ function extractPrompt(input: HookData): string {
   return "";
 }
 
-function sanitizeForKeywordDetection(text: string): string {
+export function sanitizeForKeywordDetection(text: string): string {
   return text
     .replace(/<(\w[\w-]*)[\s>][\s\S]*?<\/\1>/g, "")
     .replace(/<\w[\w-]*(?:\s[^>]*)?\s*\/>/g, "")
@@ -66,7 +66,7 @@ function sanitizeForKeywordDetection(text: string): string {
     .replace(/`[^`]+`/g, "");
 }
 
-function detectKeywords(prompt: string): { mode: string; args: string }[] {
+export function detectKeywords(prompt: string): { mode: string; args: string }[] {
   const clean = sanitizeForKeywordDetection(prompt).toLowerCase();
   const matches: { mode: string; args: string }[] = [];
 
@@ -160,4 +160,4 @@ Recording session completion. Summarize what was accomplished and close relevant
   console.log(createHookOutput(additionalContext));
 }
 
-main();
+if (import.meta.main) main();
