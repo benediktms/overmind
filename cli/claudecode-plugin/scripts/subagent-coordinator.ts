@@ -5,7 +5,7 @@ const NEURAL_LINK_URL = Deno.env.get("OVERMIND_NEURAL_LINK_URL") ?? "http://loca
 const ROOM_ID = Deno.env.get("OVERMIND_ROOM_ID") ?? "";
 const PARTICIPANT_ID = Deno.env.get("CLAUDE_AGENT_ID") ?? "claudecode-subagent";
 
-interface HookData {
+export interface HookData {
   cwd?: string;
   directory?: string;
   session_id?: string;
@@ -13,6 +13,36 @@ interface HookData {
   agentId?: string;
   agent_type?: string;
   agent_name?: string;
+}
+
+export interface CoordinatorAction {
+  messageKind: "finding" | "handoff";
+  summary: string;
+  hookEventName: string;
+  contextPrefix: string;
+}
+
+export function buildCoordinatorAction(action: string, agentName: string): CoordinatorAction {
+  if (action === "stop") {
+    return {
+      messageKind: "handoff",
+      summary: `Subagent completed: ${agentName}`,
+      hookEventName: "SubagentStop",
+      contextPrefix: `[OVERMIND] Subagent completed: ${agentName}`,
+    };
+  }
+  return {
+    messageKind: "finding",
+    summary: `Subagent started: ${agentName}`,
+    hookEventName: "SubagentStart",
+    contextPrefix: `[OVERMIND] Subagent tracking active: ${agentName}`,
+  };
+}
+
+export function resolveAgentInfo(data: HookData): { agentId: string; agentName: string } {
+  const agentId = data.agentId ?? data.agent_type ?? "unknown";
+  const agentName = data.agent_name ?? agentId;
+  return { agentId, agentName };
 }
 
 async function sendMessage(kind: string, summary: string, body: Record<string, unknown>): Promise<void> {
@@ -64,37 +94,22 @@ async function main(): Promise<void> {
     return;
   }
 
-  const agentId = data.agentId ?? data.agent_type ?? "unknown";
-  const agentName = data.agent_name ?? agentId;
+  const { agentId, agentName } = resolveAgentInfo(data);
   const directory = data.cwd ?? data.directory ?? Deno.cwd();
   const sessionId = data.session_id ?? data.sessionId ?? "unknown";
+  const coordAction = buildCoordinatorAction(action, agentName);
 
-  if (action === "stop") {
-    await sendMessage("handoff", `Subagent completed: ${agentName}`, {
-      agentId: PARTICIPANT_ID,
-      agentType: agentId,
-      agentName,
-      directory,
-      sessionId,
-    });
-    outputHookResult(
-      `[OVERMIND] Subagent completed: ${agentName}\n` +
-      `Room: ${ROOM_ID || "not configured"}\n`,
-      "SubagentStop"
-    );
-  } else {
-    await sendMessage("finding", `Subagent started: ${agentName}`, {
-      agentId: PARTICIPANT_ID,
-      agentType: agentId,
-      agentName,
-      directory,
-      sessionId,
-    });
-    outputHookResult(
-      `[OVERMIND] Subagent tracking active: ${agentName}\n` +
-      `Room: ${ROOM_ID || "not configured"}\n`
-    );
-  }
+  await sendMessage(coordAction.messageKind, coordAction.summary, {
+    agentId: PARTICIPANT_ID,
+    agentType: agentId,
+    agentName,
+    directory,
+    sessionId,
+  });
+  outputHookResult(
+    `${coordAction.contextPrefix}\nRoom: ${ROOM_ID || "not configured"}\n`,
+    coordAction.hookEventName,
+  );
 }
 
-main();
+if (import.meta.main) main();
