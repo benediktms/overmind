@@ -2,33 +2,29 @@ const DEFAULT_TIMEOUT_MS = 5000;
 
 export async function readStdin(timeoutMs = DEFAULT_TIMEOUT_MS): Promise<string> {
   const chunks: Uint8Array[] = [];
-  const buffer = new Uint8Array(4096);
   const decoder = new TextDecoder();
+  let timedOut = false;
 
-  const deadline = Date.now() + timeoutMs;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    try {
+      Deno.stdin.close();
+    } catch {
+      // Already closed
+    }
+  }, timeoutMs);
 
   try {
-    const readableStream = Deno.stdin.readable.getReader();
-    try {
-      while (true) {
-        const remaining = deadline - Date.now();
-        if (remaining <= 0) break;
-
-        const result = await Promise.race([
-          readableStream.read(),
-          new Promise<{ done: true; value: undefined }>((resolve) =>
-            setTimeout(() => resolve({ done: true, value: undefined }), remaining)
-          ),
-        ]);
-
-        if (result.done) break;
-        if (result.value) chunks.push(result.value);
-      }
-    } finally {
-      readableStream.releaseLock();
+    const buffer = new Uint8Array(4096);
+    while (true) {
+      const read = await Deno.stdin.read(buffer);
+      if (read === null) break;
+      chunks.push(buffer.slice(0, read));
     }
   } catch {
-    // Stream closed or interrupted — fall through to return what we have
+    // stdin closed by timeout or externally
+  } finally {
+    if (!timedOut) clearTimeout(timer);
   }
 
   if (chunks.length === 0) return "";
