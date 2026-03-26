@@ -61,7 +61,7 @@ function sanitizeForKeywordDetection(text: string): string {
     .replace(/<(\w[\w-]*)[\s>][\s\S]*?<\/\1>/g, "")
     .replace(/<\w[\w-]*(?:\s[^>]*)?\s*\/>/g, "")
     .replace(/https?:\/\/[^\s)>\]]+/g, "")
-    .replace(/(?<=^|[\s"'`(])耶(?:\/)?(?:[\w.-]+\/)+[\w.-]+/gm, "")
+    .replace(/(?<=^|[\s"'`(])(?:\.{0,2}\/)?(?:[\w.-]+\/)+[\w.-]+/gm, "")
     .replace(/```[\s\S]*?```/g, "")
     .replace(/`[^`]+`/g, "");
 }
