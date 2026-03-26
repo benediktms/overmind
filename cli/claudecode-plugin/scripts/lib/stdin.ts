@@ -5,20 +5,30 @@ export async function readStdin(timeoutMs = DEFAULT_TIMEOUT_MS): Promise<string>
   const buffer = new Uint8Array(4096);
   const decoder = new TextDecoder();
 
-  const timeoutId = setTimeout(() => {
-    // Just stop reading after timeout - return what we have
-  }, timeoutMs);
+  const deadline = Date.now() + timeoutMs;
 
   try {
-    while (true) {
-      const read = await Deno.stdin.read(buffer);
-      if (read === null) break;
-      chunks.push(buffer.slice(0, read));
+    const readableStream = Deno.stdin.readable.getReader();
+    try {
+      while (true) {
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) break;
+
+        const result = await Promise.race([
+          readableStream.read(),
+          new Promise<{ done: true; value: undefined }>((resolve) =>
+            setTimeout(() => resolve({ done: true, value: undefined }), remaining)
+          ),
+        ]);
+
+        if (result.done) break;
+        if (result.value) chunks.push(result.value);
+      }
+    } finally {
+      readableStream.releaseLock();
     }
   } catch {
-    // Interrupted or error
-  } finally {
-    clearTimeout(timeoutId);
+    // Stream closed or interrupted — fall through to return what we have
   }
 
   if (chunks.length === 0) return "";
