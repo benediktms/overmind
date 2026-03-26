@@ -1,0 +1,29 @@
+{
+  "description": "Overmind orchestration hooks for Claude Code",
+  "hooks": {
+    "SubagentStart": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/subagent-coordinator.cjs\" start",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/subagent-coordinator.cjs\" stop",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}
