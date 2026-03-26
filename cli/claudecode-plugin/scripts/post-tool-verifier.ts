@@ -44,11 +44,11 @@ const WRITE_ERROR_PATTERNS = [
   /\bdirectory not found\b/i,
 ];
 
-function detectBashFailure(output: string): boolean {
+export function detectBashFailure(output: string): boolean {
   return BASH_ERROR_PATTERNS.some((p) => p.test(output));
 }
 
-function detectWriteFailure(output: string): boolean {
+export function detectWriteFailure(output: string): boolean {
   return WRITE_ERROR_PATTERNS.some((p) => p.test(output));
 }
 
@@ -69,7 +69,7 @@ async function notifyKernel(event: string, data: Record<string, unknown>): Promi
   }
 }
 
-function processRememberTags(
+export function processRememberTags(
   output: string,
 ): { priority: string[]; regular: string[] } {
   const priority: string[] = [];
@@ -91,7 +91,7 @@ function processRememberTags(
   return { priority, regular };
 }
 
-function generateMessage(toolName: string, toolOutput: string): string | undefined {
+export function generateMessage(toolName: string, toolOutput: string): string | undefined {
   switch (toolName) {
     case "Bash":
       if (detectBashFailure(toolOutput)) {
@@ -197,4 +197,4 @@ async function main(): Promise<void> {
   outputHookResult(message);
 }
 
-main();
+if (import.meta.main) main();
