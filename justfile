@@ -26,25 +26,13 @@ install: install-claudecode install-opencode
     @echo "  - Plugin symlinked to {{OPENCODE_PLUGIN_DIR}}"
     @echo "  - Restart OpenCode to load"
 
-# Set up Claude Code plugin via marketplace (OMC approach)
-install-claudecode: install-overmind-repo
-    @# Claude Code auto-installs plugins from marketplace on restart
-    @# Just ensure the repo is cloned and permissions are noted
-    @echo "Overmind repo: {{OVERMIND_DIR}}"
+# Install Claude Code plugin via installer script
+install-claudecode:
+    deno task install-plugin
 
-# Configure Claude Code settings.json with Overmind marketplace
+# Configure Claude Code settings.json with Overmind plugin (delegates to installer)
 install-claudecode-setup:
-    @node -e "\
-const fs = require('fs');\
-const path = process.env.HOME + '/.claude/settings.json';\
-const settings = JSON.parse(fs.readFileSync(path, 'utf8'));\
-settings.extraKnownMarketplaces = settings.extraKnownMarketplaces || {};\
-settings.extraKnownMarketplaces['overmind'] = { source: { source: 'git', url: '{{repo_url}}' } };\
-settings.enabledPlugins = settings.enabledPlugins || {};\
-settings.enabledPlugins['overmind@local'] = true;\
-fs.writeFileSync(path, JSON.stringify(settings, null, 2));\
-console.log('settings.json updated with overmind marketplace');\
-"
+    deno task install-plugin
 
 # Clone or update the Overmind repo
 install-overmind-repo:
@@ -66,17 +54,7 @@ install-opencode:
 
 uninstall:
     rm -rf "{{OPENCODE_PLUGIN_DIR}}"
-    @node -e "\
-const fs = require('fs');\
-const path = process.env.HOME + '/.claude/settings.json';\
-try {\
-  const settings = JSON.parse(fs.readFileSync(path, 'utf8'));\
-  delete settings.extraKnownMarketplaces?.['overmind'];\
-  delete settings.enabledPlugins?.['overmind@local'];\
-  fs.writeFileSync(path, JSON.stringify(settings, null, 2));\
-  console.log('settings.json cleaned');\
-} catch(e) { console.log('settings.json not modified'); }\
-"
+    deno task uninstall-plugin
 
 # ── Development ──────────────────────────────────────────────────────────────
 
