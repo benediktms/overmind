@@ -1,6 +1,7 @@
 import { OvermindError } from "./errors.ts";
 import { Mode } from "./types.ts";
 import type { SocketRequest, SocketResponse } from "./types.ts";
+import { fromFileUrl } from "@std/path";
 
 interface OvermindDaemonOptions {
   baseDir?: string;
@@ -13,6 +14,95 @@ interface ParsedRequest {
 
 const SOCKET_FILE_NAME = "daemon.sock";
 const PID_FILE_NAME = "daemon.pid";
+const LOCK_FILE_NAME = "daemon.lock";
+const STARTUP_RETRY_ATTEMPTS = 5;
+const STARTUP_RETRY_INTERVAL_MS = 200;
+const managedDaemonChildren = new Map<string, Deno.ChildProcess>();
+
+export async function ensureDaemonRunning(baseDir?: string): Promise<void> {
+  const resolvedBaseDir = resolveBaseDir(baseDir);
+  const socketPath = `${resolvedBaseDir}/${SOCKET_FILE_NAME}`;
+  const pidPath = `${resolvedBaseDir}/${PID_FILE_NAME}`;
+  const lockPath = `${resolvedBaseDir}/${LOCK_FILE_NAME}`;
+
+  await Deno.mkdir(resolvedBaseDir, { recursive: true });
+
+  if (await isDaemonAvailable(pidPath, socketPath)) {
+    return;
+  }
+
+  let lockHandle: Deno.FsFile | null = null;
+  for (let attempt = 1; attempt <= STARTUP_RETRY_ATTEMPTS; attempt += 1) {
+    if (await isDaemonAvailable(pidPath, socketPath)) {
+      return;
+    }
+
+    try {
+      lockHandle = await Deno.open(lockPath, { write: true, createNew: true });
+      break;
+    } catch (err) {
+      if (!(err instanceof Deno.errors.AlreadyExists)) {
+        throw err;
+      }
+      await sleep(STARTUP_RETRY_INTERVAL_MS);
+    }
+  }
+
+  if (!lockHandle) {
+    if (await isDaemonAvailable(pidPath, socketPath)) {
+      return;
+    }
+    throw new OvermindError("Timed out waiting for daemon startup lock");
+  }
+
+  try {
+    if (await isDaemonAvailable(pidPath, socketPath)) {
+      return;
+    }
+
+    startDaemonProcess(resolvedBaseDir);
+    await waitForSocketReady(socketPath, STARTUP_RETRY_ATTEMPTS, STARTUP_RETRY_INTERVAL_MS);
+  } finally {
+    lockHandle.close();
+    await removeIfExists(lockPath);
+  }
+}
+
+export async function sendToSocket(
+  request: SocketRequest,
+  socketPath = `${resolveBaseDir()}/${SOCKET_FILE_NAME}`,
+): Promise<SocketResponse> {
+  let lastError: unknown;
+
+  for (let attempt = 1; attempt <= STARTUP_RETRY_ATTEMPTS; attempt += 1) {
+    let conn: Deno.Conn | null = null;
+    try {
+      conn = await Deno.connect({ transport: "unix", path: socketPath });
+      const body = JSON.stringify(request);
+      await conn.write(new TextEncoder().encode(body));
+
+      const responseRaw = await readConnPayload(conn);
+      const payload = JSON.parse(responseRaw) as SocketResponse;
+      if (!isSocketResponse(payload)) {
+        throw new OvermindError("Malformed daemon response");
+      }
+
+      return payload;
+    } catch (err) {
+      lastError = err;
+      if (attempt < STARTUP_RETRY_ATTEMPTS) {
+        await sleep(STARTUP_RETRY_INTERVAL_MS);
+        continue;
+      }
+    } finally {
+      conn?.close();
+    }
+  }
+
+  throw new OvermindError(
+    `Failed to communicate with daemon socket at ${socketPath}: ${String(lastError)}`,
+  );
+}
 
 export class OvermindDaemon {
   private readonly baseDir: string;
@@ -286,8 +376,160 @@ export class OvermindDaemon {
   }
 }
 
+function resolveBaseDir(baseDir?: string): string {
+  const defaultBaseDir = `${Deno.env.get("HOME") ?? "."}/.overmind`;
+  return baseDir ?? defaultBaseDir;
+}
+
+function processExists(pid: number): boolean {
+  try {
+    Deno.kill(pid, 0);
+    return true;
+  } catch (err) {
+    if (err instanceof Deno.errors.PermissionDenied) {
+      return true;
+    }
+    if (err instanceof Deno.errors.NotFound) {
+      return false;
+    }
+    return false;
+  }
+}
+
+async function isDaemonAvailable(pidPath: string, socketPath: string): Promise<boolean> {
+  let pid: number | null = null;
+  try {
+    const pidRaw = (await Deno.readTextFile(pidPath)).trim();
+    const parsed = Number(pidRaw);
+    pid = Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+  } catch (err) {
+    if (!(err instanceof Deno.errors.NotFound)) {
+      throw err;
+    }
+  }
+
+  if (!pid || !processExists(pid)) {
+    return false;
+  }
+
+  try {
+    const conn = await Deno.connect({ transport: "unix", path: socketPath });
+    conn.close();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function startDaemonProcess(baseDir: string): void {
+  const daemonPath = fromFileUrl(import.meta.url);
+  const command = new Deno.Command(Deno.execPath(), {
+    args: ["run", "--allow-all", daemonPath],
+    env: {
+      HOME: Deno.env.get("HOME") ?? ".",
+      OVERMIND_DAEMON_BASE_DIR: baseDir,
+    },
+    stdin: "null",
+    stdout: "null",
+    stderr: "null",
+  });
+
+  const child = command.spawn();
+  managedDaemonChildren.set(baseDir, child);
+  void child.status.finally(() => {
+    if (managedDaemonChildren.get(baseDir) === child) {
+      managedDaemonChildren.delete(baseDir);
+    }
+  });
+}
+
+async function waitForSocketReady(
+  socketPath: string,
+  attempts: number,
+  intervalMs: number,
+): Promise<void> {
+  let lastError: unknown;
+
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    let conn: Deno.Conn | null = null;
+    try {
+      conn = await Deno.connect({ transport: "unix", path: socketPath });
+      const probeRequest: SocketRequest = {
+        type: "mode_request",
+        run_id: "daemon-ready-check",
+        mode: Mode.Scout,
+        objective: "daemon readiness probe",
+        workspace: resolveBaseDir(),
+      };
+      await conn.write(new TextEncoder().encode(JSON.stringify(probeRequest)));
+      const responseRaw = await readConnPayload(conn);
+      const payload = JSON.parse(responseRaw) as SocketResponse;
+      if (!isSocketResponse(payload)) {
+        throw new OvermindError("Malformed daemon response during readiness check");
+      }
+      return;
+    } catch (err) {
+      lastError = err;
+      if (attempt < attempts) {
+        await sleep(intervalMs);
+      }
+    } finally {
+      conn?.close();
+    }
+  }
+
+  throw new OvermindError(`Daemon socket was not ready at ${socketPath}: ${String(lastError)}`);
+}
+
+async function readConnPayload(conn: Deno.Conn): Promise<string> {
+  const chunks: Uint8Array[] = [];
+  const buf = new Uint8Array(4096);
+
+  while (true) {
+    const n = await conn.read(buf);
+    if (n === null) break;
+    chunks.push(buf.slice(0, n));
+    if (n < buf.length) break;
+  }
+
+  const totalLength = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+  const merged = new Uint8Array(totalLength);
+  let offset = 0;
+  for (const chunk of chunks) {
+    merged.set(chunk, offset);
+    offset += chunk.length;
+  }
+
+  return new TextDecoder().decode(merged);
+}
+
+function isSocketResponse(payload: unknown): payload is SocketResponse {
+  if (!payload || typeof payload !== "object") {
+    return false;
+  }
+
+  const value = payload as Record<string, unknown>;
+  return (value.status === "accepted" || value.status === "error") &&
+    typeof value.run_id === "string" &&
+    (value.error === null || typeof value.error === "string");
+}
+
+async function removeIfExists(path: string): Promise<void> {
+  try {
+    await Deno.remove(path);
+  } catch (err) {
+    if (!(err instanceof Deno.errors.NotFound)) {
+      throw err;
+    }
+  }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 if (import.meta.main) {
-  const daemon = new OvermindDaemon();
+  const daemon = new OvermindDaemon({ baseDir: Deno.env.get("OVERMIND_DAEMON_BASE_DIR") ?? undefined });
   await daemon.start();
   await new Promise<void>(() => {});
 }

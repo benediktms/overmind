@@ -2,10 +2,16 @@ import {
   assert,
   assertEquals,
   assertNotEquals,
+  assertRejects,
   assertStringIncludes,
 } from "@std/assert";
 
-import { OvermindDaemon } from "./daemon.ts";
+import {
+  ensureDaemonRunning,
+  OvermindDaemon,
+  sendToSocket,
+} from "./daemon.ts";
+import { Mode } from "./types.ts";
 
 function createTestPaths(tempDir: string): { baseDir: string; pidPath: string; socketPath: string } {
   const baseDir = `${tempDir}/.overmind`;
@@ -191,6 +197,127 @@ Deno.test("OvermindDaemon shutdown is safe when daemon was never started", async
   await Deno.remove(tempDir, { recursive: true });
 });
 
+Deno.test("ensureDaemonRunning auto-starts daemon and accepts socket requests", async () => {
+  const tempDir = await Deno.makeTempDir();
+  const { baseDir, pidPath, socketPath } = createTestPaths(tempDir);
+
+  try {
+    await ensureDaemonRunning(baseDir);
+
+    const pidText = await Deno.readTextFile(pidPath);
+    assert(Number(pidText.trim()) > 0);
+
+    const response = await sendToSocket({
+      type: "mode_request",
+      run_id: "run-auto-start",
+      mode: Mode.Scout,
+      objective: "validate auto-start",
+      workspace: tempDir,
+    }, socketPath);
+
+    assertEquals(response.status, "accepted");
+    assertEquals(response.run_id, "run-auto-start");
+  } finally {
+    await terminateDaemonFromPidFile(pidPath);
+    await Deno.remove(tempDir, { recursive: true });
+  }
+});
+
+Deno.test("ensureDaemonRunning is idempotent with concurrent calls", async () => {
+  const tempDir = await Deno.makeTempDir();
+  const { baseDir, pidPath, socketPath } = createTestPaths(tempDir);
+
+  try {
+    await Promise.all([ensureDaemonRunning(baseDir), ensureDaemonRunning(baseDir)]);
+
+    const pidText = await Deno.readTextFile(pidPath);
+    const pid = Number(pidText.trim());
+    assert(pid > 0);
+
+    const response = await sendToSocket({
+      type: "mode_request",
+      run_id: "run-idempotent",
+      mode: Mode.Scout,
+      objective: "validate idempotency",
+      workspace: tempDir,
+    }, socketPath);
+
+    assertEquals(response.status, "accepted");
+  } finally {
+    await terminateDaemonFromPidFile(pidPath);
+    await Deno.remove(tempDir, { recursive: true });
+  }
+});
+
+Deno.test("ensureDaemonRunning respects lockfile and waits for daemon readiness", async () => {
+  const tempDir = await Deno.makeTempDir();
+  const { baseDir, pidPath } = createTestPaths(tempDir);
+  const lockPath = `${baseDir}/daemon.lock`;
+
+  await Deno.mkdir(baseDir, { recursive: true });
+  const lockHandle = await Deno.open(lockPath, { write: true, createNew: true });
+
+  try {
+    const waitingEnsure = ensureDaemonRunning(baseDir);
+
+    await delay(250);
+    lockHandle.close();
+    await Deno.remove(lockPath);
+
+    await waitingEnsure;
+
+    const pidText = await Deno.readTextFile(pidPath);
+    assert(Number(pidText.trim()) > 0);
+    await assertRejects(() => Deno.stat(lockPath), Deno.errors.NotFound);
+  } finally {
+    await terminateDaemonFromPidFile(pidPath);
+    await Deno.remove(tempDir, { recursive: true });
+  }
+});
+
+Deno.test("sendToSocket retries until socket becomes available", async () => {
+  const tempDir = await Deno.makeTempDir();
+  const { baseDir, socketPath } = createTestPaths(tempDir);
+
+  await Deno.mkdir(baseDir, { recursive: true });
+
+  const delayedServer = (async () => {
+    await delay(450);
+    const listener = Deno.listen({ transport: "unix", path: socketPath });
+    const conn = await listener.accept();
+    try {
+      const reqRaw = await readConnPayload(conn);
+      const req = JSON.parse(reqRaw) as { run_id: string };
+      const response = {
+        status: "accepted",
+        run_id: req.run_id,
+        error: null,
+      };
+      await conn.write(new TextEncoder().encode(JSON.stringify(response)));
+    } finally {
+      conn.close();
+      listener.close();
+      await assertRejectsNotFound(socketPath);
+    }
+  })();
+
+  try {
+    const response = await sendToSocket({
+      type: "mode_request",
+      run_id: "run-retry",
+      mode: Mode.Relay,
+      objective: "retry",
+      workspace: tempDir,
+    }, socketPath);
+
+    assertEquals(response.status, "accepted");
+    assertEquals(response.run_id, "run-retry");
+    await delayedServer;
+  } finally {
+    await Deno.remove(tempDir, { recursive: true });
+  }
+});
+
 async function assertRejectsNotFound(path: string): Promise<void> {
   try {
     await Deno.stat(path);
@@ -200,4 +327,73 @@ async function assertRejectsNotFound(path: string): Promise<void> {
       throw err;
     }
   }
+}
+
+async function terminateDaemonFromPidFile(pidPath: string): Promise<void> {
+  try {
+    const pidText = await Deno.readTextFile(pidPath);
+    const pid = Number(pidText.trim());
+    if (Number.isInteger(pid) && pid > 0) {
+      Deno.kill(pid, "SIGTERM");
+      await waitFor(async () => {
+        try {
+          await Deno.stat(pidPath);
+          try {
+            Deno.kill(pid, 0);
+            return false;
+          } catch (err) {
+            if (err instanceof Deno.errors.NotFound) {
+              await Deno.remove(pidPath);
+              return true;
+            }
+            throw err;
+          }
+        } catch (err) {
+          return err instanceof Deno.errors.NotFound;
+        }
+      }, 2000);
+    }
+  } catch (err) {
+    if (!(err instanceof Deno.errors.NotFound)) {
+      throw err;
+    }
+  }
+}
+
+async function waitFor(check: () => boolean | Promise<boolean>, timeoutMs: number): Promise<void> {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    if (await check()) {
+      return;
+    }
+    await delay(50);
+  }
+
+  throw new Error(`Timed out after ${timeoutMs}ms`);
+}
+
+async function readConnPayload(conn: Deno.Conn): Promise<string> {
+  const chunks: Uint8Array[] = [];
+  const buf = new Uint8Array(1024);
+
+  while (true) {
+    const n = await conn.read(buf);
+    if (n === null) break;
+    chunks.push(buf.slice(0, n));
+    if (n < buf.length) break;
+  }
+
+  const total = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+  const merged = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    merged.set(chunk, offset);
+    offset += chunk.length;
+  }
+
+  return new TextDecoder().decode(merged);
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
