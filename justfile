@@ -34,6 +34,10 @@ install-claudecode:
 install-claudecode-setup:
     deno task install-plugin
 
+# Install via Claude Code marketplace (registers source + enables plugin)
+install-marketplace:
+    deno task install-plugin --mode marketplace
+
 # Clone or update the Overmind repo
 install-overmind-repo:
     @if [ ! -d "{{OVERMIND_DIR}}" ]; then \
