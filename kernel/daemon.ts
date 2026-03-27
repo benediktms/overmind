@@ -2,9 +2,11 @@ import { OvermindError } from "./errors.ts";
 import { Mode } from "./types.ts";
 import type { SocketRequest, SocketResponse } from "./types.ts";
 import { fromFileUrl } from "@std/path";
+import type { Kernel } from "./kernel.ts";
 
 interface OvermindDaemonOptions {
   baseDir?: string;
+  kernel?: Kernel;
 }
 
 interface ParsedRequest {
@@ -108,6 +110,7 @@ export class OvermindDaemon {
   private readonly baseDir: string;
   private readonly socketPath: string;
   private readonly pidPath: string;
+  private readonly kernel: Kernel | null;
 
   private listener: Deno.Listener | null = null;
   private acceptLoopPromise: Promise<void> | null = null;
@@ -126,6 +129,7 @@ export class OvermindDaemon {
     this.baseDir = options.baseDir ?? defaultBaseDir;
     this.socketPath = `${this.baseDir}/${SOCKET_FILE_NAME}`;
     this.pidPath = `${this.baseDir}/${PID_FILE_NAME}`;
+    this.kernel = options.kernel ?? null;
   }
 
   async start(): Promise<void> {
@@ -208,9 +212,19 @@ export class OvermindDaemon {
       const requestRaw = await this.readRequestPayload(conn);
       const parsed = this.parseRequest(requestRaw);
 
-      const response: SocketResponse = parsed.request
-        ? { status: "accepted", run_id: parsed.request.run_id, error: null }
-        : { status: "error", run_id: "", error: parsed.error ?? "Invalid request" };
+      let response: SocketResponse;
+      if (parsed.request) {
+        response = { status: "accepted", run_id: parsed.request.run_id, error: null };
+        // Fire-and-forget mode execution if kernel is available
+        if (this.kernel) {
+          const req = parsed.request;
+          this.kernel.executeMode(req.mode, req.objective).catch((err) => {
+            console.error(`Mode execution error for ${req.run_id}:`, err);
+          });
+        }
+      } else {
+        response = { status: "error", run_id: "", error: parsed.error ?? "Invalid request" };
+      }
 
       const responseBody = JSON.stringify(response);
       await conn.write(new TextEncoder().encode(responseBody));

@@ -3,22 +3,32 @@ import type { KernelEvent } from "./events.ts";
 import { ConfigLoader } from "./config.ts";
 import { TriggerEngine, DEFAULT_TRIGGERS } from "./triggers.ts";
 import { AdapterRegistry } from "./adapters.ts";
-import type { KernelConfig } from "./types.ts";
-import { Mode } from "./types.ts";
+import type { KernelConfig, RunContext } from "./types.ts";
+import { Mode, RunState } from "./types.ts";
 import { OvermindError } from "./errors.ts";
+import { createRunContext } from "./modes/shared.ts";
+import { executeScout } from "./modes/scout.ts";
+import { executeRelay } from "./modes/relay.ts";
+import { executeSwarm } from "./modes/swarm.ts";
+
+export interface KernelOptions {
+  registry?: AdapterRegistry;
+}
 
 export class Kernel {
   private eventBus: EventBus;
   private configLoader: ConfigLoader;
   private triggerEngine: TriggerEngine;
   private adapterRegistry: AdapterRegistry | null = null;
+  private injectedRegistry: AdapterRegistry | null = null;
   private config: KernelConfig | null = null;
   private running = false;
 
-  constructor() {
+  constructor(options?: KernelOptions) {
     this.eventBus = new EventBus();
     this.configLoader = new ConfigLoader();
     this.triggerEngine = new TriggerEngine();
+    this.injectedRegistry = options?.registry ?? null;
   }
 
   async start(): Promise<void> {
@@ -31,8 +41,10 @@ export class Kernel {
       this.triggerEngine.addTrigger(trigger);
     }
 
-    this.adapterRegistry = new AdapterRegistry(this);
-    await this.adapterRegistry.connect();
+    this.adapterRegistry = this.injectedRegistry ?? new AdapterRegistry(this);
+    if (!this.injectedRegistry) {
+      await this.adapterRegistry.connect();
+    }
 
     this.running = true;
     this.emit(EventType.KernelStarting);
@@ -70,30 +82,40 @@ export class Kernel {
     this.emit(EventType.ObjectiveReceived, { objective });
   }
 
-  async executeMode(mode: Mode, objective: string): Promise<void> {
+  async executeMode(mode: Mode, objective: string): Promise<RunContext> {
+    return await this.executeModeImpl(mode, objective);
+  }
+
+  private async executeModeImpl(mode: Mode, objective: string): Promise<RunContext> {
+    if (!this.adapterRegistry) throw new OvermindError("Kernel not started");
+
+    this.emit(EventType.ModeSwitched, { mode });
+
+    const config = this.getConfig();
+    const modeSettings = config.modes[mode];
+    const maxIterations = modeSettings?.maxFixCycles ?? 3;
+
+    const ctx = createRunContext({
+      run_id: `run-${crypto.randomUUID()}`,
+      mode,
+      objective,
+      workspace: Deno.cwd(),
+      brain_task_id: "",
+      room_id: "",
+      max_iterations: maxIterations,
+    });
+
+    const brain = this.adapterRegistry.getBrain();
+    const neuralLink = this.adapterRegistry.getNeuralLink();
+
     switch (mode) {
       case Mode.Scout:
-        await this.executeScout(objective);
-        break;
+        return await executeScout(ctx, brain, neuralLink);
       case Mode.Relay:
-        await this.executeRelay(objective);
-        break;
+        return await executeRelay(ctx, brain, neuralLink);
       case Mode.Swarm:
-        await this.executeSwarm(objective);
-        break;
+        return await executeSwarm(ctx, brain, neuralLink);
     }
-  }
-
-  private async executeScout(objective: string): Promise<void> {
-    this.emit(EventType.ModeSwitched, { mode: Mode.Scout });
-  }
-
-  private async executeRelay(objective: string): Promise<void> {
-    this.emit(EventType.ModeSwitched, { mode: Mode.Relay });
-  }
-
-  private async executeSwarm(objective: string): Promise<void> {
-    this.emit(EventType.ModeSwitched, { mode: Mode.Swarm });
   }
 
   private emit(type: EventType, payload: Record<string, unknown> = {}): void {

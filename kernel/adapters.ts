@@ -9,10 +9,10 @@ export class AdapterRegistry {
   private kernel: Kernel;
   private currentRoomId: string | null = null;
 
-  constructor(kernel: Kernel) {
+  constructor(kernel: Kernel, options?: { brain?: BrainAdapter; neuralLink?: NeuralLinkAdapter }) {
     this.kernel = kernel;
-    this.brain = new BrainAdapter();
-    this.neuralLink = new NeuralLinkAdapter();
+    this.brain = options?.brain ?? new BrainAdapter();
+    this.neuralLink = options?.neuralLink ?? new NeuralLinkAdapter();
   }
 
   async connect(): Promise<void> {
