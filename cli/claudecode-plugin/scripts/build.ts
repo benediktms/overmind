@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 export interface ValidationResult {
   valid: boolean;
   errors: string[];
+  warnings: string[];
 }
 
 interface PluginManifest {
@@ -14,6 +15,14 @@ interface PluginManifest {
   description?: unknown;
   skills?: unknown;
   mcpServers?: unknown;
+}
+
+interface HookCommandHook {
+  command?: string;
+}
+
+interface HooksFile {
+  hooks?: Record<string, Array<{ hooks?: HookCommandHook[] }>>;
 }
 
 const LEGACY_PLUGIN_ROOT = "OVERMIND_" + "PLUGIN_ROOT";
@@ -33,6 +42,17 @@ async function fileExists(path: string): Promise<boolean> {
     return true;
   } catch {
     return false;
+  }
+}
+
+async function ensureDir(path: string): Promise<void> {
+  await Deno.mkdir(path, { recursive: true });
+}
+
+async function removePath(path: string): Promise<void> {
+  try {
+    await Deno.remove(path, { recursive: true });
+  } catch {
   }
 }
 
@@ -101,24 +121,39 @@ function parseSkillHeader(content: string): {
 }
 
 async function validateHookScriptPaths(pluginRoot: string, errors: string[]): Promise<void> {
-  const hooksPath = join(pluginRoot, "hooks", "hooks.json");
-  let hooksJson: unknown;
+  let hooksJson: HooksFile;
 
   try {
-    hooksJson = await readJson(hooksPath);
+    hooksJson = await readHooksJson(pluginRoot);
   } catch (error) {
     errors.push(`hooks.json is missing or invalid JSON: ${String(error)}`);
     return;
   }
 
+  for (const scriptName of getHookScriptNames(hooksJson)) {
+    const scriptPath = join(pluginRoot, "scripts", scriptName);
+    if (!(await fileExists(scriptPath))) {
+      errors.push(`Hook command references missing script: scripts/${scriptName}`);
+    }
+  }
+}
+
+async function readHooksJson(pluginRoot: string): Promise<HooksFile> {
+  const hooksPath = join(pluginRoot, "hooks", "hooks.json");
+  const raw = await readJson(hooksPath);
+  if (!isRecord(raw)) throw new Error("hooks.json must be a JSON object");
+  return raw as HooksFile;
+}
+
+function getHookScriptNames(hooksJson: HooksFile): string[] {
   const commands: string[] = [];
-  if (isRecord(hooksJson) && isRecord(hooksJson.hooks)) {
+  if (hooksJson.hooks) {
     for (const entries of Object.values(hooksJson.hooks)) {
       if (!Array.isArray(entries)) continue;
       for (const entry of entries) {
-        if (!isRecord(entry) || !Array.isArray(entry.hooks)) continue;
+        if (!entry?.hooks || !Array.isArray(entry.hooks)) continue;
         for (const hook of entry.hooks) {
-          if (isRecord(hook) && typeof hook.command === "string") {
+          if (typeof hook?.command === "string") {
             commands.push(hook.command);
           }
         }
@@ -127,15 +162,14 @@ async function validateHookScriptPaths(pluginRoot: string, errors: string[]): Pr
   }
 
   const scriptRegex = /\$\{CLAUDE_PLUGIN_ROOT\}\/scripts\/([A-Za-z0-9._-]+\.ts)/g;
+  const names = new Set<string>();
   for (const command of commands) {
     for (const match of command.matchAll(scriptRegex)) {
-      const scriptName = match[1];
-      const scriptPath = join(pluginRoot, "scripts", scriptName);
-      if (!(await fileExists(scriptPath))) {
-        errors.push(`Hook command references missing script: scripts/${scriptName}`);
-      }
+      names.add(match[1]);
     }
   }
+
+  return [...names].sort();
 }
 
 async function validatePluginManifest(pluginRoot: string, errors: string[]): Promise<PluginManifest | null> {
@@ -286,6 +320,65 @@ async function walkFiles(dir: string): Promise<string[]> {
   return files;
 }
 
+function extractRelativeImports(content: string): string[] {
+  const imports: string[] = [];
+  const patterns = [
+    /import\s+(?:type\s+)?(?:[^"'`]+?\s+from\s+)?["'`]([^"'`]+)["'`]/g,
+    /export\s+[^"'`]*?from\s+["'`]([^"'`]+)["'`]/g,
+    /import\(["'`]([^"'`]+)["'`]\)/g,
+  ];
+
+  for (const pattern of patterns) {
+    for (const match of content.matchAll(pattern)) {
+      const specifier = match[1];
+      if (specifier.startsWith("./") || specifier.startsWith("../")) {
+        imports.push(specifier);
+      }
+    }
+  }
+
+  return imports;
+}
+
+async function validateRootEscapingImports(pluginRoot: string, warnings: string[]): Promise<void> {
+  const scriptsDir = join(pluginRoot, "scripts");
+  let files: string[] = [];
+  try {
+    files = await walkFiles(scriptsDir);
+  } catch {
+    return;
+  }
+
+  const seenWarnings = new Set<string>();
+  for (const filePath of files) {
+    if (!filePath.endsWith(".ts") || filePath.endsWith("_test.ts") || filePath.endsWith(".test.ts")) {
+      continue;
+    }
+
+    let content = "";
+    try {
+      content = await Deno.readTextFile(filePath);
+    } catch {
+      continue;
+    }
+
+    for (const specifier of extractRelativeImports(content)) {
+      const resolved = normalize(resolve(dirname(filePath), specifier));
+      const insidePluginRoot = resolved === pluginRoot || resolved.startsWith(`${pluginRoot}/`);
+      if (!insidePluginRoot) {
+        const relativePath = filePath.startsWith(`${pluginRoot}/`)
+          ? filePath.slice(pluginRoot.length + 1)
+          : filePath;
+        const warning = `Root-escaping import detected in ${relativePath}: ${specifier}`;
+        if (!seenWarnings.has(warning)) {
+          seenWarnings.add(warning);
+          warnings.push(warning);
+        }
+      }
+    }
+  }
+}
+
 async function validateNoLegacyPluginRoot(pluginRoot: string, errors: string[]): Promise<void> {
   const files = await walkFiles(pluginRoot);
   for (const filePath of files) {
@@ -340,8 +433,110 @@ async function validatePackageJson(pluginRoot: string, errors: string[]): Promis
   }
 }
 
+async function bundleScript(sourcePath: string, outputPath: string): Promise<void> {
+  const esbuild = await import("esbuild");
+  const denoJsonPath = resolve(dirname(dirname(dirname(dirname(fileURLToPath(import.meta.url))))), "deno.json");
+  let importMap: Record<string, string> = {};
+  try {
+    const denoConfig = JSON.parse(await Deno.readTextFile(denoJsonPath));
+    importMap = denoConfig.imports ?? {};
+  } catch {
+  }
+
+  const denoResolverPlugin = {
+    name: "deno-resolver",
+    setup(build: { onResolve: (opts: { filter: RegExp }, cb: (args: { path: string }) => { path: string; external: true } | undefined) => void }) {
+      build.onResolve({ filter: /.*/ }, (args: { path: string }) => {
+        const mapped = importMap[args.path];
+        if (mapped) {
+          if (mapped.startsWith("jsr:") || mapped.startsWith("npm:")) {
+            return { path: args.path, external: true };
+          }
+        }
+        if (args.path.startsWith("jsr:") || args.path.startsWith("npm:") || args.path.startsWith("node:")) {
+          return { path: args.path, external: true };
+        }
+        return undefined;
+      });
+    },
+  };
+
+  try {
+    await esbuild.build({
+      entryPoints: [sourcePath],
+      bundle: true,
+      outfile: outputPath,
+      format: "esm",
+      platform: "neutral",
+      target: "esnext",
+      plugins: [denoResolverPlugin],
+    });
+  } finally {
+    esbuild.stop();
+  }
+}
+
+function rewriteHooksForDist(hooksJson: HooksFile): HooksFile {
+  const cloned = structuredClone(hooksJson);
+  if (!cloned.hooks) return cloned;
+
+  for (const entries of Object.values(cloned.hooks)) {
+    if (!Array.isArray(entries)) continue;
+    for (const entry of entries) {
+      if (!entry?.hooks || !Array.isArray(entry.hooks)) continue;
+      for (const hook of entry.hooks) {
+        if (typeof hook?.command === "string") {
+          hook.command = hook.command.replace(/\.ts(\"?)(\s|$)/g, ".js$1$2");
+        }
+      }
+    }
+  }
+
+  return cloned;
+}
+
+async function copyDirectoryRecursive(sourceDir: string, targetDir: string): Promise<void> {
+  await ensureDir(targetDir);
+  for await (const entry of Deno.readDir(sourceDir)) {
+    const sourcePath = join(sourceDir, entry.name);
+    const targetPath = join(targetDir, entry.name);
+    if (entry.isDirectory) {
+      await copyDirectoryRecursive(sourcePath, targetPath);
+    } else if (entry.isFile) {
+      await Deno.copyFile(sourcePath, targetPath);
+    }
+  }
+}
+
+export async function bundlePlugin(pluginRoot: string, distDir: string): Promise<void> {
+  await removePath(distDir);
+  await ensureDir(distDir);
+  await ensureDir(join(distDir, "scripts"));
+  await ensureDir(join(distDir, "hooks"));
+
+  const hooksJson = await readHooksJson(pluginRoot);
+  for (const scriptName of getHookScriptNames(hooksJson)) {
+    await bundleScript(
+      join(pluginRoot, "scripts", scriptName),
+      join(distDir, "scripts", scriptName.replace(/\.ts$/, ".js")),
+    );
+  }
+
+  const distHooks = rewriteHooksForDist(hooksJson);
+  await Deno.writeTextFile(join(distDir, "hooks", "hooks.json"), `${JSON.stringify(distHooks, null, 2)}\n`);
+
+  await copyDirectoryRecursive(join(pluginRoot, "skills"), join(distDir, "skills"));
+  await copyDirectoryRecursive(join(pluginRoot, "bridge"), join(distDir, "bridge"));
+  await copyDirectoryRecursive(join(pluginRoot, ".claude-plugin"), join(distDir, ".claude-plugin"));
+
+  for (const fileName of ["mcp-bridge.json", "package.json"]) {
+    await Deno.copyFile(join(pluginRoot, fileName), join(distDir, fileName));
+  }
+}
+
 export async function validatePluginLayout(pluginRoot: string): Promise<ValidationResult> {
   const errors: string[] = [];
+  const warnings: string[] = [];
 
   await validateHookScriptPaths(pluginRoot, errors);
   const pluginJson = await validatePluginManifest(pluginRoot, errors);
@@ -349,18 +544,24 @@ export async function validatePluginLayout(pluginRoot: string): Promise<Validati
   await validateSkillFrontmatter(pluginRoot, pluginJson, errors);
   await validateNoLegacyPluginRoot(pluginRoot, errors);
   await validatePackageJson(pluginRoot, errors);
+  await validateRootEscapingImports(pluginRoot, warnings);
 
   return {
     valid: errors.length === 0,
     errors,
+    warnings,
   };
 }
 
 async function main(): Promise<void> {
   const scriptDir = dirname(fileURLToPath(import.meta.url));
   const pluginRoot = Deno.args[0] ? resolve(Deno.args[0]) : resolve(scriptDir, "..");
+  const distDir = join(pluginRoot, "dist");
 
   const result = await validatePluginLayout(pluginRoot);
+  for (const warning of result.warnings) {
+    console.warn(`Warning: ${warning}`);
+  }
   if (!result.valid) {
     console.error("Plugin layout validation failed:");
     for (const error of result.errors) {
@@ -368,6 +569,8 @@ async function main(): Promise<void> {
     }
     Deno.exit(1);
   }
+
+  await bundlePlugin(pluginRoot, distDir);
 
   console.log("Plugin layout validation passed");
 }

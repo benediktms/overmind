@@ -1,5 +1,5 @@
 import { assertEquals } from "@std/assert";
-import { validatePluginLayout } from "./build.ts";
+import { bundlePlugin, validatePluginLayout } from "./build.ts";
 
 interface PluginJson {
   name: string;
@@ -13,11 +13,23 @@ async function writeJson(path: string, value: unknown): Promise<void> {
   await Deno.writeTextFile(path, JSON.stringify(value, null, 2));
 }
 
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await Deno.stat(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function createValidLayout(root: string): Promise<void> {
   await Deno.mkdir(`${root}/hooks`, { recursive: true });
   await Deno.mkdir(`${root}/scripts`, { recursive: true });
   await Deno.mkdir(`${root}/skills`, { recursive: true });
+  await Deno.mkdir(`${root}/bridge`, { recursive: true });
   await Deno.mkdir(`${root}/.claude-plugin`, { recursive: true });
+
+  await Deno.writeTextFile(`${root}/bridge/mcp-bridge.cjs`, "module.exports = {};\n");
 
   await writeJson(`${root}/hooks/hooks.json`, {
     hooks: {
@@ -35,6 +47,14 @@ async function createValidLayout(root: string): Promise<void> {
   await Deno.writeTextFile(
     `${root}/scripts/session-start.ts`,
     "#!/usr/bin/env -S deno run -A --quiet\n",
+  );
+  await Deno.writeTextFile(
+    `${root}/scripts/lib.ts`,
+    "export const answer = 42;\n",
+  );
+  await Deno.writeTextFile(
+    `${root}/scripts/keyword-detector.ts`,
+    "import { answer } from './lib.ts';\nconsole.log(answer);\n",
   );
 
   const pluginJson: PluginJson = {
@@ -83,6 +103,27 @@ Deno.test("validatePluginLayout passes for valid plugin layout", async () => {
     const result = await validatePluginLayout(root);
     assertEquals(result.valid, true);
     assertEquals(result.errors.length, 0);
+    assertEquals(result.warnings.length, 0);
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+});
+
+Deno.test("validatePluginLayout warns when a script import escapes the plugin root", async () => {
+  const root = await Deno.makeTempDir();
+  try {
+    await createValidLayout(root);
+    await Deno.writeTextFile(
+      `${root}/scripts/root-escape.ts`,
+      "import { something } from '../../../kernel/daemon.ts';\n",
+    );
+
+    const result = await validatePluginLayout(root);
+    assertEquals(result.valid, true);
+    assertEquals(
+      result.warnings.some((warning: string) => warning.includes("root-escape.ts")),
+      true,
+    );
   } finally {
     await Deno.remove(root, { recursive: true });
   }
@@ -212,6 +253,45 @@ Deno.test("validatePluginLayout fails when package scripts have stale build refe
       result.errors.some((e: string) => e.includes("stale build script")),
       true,
     );
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+});
+
+Deno.test("bundlePlugin creates complete dist layout with js hook paths", async () => {
+  const root = await Deno.makeTempDir();
+  const distDir = `${root}/dist`;
+  try {
+    await createValidLayout(root);
+    await bundlePlugin(root, distDir);
+
+    assertEquals(await pathExists(`${distDir}/scripts/session-start.js`), true);
+    assertEquals(await pathExists(`${distDir}/hooks/hooks.json`), true);
+    assertEquals(await pathExists(`${distDir}/skills/valid.md`), true);
+    assertEquals(await pathExists(`${distDir}/bridge/mcp-bridge.cjs`), true);
+    assertEquals(await pathExists(`${distDir}/.claude-plugin/plugin.json`), true);
+
+    const hooks = await Deno.readTextFile(`${distDir}/hooks/hooks.json`);
+    assertEquals(hooks.includes("session-start.js"), true);
+    assertEquals(hooks.includes(".ts\""), false);
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+});
+
+Deno.test("bundlePlugin copies all skill files into dist", async () => {
+  const root = await Deno.makeTempDir();
+  const distDir = `${root}/dist`;
+  try {
+    await createValidLayout(root);
+    await Deno.writeTextFile(`${root}/skills/another.md`, "---\nname: another\ndescription: Another\ntriggers:\n  - x\n---\n");
+    await bundlePlugin(root, distDir);
+
+    let count = 0;
+    for await (const entry of Deno.readDir(`${distDir}/skills`)) {
+      if (entry.isFile && entry.name.endsWith(".md")) count++;
+    }
+    assertEquals(count, 2);
   } finally {
     await Deno.remove(root, { recursive: true });
   }

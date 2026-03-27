@@ -1,0 +1,21 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "overmind",
+  "description": "Multi-agent orchestration with neural_link coordination and brain memory",
+  "owner": {
+    "name": "Overmind contributors"
+  },
+  "plugins": [
+    {
+      "name": "overmind",
+      "description": "Multi-agent orchestration framework for Claude Code with scout/relay/swarm modes, 14 specialized agents, and brain-backed memory.",
+      "version": "0.1.0",
+      "author": { "name": "Overmind contributors" },
+      "source": "./cli/claudecode-plugin",
+      "category": "productivity",
+      "homepage": "https://github.com/benediktms/overmind",
+      "tags": ["multi-agent", "orchestration", "neural-link", "brain", "swarm"]
+    }
+  ],
+  "version": "0.1.0"
+}
