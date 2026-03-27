@@ -6,9 +6,9 @@
 
 import { readStdin } from "./lib/stdin.ts";
 
-const OVERMIND_PLUGIN_ROOT = Deno.env.get("OVERMIND_PLUGIN_ROOT") ?? "";
-const SKILLS_DIR = OVERMIND_PLUGIN_ROOT
-  ? `${OVERMIND_PLUGIN_ROOT}/skills`
+const CLAUDE_PLUGIN_ROOT = Deno.env.get("CLAUDE_PLUGIN_ROOT") ?? "";
+const SKILLS_DIR = CLAUDE_PLUGIN_ROOT
+  ? `${CLAUDE_PLUGIN_ROOT}/skills`
   : `${Deno.cwd()}/skills`;
 
 const MAX_SKILLS_PER_SESSION = 5;

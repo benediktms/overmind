@@ -7,12 +7,12 @@
         "hooks": [
           {
             "type": "command",
-            "command": "deno run -A --quiet \"${OVERMIND_PLUGIN_ROOT}/scripts/keyword-detector.ts\"",
+            "command": "deno run -A --quiet \"${CLAUDE_PLUGIN_ROOT}/scripts/keyword-detector.ts\"",
             "timeout": 5
           },
           {
             "type": "command",
-            "command": "deno run -A --quiet \"${OVERMIND_PLUGIN_ROOT}/scripts/skill-injector.ts\"",
+            "command": "deno run -A --quiet \"${CLAUDE_PLUGIN_ROOT}/scripts/skill-injector.ts\"",
             "timeout": 3
           }
         ]
@@ -24,7 +24,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "deno run -A --quiet \"${OVERMIND_PLUGIN_ROOT}/scripts/session-start.ts\"",
+            "command": "deno run -A --quiet \"${CLAUDE_PLUGIN_ROOT}/scripts/session-start.ts\"",
             "timeout": 5
           }
         ]
@@ -34,7 +34,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "deno run -A --quiet \"${OVERMIND_PLUGIN_ROOT}/scripts/setup-init.ts\"",
+            "command": "deno run -A --quiet \"${CLAUDE_PLUGIN_ROOT}/scripts/setup-init.ts\"",
             "timeout": 30
           }
         ]
@@ -46,7 +46,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "deno run -A --quiet \"${OVERMIND_PLUGIN_ROOT}/scripts/pre-tool-enforcer.ts\"",
+            "command": "deno run -A --quiet \"${CLAUDE_PLUGIN_ROOT}/scripts/pre-tool-enforcer.ts\"",
             "timeout": 3
           }
         ]
@@ -56,7 +56,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "deno run -A --quiet \"${OVERMIND_PLUGIN_ROOT}/scripts/context-safety.ts\"",
+            "command": "deno run -A --quiet \"${CLAUDE_PLUGIN_ROOT}/scripts/context-safety.ts\"",
             "timeout": 3
           }
         ]
@@ -68,7 +68,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "deno run -A --quiet \"${OVERMIND_PLUGIN_ROOT}/scripts/permission-handler.ts\"",
+            "command": "deno run -A --quiet \"${CLAUDE_PLUGIN_ROOT}/scripts/permission-handler.ts\"",
             "timeout": 5
           }
         ]
@@ -80,7 +80,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "deno run -A --quiet \"${OVERMIND_PLUGIN_ROOT}/scripts/post-tool-verifier.ts\"",
+            "command": "deno run -A --quiet \"${CLAUDE_PLUGIN_ROOT}/scripts/post-tool-verifier.ts\"",
             "timeout": 3
           }
         ]
@@ -92,7 +92,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "deno run -A --quiet \"${OVERMIND_PLUGIN_ROOT}/scripts/post-tool-use-failure.ts\"",
+            "command": "deno run -A --quiet \"${CLAUDE_PLUGIN_ROOT}/scripts/post-tool-use-failure.ts\"",
             "timeout": 3
           }
         ]
@@ -104,7 +104,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "deno run -A --quiet \"${OVERMIND_PLUGIN_ROOT}/scripts/subagent-coordinator.ts\" start",
+            "command": "deno run -A --quiet \"${CLAUDE_PLUGIN_ROOT}/scripts/subagent-coordinator.ts\" start",
             "timeout": 3
           }
         ]
@@ -116,12 +116,12 @@
         "hooks": [
           {
             "type": "command",
-            "command": "deno run -A --quiet \"${OVERMIND_PLUGIN_ROOT}/scripts/subagent-coordinator.ts\" stop",
+            "command": "deno run -A --quiet \"${CLAUDE_PLUGIN_ROOT}/scripts/subagent-coordinator.ts\" stop",
             "timeout": 5
           },
           {
             "type": "command",
-            "command": "deno run -A --quiet \"${OVERMIND_PLUGIN_ROOT}/scripts/verify-deliverables.ts\"",
+            "command": "deno run -A --quiet \"${CLAUDE_PLUGIN_ROOT}/scripts/verify-deliverables.ts\"",
             "timeout": 5
           }
         ]
@@ -133,7 +133,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "deno run -A --quiet \"${OVERMIND_PLUGIN_ROOT}/scripts/pre-compact.ts\"",
+            "command": "deno run -A --quiet \"${CLAUDE_PLUGIN_ROOT}/scripts/pre-compact.ts\"",
             "timeout": 10
           }
         ]
@@ -145,12 +145,12 @@
         "hooks": [
           {
             "type": "command",
-            "command": "deno run -A --quiet \"${OVERMIND_PLUGIN_ROOT}/scripts/context-guard-stop.ts\"",
+            "command": "deno run -A --quiet \"${CLAUDE_PLUGIN_ROOT}/scripts/context-guard-stop.ts\"",
             "timeout": 5
           },
           {
             "type": "command",
-            "command": "deno run -A --quiet \"${OVERMIND_PLUGIN_ROOT}/scripts/code-simplifier.ts\"",
+            "command": "deno run -A --quiet \"${CLAUDE_PLUGIN_ROOT}/scripts/code-simplifier.ts\"",
             "timeout": 5
           }
         ]
@@ -162,7 +162,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "deno run -A --quiet \"${OVERMIND_PLUGIN_ROOT}/scripts/session-end.ts\"",
+            "command": "deno run -A --quiet \"${CLAUDE_PLUGIN_ROOT}/scripts/session-end.ts\"",
             "timeout": 10
           }
         ]

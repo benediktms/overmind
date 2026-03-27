@@ -6,7 +6,7 @@
 
 import { readStdin } from "./lib/stdin.ts";
 
-const OVERMIND_PLUGIN_ROOT = Deno.env.get("OVERMIND_PLUGIN_ROOT") ?? "";
+const CLAUDE_PLUGIN_ROOT = Deno.env.get("CLAUDE_PLUGIN_ROOT") ?? "";
 const OVERMIND_KERNEL_HTTP_URL = Deno.env.get("OVERMIND_KERNEL_HTTP_URL") ?? "http://localhost:8080";
 
 interface HookData {
