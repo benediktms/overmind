@@ -10,6 +10,9 @@
  */
 
 import { readStdin } from "./lib/stdin.ts";
+import { ensureDaemonRunning, sendToSocket } from "../../../kernel/daemon.ts";
+import { Mode } from "../../../kernel/types.ts";
+import type { SocketRequest } from "../../../kernel/types.ts";
 
 export interface HookData {
   prompt?: string;
@@ -86,6 +89,10 @@ export function detectKeywords(prompt: string): { mode: string; args: string }[]
   return matches;
 }
 
+function isValidMode(mode: string): mode is "scout" | "relay" | "swarm" {
+  return mode === "scout" || mode === "relay" || mode === "swarm";
+}
+
 function createHookOutput(additionalContext: string): string {
   return JSON.stringify({
     continue: true,
@@ -152,9 +159,31 @@ Recording session completion. Summarize what was accomplished and close relevant
     }
   });
 
+  const modeMatch = matches.find((m) => m.mode !== "done" && isValidMode(m.mode));
+  let daemonStatus = "";
+  if (modeMatch) {
+    try {
+      await ensureDaemonRunning();
+      const request: SocketRequest = {
+        type: "mode_request",
+        run_id: `run-${crypto.randomUUID()}`,
+        mode: modeMatch.mode as Mode,
+        objective: prompt,
+        workspace: data.cwd ?? data.directory ?? Deno.cwd(),
+      };
+      const response = await sendToSocket(request);
+      daemonStatus = response.status === "accepted"
+        ? `\nDaemon accepted mode request (run_id: ${response.run_id})`
+        : `\nDaemon error: ${response.error}`;
+    } catch (err) {
+      daemonStatus = `\nDaemon dispatch failed: ${err instanceof Error ? err.message : String(err)}`;
+    }
+  }
+
   const additionalContext =
     `[OVERMIND KEYWORD DETECTED: ${matches.map((m) => m.mode.toUpperCase()).join(", ")}]\n\n` +
     modeBlocks.join("\n\n---\n\n") +
+    daemonStatus +
     `\n\n---\nUser request: ${prompt}`;
 
   console.log(createHookOutput(additionalContext));
