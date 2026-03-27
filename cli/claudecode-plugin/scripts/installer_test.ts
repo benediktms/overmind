@@ -188,3 +188,103 @@ Deno.test("uninstallPlugin succeeds when plugin dir and settings are already abs
     await Deno.remove(root, { recursive: true });
   }
 });
+
+Deno.test("installPlugin marketplace mode writes marketplace settings without creating plugin dir", async () => {
+  const root = await Deno.makeTempDir();
+  const sourceRoot = `${root}/source-plugin`;
+  const pluginDir = `${root}/.claude/plugins/overmind`;
+  const settingsPath = `${root}/.claude/settings.json`;
+
+  try {
+    await createSourcePluginRoot(sourceRoot);
+    await writeJson(settingsPath, { allowedTools: ["bash"] });
+
+    await installPlugin({ mode: "marketplace", sourcePluginRoot: sourceRoot, pluginDir, settingsPath });
+
+    assertEquals(await pathExists(pluginDir), false);
+
+    const settings = await readJson(settingsPath);
+    const enabledPlugins = settings.enabledPlugins as Record<string, unknown>;
+    assertEquals(enabledPlugins["overmind@overmind"], true);
+    assertEquals(enabledPlugins["overmind@local"], undefined);
+    assertEquals(settings.allowedTools, ["bash"]);
+
+    const marketplaces = settings.extraKnownMarketplaces as Record<string, unknown>;
+    const overmindSource = marketplaces["overmind"] as Record<string, unknown>;
+    const source = overmindSource.source as Record<string, unknown>;
+    assertEquals(source.source, "github");
+    assertEquals(source.repo, "benediktms/overmind");
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+});
+
+Deno.test("installPlugin marketplace mode is idempotent", async () => {
+  const root = await Deno.makeTempDir();
+  const sourceRoot = `${root}/source-plugin`;
+  const pluginDir = `${root}/.claude/plugins/overmind`;
+  const settingsPath = `${root}/.claude/settings.json`;
+
+  try {
+    await createSourcePluginRoot(sourceRoot);
+    await writeJson(settingsPath, {});
+
+    await installPlugin({ mode: "marketplace", sourcePluginRoot: sourceRoot, pluginDir, settingsPath });
+    await installPlugin({ mode: "marketplace", sourcePluginRoot: sourceRoot, pluginDir, settingsPath });
+
+    const settings = await readJson(settingsPath);
+    const enabledPlugins = settings.enabledPlugins as Record<string, unknown>;
+    assertEquals(Object.keys(enabledPlugins).filter((k) => k.startsWith("overmind")).length, 1);
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+});
+
+Deno.test("installPlugin marketplace mode removes @local entry (mutual exclusivity)", async () => {
+  const root = await Deno.makeTempDir();
+  const sourceRoot = `${root}/source-plugin`;
+  const pluginDir = `${root}/.claude/plugins/overmind`;
+  const settingsPath = `${root}/.claude/settings.json`;
+
+  try {
+    await createSourcePluginRoot(sourceRoot);
+    await writeJson(settingsPath, { enabledPlugins: { "overmind@local": true, "other@plugin": true } });
+
+    await installPlugin({ mode: "marketplace", sourcePluginRoot: sourceRoot, pluginDir, settingsPath });
+
+    const settings = await readJson(settingsPath);
+    const enabledPlugins = settings.enabledPlugins as Record<string, unknown>;
+    assertEquals(enabledPlugins["overmind@local"], undefined);
+    assertEquals(enabledPlugins["overmind@overmind"], true);
+    assertEquals(enabledPlugins["other@plugin"], true);
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+});
+
+Deno.test("installPlugin local mode removes @overmind entry and marketplace source (mutual exclusivity)", async () => {
+  const root = await Deno.makeTempDir();
+  const sourceRoot = `${root}/source-plugin`;
+  const pluginDir = `${root}/.claude/plugins/overmind`;
+  const settingsPath = `${root}/.claude/settings.json`;
+
+  try {
+    await createSourcePluginRoot(sourceRoot);
+    await writeJson(settingsPath, {
+      enabledPlugins: { "overmind@overmind": true },
+      extraKnownMarketplaces: { overmind: { source: { source: "github", repo: "benediktms/overmind" } } },
+    });
+
+    await installPlugin({ mode: "local", sourcePluginRoot: sourceRoot, pluginDir, settingsPath });
+
+    const settings = await readJson(settingsPath);
+    const enabledPlugins = settings.enabledPlugins as Record<string, unknown>;
+    assertEquals(enabledPlugins["overmind@overmind"], undefined);
+    assertEquals(enabledPlugins["overmind@local"], true);
+
+    const marketplaces = settings.extraKnownMarketplaces as Record<string, unknown>;
+    assertEquals(marketplaces["overmind"], undefined);
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+});

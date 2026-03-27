@@ -3,9 +3,14 @@
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const PLUGIN_ID = "overmind@local";
+const LOCAL_PLUGIN_ID = "overmind@local";
+const MARKETPLACE_PLUGIN_ID = "overmind@overmind";
+const MARKETPLACE_SOURCE = { source: "github" as const, repo: "benediktms/overmind" };
+
+export type InstallMode = "local" | "marketplace";
 
 export interface InstallerOptions {
+  mode?: InstallMode;
   pluginDir?: string;
   settingsPath?: string;
   sourcePluginRoot?: string;
@@ -115,27 +120,53 @@ async function writeSettings(settingsPath: string, settings: Record<string, unkn
   await Deno.writeTextFile(settingsPath, `${JSON.stringify(settings, null, 2)}\n`);
 }
 
-function withEnabledPlugin(settings: Record<string, unknown>): Record<string, unknown> {
+function withLocalPlugin(settings: Record<string, unknown>): Record<string, unknown> {
   const next = { ...settings };
-  const enabledPlugins = isRecord(next.enabledPlugins)
-    ? { ...next.enabledPlugins }
-    : {};
-  enabledPlugins[PLUGIN_ID] = true;
+  const enabledPlugins = isRecord(next.enabledPlugins) ? { ...next.enabledPlugins } : {};
+  enabledPlugins[LOCAL_PLUGIN_ID] = true;
+  delete enabledPlugins[MARKETPLACE_PLUGIN_ID];
   next.enabledPlugins = enabledPlugins;
+
+  if (isRecord(next.extraKnownMarketplaces)) {
+    const marketplaces = { ...next.extraKnownMarketplaces };
+    delete marketplaces["overmind"];
+    next.extraKnownMarketplaces = marketplaces;
+  }
+
   return next;
 }
 
-function withoutEnabledPlugin(settings: Record<string, unknown>): Record<string, unknown> {
-  if (!isRecord(settings.enabledPlugins)) {
-    return settings;
+function withMarketplacePlugin(settings: Record<string, unknown>): Record<string, unknown> {
+  const next = { ...settings };
+  const enabledPlugins = isRecord(next.enabledPlugins) ? { ...next.enabledPlugins } : {};
+  enabledPlugins[MARKETPLACE_PLUGIN_ID] = true;
+  delete enabledPlugins[LOCAL_PLUGIN_ID];
+  next.enabledPlugins = enabledPlugins;
+
+  const marketplaces = isRecord(next.extraKnownMarketplaces) ? { ...next.extraKnownMarketplaces } : {};
+  marketplaces["overmind"] = { source: MARKETPLACE_SOURCE };
+  next.extraKnownMarketplaces = marketplaces;
+
+  return next;
+}
+
+function withoutAllOvemindPlugins(settings: Record<string, unknown>): Record<string, unknown> {
+  const next = { ...settings };
+
+  if (isRecord(next.enabledPlugins)) {
+    const enabledPlugins = { ...next.enabledPlugins };
+    delete enabledPlugins[LOCAL_PLUGIN_ID];
+    delete enabledPlugins[MARKETPLACE_PLUGIN_ID];
+    next.enabledPlugins = enabledPlugins;
   }
 
-  const enabledPlugins = { ...settings.enabledPlugins };
-  delete enabledPlugins[PLUGIN_ID];
-  return {
-    ...settings,
-    enabledPlugins,
-  };
+  if (isRecord(next.extraKnownMarketplaces)) {
+    const marketplaces = { ...next.extraKnownMarketplaces };
+    delete marketplaces["overmind"];
+    next.extraKnownMarketplaces = marketplaces;
+  }
+
+  return next;
 }
 
 async function ensurePluginInstalled(
@@ -166,12 +197,17 @@ async function ensurePluginInstalled(
 }
 
 export async function installPlugin(opts: InstallerOptions = {}): Promise<void> {
+  const mode = opts.mode ?? "local";
   const { pluginDir, settingsPath, sourcePluginRoot, symlink } = resolvePaths(opts);
 
-  await ensurePluginInstalled(sourcePluginRoot, pluginDir, symlink);
+  if (mode === "local") {
+    await ensurePluginInstalled(sourcePluginRoot, pluginDir, symlink);
+  }
 
   const settings = await readSettings(settingsPath);
-  const patched = withEnabledPlugin(settings);
+  const patched = mode === "marketplace"
+    ? withMarketplacePlugin(settings)
+    : withLocalPlugin(settings);
   await writeSettings(settingsPath, patched);
 }
 
@@ -185,7 +221,7 @@ export async function uninstallPlugin(opts: InstallerOptions = {}): Promise<void
   }
 
   const settings = await readSettings(settingsPath);
-  const patched = withoutEnabledPlugin(settings);
+  const patched = withoutAllOvemindPlugins(settings);
   await writeSettings(settingsPath, patched);
 }
 
@@ -198,7 +234,7 @@ function parseBoolean(value: string): boolean {
 function parseCliArgs(args: string[]): { command: "install" | "uninstall"; options: InstallerOptions } {
   const [command, ...rest] = args;
   if (command !== "install" && command !== "uninstall") {
-    throw new Error("Usage: installer.ts <install|uninstall> [--plugin-dir <path>] [--settings-path <path>] [--source-plugin-root <path>] [--symlink <true|false>]");
+    throw new Error("Usage: installer.ts <install|uninstall> [--mode local|marketplace] [--plugin-dir <path>] [--settings-path <path>] [--source-plugin-root <path>] [--symlink <true|false>]");
   }
 
   const options: InstallerOptions = {};
@@ -206,6 +242,15 @@ function parseCliArgs(args: string[]): { command: "install" | "uninstall"; optio
   for (let i = 0; i < rest.length; i++) {
     const arg = rest[i];
     const value = rest[i + 1];
+
+    if (arg === "--mode") {
+      if (value !== "local" && value !== "marketplace") {
+        throw new Error("--mode must be 'local' or 'marketplace'");
+      }
+      options.mode = value;
+      i++;
+      continue;
+    }
 
     if (arg === "--plugin-dir") {
       if (!value) throw new Error("Missing value for --plugin-dir");
