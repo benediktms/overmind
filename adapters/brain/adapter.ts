@@ -109,6 +109,54 @@ export class BrainAdapter {
     }
   }
 
+  async taskComment(taskId: string, comment: string): Promise<boolean> {
+    if (!this.connected || !this.client) return false;
+    try {
+      await this.client.callTool("tasks_apply_event", {
+        task_id: taskId,
+        event_type: "comment_added",
+        payload: { body: comment },
+      });
+      return true;
+    } catch (err) {
+      console.error("Brain task_comment failed:", err);
+      return false;
+    }
+  }
+
+  async taskAddExternalId(taskId: string, externalId: string): Promise<boolean> {
+    if (!this.connected || !this.client) return false;
+    try {
+      await this.client.callTool("tasks_apply_event", {
+        task_id: taskId,
+        event_type: "external_id_added",
+        payload: {
+          source: this.config?.brainName ?? "overmind",
+          external_id: externalId,
+        },
+      });
+      return true;
+    } catch (err) {
+      console.error("Brain task_add_external_id failed:", err);
+      return false;
+    }
+  }
+
+  async taskSetPriority(taskId: string, priority: number): Promise<boolean> {
+    if (!this.connected || !this.client) return false;
+    try {
+      await this.client.callTool("tasks_apply_event", {
+        task_id: taskId,
+        event_type: "task_updated",
+        payload: { priority },
+      });
+      return true;
+    } catch (err) {
+      console.error("Brain task_set_priority failed:", err);
+      return false;
+    }
+  }
+
   async memoryEpisode(params: MemoryEpisodeParams): Promise<boolean> {
     if (!this.connected || !this.client) return false;
     try {

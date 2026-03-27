@@ -4,6 +4,15 @@ export enum Mode {
   Swarm = "swarm",
 }
 
+export enum RunState {
+  Pending = "pending",
+  Running = "running",
+  Verifying = "verifying",
+  Fixing = "fixing",
+  Completed = "completed",
+  Failed = "failed",
+}
+
 export enum EventType {
   KernelStarting = "kernel_starting",
   KernelReady = "kernel_ready",
@@ -30,6 +39,50 @@ export interface KernelConfig {
   brain: BrainConfig;
   neuralLink: NeuralLinkConfig;
   skills: SkillsConfig;
+  modes: ModesConfig;
+}
+
+export interface SocketRequest {
+  type: "mode_request";
+  run_id: string;
+  mode: Mode;
+  objective: string;
+  workspace: string;
+  config_override?: {
+    max_fix_cycles?: number;
+  };
+}
+
+export interface SocketResponse {
+  status: "accepted" | "error";
+  run_id: string;
+  error: string | null;
+}
+
+export interface RunContext {
+  run_id: string;
+  mode: Mode;
+  objective: string;
+  workspace: string;
+  state: RunState;
+  brain_task_id: string;
+  room_id: string;
+  iteration: number;
+  max_iterations: number;
+  created_at: string;
+}
+
+export interface RelayStep {
+  title: string;
+  description: string;
+  agentRole: string;
+}
+
+export interface SwarmTask {
+  title: string;
+  description: string;
+  agentRole: string;
+  dependencies: string[];
 }
 
 export interface AgentConfig {
@@ -61,6 +114,7 @@ export interface ModeSettings {
   maxAdjuncts?: number;
   maxParallel?: number;
   allowFixLoop?: boolean;
+  maxFixCycles?: number;
 }
 
 export interface ModesConfig {

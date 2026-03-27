@@ -46,15 +46,20 @@ export class ConfigLoader {
     base: Partial<OvermindConfig> | null,
     override: Partial<OvermindConfig> | null,
   ): OvermindConfig {
-    const defaults: OvermindConfig = {
+    const defaults = {
       name: "overmind",
       version: "0.1.0",
-      modes: { default: Mode.Scout },
+      modes: {
+        default: Mode.Scout,
+        scout: { maxFixCycles: 0 },
+        relay: { maxFixCycles: 3 },
+        swarm: { maxFixCycles: 3 },
+      },
       agents: {},
       brain: { enabled: true, brainName: "overmind", taskPrefix: "OVR" },
       neural_link: { enabled: true, httpUrl: "http://localhost:9961/mcp", roomTtlSeconds: 3600 },
       skills: { autoInject: true, projectOverrides: true },
-    };
+    } as OvermindConfig;
 
     if (!base && !override) return defaults;
     if (!base) return { ...defaults, ...override } as OvermindConfig;
@@ -87,6 +92,7 @@ export class ConfigLoader {
       brain: overmindCfg.brain,
       neuralLink: overmindCfg.neural_link,
       skills: overmindCfg.skills,
+      modes: overmindCfg.modes,
     };
   }
 }
