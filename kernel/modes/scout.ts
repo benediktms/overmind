@@ -1,6 +1,7 @@
 import { MessageKind } from "../../adapters/neural_link/adapter.ts";
 import { Mode, RunState, type RunContext } from "../types.ts";
 import { createRunContext, recordStepCompletion, transitionState } from "./shared.ts";
+import type { PersistenceCoordinator } from "../persistence.ts";
 
 const DEFAULT_SCOUT_PARALLEL = 3;
 const DEFAULT_WAIT_TIMEOUT_MS = 30_000;
@@ -55,20 +56,26 @@ interface HandoffMessage {
   body?: string;
 }
 
+const NOOP_PERSISTENCE: Pick<
+  PersistenceCoordinator,
+  "updateRun" | "completeRun" | "failRun"
+> = {
+  updateRun: async () => {},
+  completeRun: async () => {},
+  failRun: async () => {},
+};
+
 export async function executeScout(
   ctx: RunContext,
   brain: BrainScoutAdapter,
   neuralLink: NeuralLinkScoutAdapter,
+  persistence: Pick<PersistenceCoordinator, "updateRun" | "completeRun" | "failRun"> = NOOP_PERSISTENCE,
 ): Promise<RunContext> {
   const objectiveSummary = summarizeObjective(ctx.objective);
 
   const taskId = await brain.taskCreate({
     title: `[overmind:scout] ${objectiveSummary}`,
-  });
-
-  if (!taskId) {
-    throw new Error("Failed to create scout brain task");
-  }
+  }) ?? "";
 
   let runCtx = createRunContext({
     run_id: ctx.run_id,
@@ -81,10 +88,19 @@ export async function executeScout(
     created_at: ctx.created_at,
   });
 
-  await brain.taskAddExternalId(taskId, `overmind_run_id:${ctx.run_id}`);
+  await persistence.updateRun(runCtx, {
+    checkpointSummary: taskId ? "Created scout brain task" : "Running without Brain task",
+  });
+
+  if (taskId) {
+    await brain.taskAddExternalId(taskId, `overmind_run_id:${ctx.run_id}`);
+  }
   await recordStepCompletion(brain, runCtx, "task_setup", "Created scout task and linked run ID");
 
   runCtx = transitionState(runCtx, RunState.Running);
+  await persistence.updateRun(runCtx, {
+    checkpointSummary: "Scout run entered running state",
+  });
 
   const roomId = await neuralLink.roomOpen({
     title: `[overmind:scout:${ctx.run_id}] parallel exploration`,
@@ -95,6 +111,7 @@ export async function executeScout(
   });
 
   if (!roomId) {
+    await persistence.failRun({ ...runCtx, state: RunState.Failed }, "Failed to open scout coordination room");
     throw new Error("Failed to open scout coordination room");
   }
 
@@ -102,6 +119,9 @@ export async function executeScout(
     ...runCtx,
     room_id: roomId,
   };
+  await persistence.updateRun(runCtx, {
+    checkpointSummary: `Opened scout coordination room ${roomId}`,
+  });
 
   const angles = getExploreAngles(objectiveSummary, DEFAULT_SCOUT_PARALLEL);
   await Promise.all(
@@ -146,9 +166,12 @@ export async function executeScout(
   await recordStepCompletion(brain, runCtx, "synthesize", outcome);
 
   await neuralLink.roomClose(roomId, "completed");
-  await brain.taskComplete(taskId);
+  if (taskId) {
+    await brain.taskComplete(taskId);
+  }
 
   runCtx = transitionState(runCtx, RunState.Completed);
+  await persistence.completeRun(runCtx, outcome);
   return runCtx;
 }
 

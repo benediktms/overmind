@@ -5,6 +5,7 @@
  */
 
 import { readStdin } from "./lib/stdin.ts";
+import { readActiveModeState } from "../../../kernel/persistence.ts";
 
 interface HookData {
   cwd?: string;
@@ -38,29 +39,17 @@ async function main(): Promise<void> {
 
   const directory = data.cwd ?? data.directory ?? Deno.cwd();
 
-  // Check if Overmind modes are active
-  let activeMode: string | undefined;
-  try {
-    const statePath = `${directory}/.overmind/state`;
-    for await (const entry of Deno.readDir(statePath)) {
-      if (entry.isFile && entry.name.endsWith("-state.json")) {
-        const content = await Deno.readTextFile(`${statePath}/${entry.name}`);
-        const state = JSON.parse(content);
-        if (state.active) {
-          activeMode = entry.name.replace("-state.json", "");
-          break;
-        }
-      }
-    }
-  } catch {
-    // No state
-  }
+  const activeState = await readActiveModeState(directory);
 
-  if (activeMode) {
+  if (activeState?.active) {
+    const persistenceMode = activeState.persistence.brain.available
+      ? "Brain-backed durability active"
+      : "local-only degraded persistence";
     outputHookResult(
-      `[OVERMIND ${activeMode.toUpperCase()} MODE ACTIVE] ` +
+      `[OVERMIND ${activeState.mode.toUpperCase()} MODE ACTIVE] ` +
         `You are about to exit plan mode. ` +
-        `Execute the ${activeMode} plan through the proper workflow.`,
+        `Execute the ${activeState.mode} plan through the proper workflow. ` +
+        `${persistenceMode}.`,
     );
   } else {
     outputHookResult();

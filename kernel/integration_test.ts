@@ -12,7 +12,7 @@ import { OvermindDaemon } from "./daemon.ts";
 import { Kernel } from "./kernel.ts";
 import { MockBrainAdapter, type MockCall } from "./test_helpers/mock_brain.ts";
 import { MockNeuralLinkAdapter } from "./test_helpers/mock_neural_link.ts";
-import { Mode } from "./types.ts";
+import { Mode, RunState } from "./types.ts";
 
 const MODE_EXECUTION_WAIT_MS = 100;
 
@@ -419,6 +419,56 @@ Deno.test("integration: valid JSON with invalid mode returns error response", as
     assertEquals(response.status, "error");
     assertEquals(response.run_id, "");
     assertStringIncludes(response.error ?? "", "Invalid request");
+  } finally {
+    await shutdownHarness(harness);
+  }
+});
+
+Deno.test("integration: scout continues with local persistence when brain task creation is unavailable", async () => {
+  const harness = await createHarness();
+  mockWaitForQueue(harness.neuralLink, [
+    { from: "probe-1", summary: "angle 1" },
+    { from: "probe-2", summary: "angle 2" },
+    { from: "probe-3", summary: "angle 3" },
+  ]);
+  harness.brain.taskCreateResult = null;
+
+  try {
+    const responseText = await sendRawSocketRequest(
+      harness.paths.socketPath,
+      JSON.stringify({
+        type: "mode_request",
+        run_id: "run-integration-scout-local",
+        mode: Mode.Scout,
+        objective: "Validate local persistence fallback",
+        workspace: harness.tempDir,
+      }),
+    );
+    const response = JSON.parse(responseText) as { status: string; run_id: string; error: string | null };
+
+    assertEquals(response.status, "accepted");
+
+    await delay(MODE_EXECUTION_WAIT_MS);
+
+    let persistedState: { active: boolean; state: string } | null = null;
+    const deadline = Date.now() + 2000;
+    while (Date.now() < deadline) {
+      try {
+        const content = await Deno.readTextFile(`${harness.tempDir}/.overmind/state/scout-state.json`);
+        const state = JSON.parse(content) as { active: boolean; state: string };
+        if (state.active === false && state.state === RunState.Completed) {
+          persistedState = state;
+          break;
+        }
+      } catch {
+        persistedState = null;
+      }
+      await delay(20);
+    }
+
+    assert(persistedState);
+
+    assertEquals(callsByMethod(harness.brain.calls, "taskComplete").length, 0);
   } finally {
     await shutdownHarness(harness);
   }

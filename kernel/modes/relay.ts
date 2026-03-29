@@ -8,6 +8,7 @@ import {
   shouldRetry,
   transitionState,
 } from "./shared.ts";
+import type { PersistenceCoordinator } from "../persistence.ts";
 
 const DEFAULT_WAIT_TIMEOUT_MS = 30_000;
 const LEAD_PARTICIPANT_ID = "overmind-relay-lead";
@@ -54,20 +55,26 @@ interface VerifyResult {
   details: string;
 }
 
+const NOOP_PERSISTENCE: Pick<
+  PersistenceCoordinator,
+  "updateRun" | "completeRun" | "failRun"
+> = {
+  updateRun: async () => {},
+  completeRun: async () => {},
+  failRun: async () => {},
+};
+
 export async function executeRelay(
   ctx: RunContext,
   brain: BrainRelayAdapter,
   neuralLink: NeuralLinkRelayAdapter,
+  persistence: Pick<PersistenceCoordinator, "updateRun" | "completeRun" | "failRun"> = NOOP_PERSISTENCE,
 ): Promise<RunContext> {
   const objectiveSummary = summarizeObjective(ctx.objective);
 
   const taskId = await brain.taskCreate({
     title: `[overmind:relay] ${objectiveSummary}`,
-  });
-
-  if (!taskId) {
-    throw new Error("Failed to create relay brain task");
-  }
+  }) ?? "";
 
   let runCtx = createRunContext({
     run_id: ctx.run_id,
@@ -80,9 +87,18 @@ export async function executeRelay(
     created_at: ctx.created_at,
   });
 
-  await brain.taskAddExternalId(taskId, `overmind_run_id:${ctx.run_id}`);
+  await persistence.updateRun(runCtx, {
+    checkpointSummary: taskId ? "Created relay brain task" : "Running relay without Brain task",
+  });
+
+  if (taskId) {
+    await brain.taskAddExternalId(taskId, `overmind_run_id:${ctx.run_id}`);
+  }
 
   runCtx = transitionState(runCtx, RunState.Running);
+  await persistence.updateRun(runCtx, {
+    checkpointSummary: "Relay run entered running state",
+  });
 
   const roomId = await neuralLink.roomOpen({
     title: `[overmind:relay:${ctx.run_id}] sequential pipeline`,
@@ -93,6 +109,7 @@ export async function executeRelay(
   });
 
   if (!roomId) {
+    await persistence.failRun({ ...runCtx, state: RunState.Failed }, "Failed to open relay coordination room");
     throw new Error("Failed to open relay coordination room");
   }
 
@@ -100,6 +117,9 @@ export async function executeRelay(
     ...runCtx,
     room_id: roomId,
   };
+  await persistence.updateRun(runCtx, {
+    checkpointSummary: `Opened relay coordination room ${roomId}`,
+  });
 
   const steps = getRelaySteps(objectiveSummary);
 
@@ -133,6 +153,9 @@ export async function executeRelay(
 
     while (!verifyPassed) {
       runCtx = transitionState(runCtx, RunState.Verifying);
+      await persistence.updateRun(runCtx, {
+        checkpointSummary: `Verifying ${step.title}`,
+      });
 
       await neuralLink.messageSend({
         roomId,
@@ -162,6 +185,7 @@ export async function executeRelay(
         runCtx = transitionState(runCtx, RunState.Failed);
         await recordFailure(brain, runCtx, `Verification failed for ${step.title}: ${verifyResult.details}`);
         await neuralLink.roomClose(roomId, "failed");
+        await persistence.failRun(runCtx, `Verification failed for ${step.title}: ${verifyResult.details}`);
         return runCtx;
       }
 
@@ -169,6 +193,9 @@ export async function executeRelay(
         ...transitionState(runCtx, RunState.Fixing),
         iteration: runCtx.iteration + 1,
       };
+      await persistence.updateRun(runCtx, {
+        checkpointSummary: `Fixing ${step.title} after verification failure`,
+      });
 
       await neuralLink.messageSend({
         roomId,
@@ -196,8 +223,11 @@ export async function executeRelay(
   }
 
   await neuralLink.roomClose(roomId, "completed");
-  await brain.taskComplete(taskId);
+  if (taskId) {
+    await brain.taskComplete(taskId);
+  }
   runCtx = transitionState(runCtx, RunState.Completed);
+  await persistence.completeRun(runCtx, "Relay pipeline completed successfully");
   return runCtx;
 }
 

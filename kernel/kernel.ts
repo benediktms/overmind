@@ -10,6 +10,7 @@ import { createRunContext } from "./modes/shared.ts";
 import { executeScout } from "./modes/scout.ts";
 import { executeRelay } from "./modes/relay.ts";
 import { executeSwarm } from "./modes/swarm.ts";
+import { PersistenceCoordinator } from "./persistence.ts";
 
 export interface KernelOptions {
   registry?: AdapterRegistry;
@@ -82,11 +83,21 @@ export class Kernel {
     this.emit(EventType.ObjectiveReceived, { objective });
   }
 
-  async executeMode(mode: Mode, objective: string): Promise<RunContext> {
-    return await this.executeModeImpl(mode, objective);
+  async executeMode(
+    mode: Mode,
+    objective: string,
+    workspace = Deno.cwd(),
+    runId?: string,
+  ): Promise<RunContext> {
+    return await this.executeModeImpl(mode, objective, workspace, runId);
   }
 
-  private async executeModeImpl(mode: Mode, objective: string): Promise<RunContext> {
+  private async executeModeImpl(
+    mode: Mode,
+    objective: string,
+    workspace: string,
+    runId?: string,
+  ): Promise<RunContext> {
     if (!this.adapterRegistry) throw new OvermindError("Kernel not started");
 
     this.emit(EventType.ModeSwitched, { mode });
@@ -96,10 +107,10 @@ export class Kernel {
     const maxIterations = modeSettings?.maxFixCycles ?? 3;
 
     const ctx = createRunContext({
-      run_id: `run-${crypto.randomUUID()}`,
+      run_id: runId ?? `run-${crypto.randomUUID()}`,
       mode,
       objective,
-      workspace: Deno.cwd(),
+      workspace,
       brain_task_id: "",
       room_id: "",
       max_iterations: maxIterations,
@@ -107,14 +118,22 @@ export class Kernel {
 
     const brain = this.adapterRegistry.getBrain();
     const neuralLink = this.adapterRegistry.getNeuralLink();
+    const persistence = new PersistenceCoordinator(workspace, brain);
+    await persistence.startRun(ctx);
 
-    switch (mode) {
-      case Mode.Scout:
-        return await executeScout(ctx, brain, neuralLink);
-      case Mode.Relay:
-        return await executeRelay(ctx, brain, neuralLink);
-      case Mode.Swarm:
-        return await executeSwarm(ctx, brain, neuralLink);
+    try {
+      switch (mode) {
+        case Mode.Scout:
+          return await executeScout(ctx, brain, neuralLink, persistence);
+        case Mode.Relay:
+          return await executeRelay(ctx, brain, neuralLink, persistence);
+        case Mode.Swarm:
+          return await executeSwarm(ctx, brain, neuralLink, persistence);
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      await persistence.failRun({ ...ctx, state: RunState.Failed }, message);
+      throw err;
     }
   }
 

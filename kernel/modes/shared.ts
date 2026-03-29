@@ -76,6 +76,9 @@ export async function recordStepCompletion(
   stepName: string,
   result: string,
 ): Promise<boolean> {
+  if (!ctx.brain_task_id) {
+    return false;
+  }
   return await brain.taskComment(ctx.brain_task_id, `[step:${stepName}] completed - ${result}`);
 }
 
@@ -85,6 +88,9 @@ export async function recordVerifyResult(
   passed: boolean,
   details: string,
 ): Promise<boolean> {
+  if (!ctx.brain_task_id) {
+    return false;
+  }
   const status = passed ? "pass" : "fail";
   return await brain.taskComment(ctx.brain_task_id, `[verify:${status}] ${details}`);
 }
@@ -98,6 +104,9 @@ export async function recordFailure(
   ctx: RunContext,
   reason: string,
 ): Promise<void> {
+  if (!ctx.brain_task_id) {
+    return;
+  }
   await brain.taskSetPriority(ctx.brain_task_id, 1);
   await brain.taskComment(ctx.brain_task_id, `[failure] ${reason}`);
 }

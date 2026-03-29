@@ -218,7 +218,7 @@ export class OvermindDaemon {
         // Fire-and-forget mode execution if kernel is available
         if (this.kernel) {
           const req = parsed.request;
-          this.kernel.executeMode(req.mode, req.objective).catch((err) => {
+          this.kernel.executeMode(req.mode, req.objective, req.workspace, req.run_id).catch((err) => {
             console.error(`Mode execution error for ${req.run_id}:`, err);
           });
         }

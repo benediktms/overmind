@@ -25,15 +25,25 @@ export interface MemoryEpisodeParams {
   importance?: number;
 }
 
+export interface BrainConnectionStatus {
+  enabled: boolean;
+  available: boolean;
+  status: "available" | "disabled" | "degraded";
+  brainName: string;
+}
+
 export class BrainAdapter {
   private client: McpStdioClient | null = null;
   private config: BrainConfig | null = null;
   private connected = false;
 
   async connect(config: BrainConfig): Promise<void> {
-    if (!config.enabled) return;
-
     this.config = config;
+    if (!config.enabled) {
+      this.connected = false;
+      return;
+    }
+
     this.client = new McpStdioClient();
 
     try {
@@ -58,6 +68,16 @@ export class BrainAdapter {
 
   isConnected(): boolean {
     return this.connected;
+  }
+
+  getConnectionStatus(): BrainConnectionStatus {
+    const enabled = this.config?.enabled ?? false;
+    return {
+      enabled,
+      available: enabled && this.connected,
+      status: !enabled ? "disabled" : this.connected ? "available" : "degraded",
+      brainName: this.config?.brainName ?? "overmind",
+    };
   }
 
   async taskCreate(params: TaskCreateParams): Promise<string | null> {

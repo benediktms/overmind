@@ -5,6 +5,7 @@
  */
 
 import { readStdin } from "./lib/stdin.ts";
+import { readActiveModeState } from "../../../kernel/persistence.ts";
 
 interface HookData {
   cwd?: string;
@@ -41,24 +42,16 @@ async function main(): Promise<void> {
   // Check for incomplete work that needs summarization
   const messages: string[] = [];
 
-  try {
-    const statePath = `${directory}/.overmind/state`;
-    for await (const entry of Deno.readDir(statePath)) {
-      if (entry.isFile && entry.name.endsWith("-state.json")) {
-        const content = await Deno.readTextFile(`${statePath}/${entry.name}`);
-        const state = JSON.parse(content);
-        if (state.active && state.original_prompt) {
-          const modeName = entry.name.replace("-state.json", "");
-          messages.push(
-            `[OVERMIND ${modeName.toUpperCase()} MODE]` +
-              `\n  Task: ${state.original_prompt}` +
-              `\n  Consider: Use brain to record progress and resume next session.`,
-          );
-        }
-      }
-    }
-  } catch {
-    // No state files
+  const activeState = await readActiveModeState(directory);
+  if (activeState?.active && activeState.original_prompt) {
+    const resumeHint = activeState.persistence.brain.available
+      ? "Brain checkpointing is active for resume support."
+      : "Local-only fallback is active; preserve a concise summary before exiting.";
+    messages.push(
+      `[OVERMIND ${activeState.mode.toUpperCase()} MODE]` +
+        `\n  Task: ${activeState.original_prompt}` +
+        `\n  ${resumeHint}`,
+    );
   }
 
   if (messages.length > 0) {

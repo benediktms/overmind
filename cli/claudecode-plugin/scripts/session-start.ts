@@ -5,6 +5,7 @@
  */
 
 import { readStdin } from "./lib/stdin.ts";
+import { readActiveModeState } from "../../../kernel/persistence.ts";
 
 const CLAUDE_PLUGIN_ROOT = Deno.env.get("CLAUDE_PLUGIN_ROOT") ?? "";
 const OVERMIND_KERNEL_HTTP_URL = Deno.env.get("OVERMIND_KERNEL_HTTP_URL") ?? "http://localhost:8080";
@@ -62,26 +63,18 @@ async function main(): Promise<void> {
     timestamp: new Date().toISOString(),
   });
 
-  // Check for active Overmind modes from state files
-  const statePath = `${directory}/.overmind/state`;
-  try {
-    const stateDir = new URL(`file://${statePath}`);
-    for await (const entry of Deno.readDir(stateDir)) {
-      if (entry.isFile && entry.name.endsWith("-state.json")) {
-        const content = await Deno.readTextFile(`${statePath}/${entry.name}`);
-        const state = JSON.parse(content);
-        if (state.active) {
-          const modeName = entry.name.replace("-state.json", "");
-          messages.push(
-            `[OVERMIND ${modeName.toUpperCase()} MODE RESTORED]\n` +
-            `Active since: ${state.started_at}\n` +
-            `Original task: ${state.original_prompt ?? "unknown"}\n`
-          );
-        }
-      }
-    }
-  } catch {
-    // No state directory yet - fresh session
+  const activeState = await readActiveModeState(directory);
+  if (activeState?.active) {
+    const persistenceLine = activeState.persistence.brain.available
+      ? `Persistence: Brain checkpointing active (${activeState.persistence.brain.brainName})`
+      : `Persistence: local-only fallback (${activeState.persistence.brain.status})`;
+
+    messages.push(
+      `[OVERMIND ${activeState.mode.toUpperCase()} MODE RESTORED]\n` +
+      `Active since: ${activeState.started_at}\n` +
+      `Original task: ${activeState.original_prompt ?? "unknown"}\n` +
+      `${persistenceLine}\n`,
+    );
   }
 
   if (messages.length > 0) {

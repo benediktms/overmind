@@ -32,6 +32,22 @@ export class MockBrainAdapter {
     return this.connected;
   }
 
+  getConnectionStatus(): {
+    enabled: boolean;
+    available: boolean;
+    status: "available" | "disabled" | "degraded";
+    brainName: string;
+  } {
+    this.calls.push({ method: "getConnectionStatus", args: [] });
+    const enabled = this.connected;
+    return {
+      enabled,
+      available: enabled,
+      status: enabled ? "available" : "degraded",
+      brainName: "brain",
+    };
+  }
+
   async taskCreate(params: {
     title: string;
     description?: string;

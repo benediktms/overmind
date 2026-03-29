@@ -8,6 +8,7 @@ import {
   shouldRetry,
   transitionState,
 } from "./shared.ts";
+import type { PersistenceCoordinator } from "../persistence.ts";
 
 const DEFAULT_WAIT_TIMEOUT_MS = 30_000;
 const LEAD_PARTICIPANT_ID = "overmind-swarm-lead";
@@ -55,20 +56,26 @@ interface VerifyResult {
   failedTasks: string[];
 }
 
+const NOOP_PERSISTENCE: Pick<
+  PersistenceCoordinator,
+  "updateRun" | "completeRun" | "failRun"
+> = {
+  updateRun: async () => {},
+  completeRun: async () => {},
+  failRun: async () => {},
+};
+
 export async function executeSwarm(
   ctx: RunContext,
   brain: BrainSwarmAdapter,
   neuralLink: NeuralLinkSwarmAdapter,
+  persistence: Pick<PersistenceCoordinator, "updateRun" | "completeRun" | "failRun"> = NOOP_PERSISTENCE,
 ): Promise<RunContext> {
   const objectiveSummary = summarizeObjective(ctx.objective);
 
   const taskId = await brain.taskCreate({
     title: `[overmind:swarm] ${objectiveSummary}`,
-  });
-
-  if (!taskId) {
-    throw new Error("Failed to create swarm brain task");
-  }
+  }) ?? "";
 
   let runCtx = createRunContext({
     run_id: ctx.run_id,
@@ -81,9 +88,18 @@ export async function executeSwarm(
     created_at: ctx.created_at,
   });
 
-  await brain.taskAddExternalId(taskId, `overmind_run_id:${ctx.run_id}`);
+  await persistence.updateRun(runCtx, {
+    checkpointSummary: taskId ? "Created swarm brain task" : "Running swarm without Brain task",
+  });
+
+  if (taskId) {
+    await brain.taskAddExternalId(taskId, `overmind_run_id:${ctx.run_id}`);
+  }
 
   runCtx = transitionState(runCtx, RunState.Running);
+  await persistence.updateRun(runCtx, {
+    checkpointSummary: "Swarm run entered running state",
+  });
 
   const roomId = await neuralLink.roomOpen({
     title: `[overmind:swarm:${ctx.run_id}] parallel execution`,
@@ -94,6 +110,7 @@ export async function executeSwarm(
   });
 
   if (!roomId) {
+    await persistence.failRun({ ...runCtx, state: RunState.Failed }, "Failed to open swarm coordination room");
     throw new Error("Failed to open swarm coordination room");
   }
 
@@ -101,6 +118,9 @@ export async function executeSwarm(
     ...runCtx,
     room_id: roomId,
   };
+  await persistence.updateRun(runCtx, {
+    checkpointSummary: `Opened swarm coordination room ${roomId}`,
+  });
 
   const swarmTasks = getSwarmTasks(objectiveSummary);
 
@@ -117,13 +137,19 @@ export async function executeSwarm(
 
   while (true) {
     runCtx = transitionState(runCtx, RunState.Verifying);
+    await persistence.updateRun(runCtx, {
+      checkpointSummary: "Verifying swarm wave",
+    });
     const verifyResult = await verifyWave(neuralLink, roomId, ctx.objective);
     await recordVerifyResult(brain, runCtx, verifyResult.passed, verifyResult.details);
 
     if (verifyResult.passed) {
       await neuralLink.roomClose(roomId, "completed");
-      await brain.taskComplete(taskId);
+      if (taskId) {
+        await brain.taskComplete(taskId);
+      }
       runCtx = transitionState(runCtx, RunState.Completed);
+      await persistence.completeRun(runCtx, "Swarm execution completed successfully");
       return runCtx;
     }
 
@@ -131,6 +157,7 @@ export async function executeSwarm(
       runCtx = transitionState(runCtx, RunState.Failed);
       await recordFailure(brain, runCtx, `Swarm verification failed: ${verifyResult.details}`);
       await neuralLink.roomClose(roomId, "failed");
+      await persistence.failRun(runCtx, `Swarm verification failed: ${verifyResult.details}`);
       return runCtx;
     }
 
@@ -138,6 +165,9 @@ export async function executeSwarm(
       ...transitionState(runCtx, RunState.Fixing),
       iteration: runCtx.iteration + 1,
     };
+    await persistence.updateRun(runCtx, {
+      checkpointSummary: `Fixing swarm tasks after verification failure`,
+    });
 
     const fixTasks = selectFixTasks(swarmTasks, verifyResult.failedTasks);
     await dispatchFixTasks(neuralLink, roomId, runCtx, fixTasks, verifyResult.details);
