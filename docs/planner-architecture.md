@@ -2,10 +2,15 @@
 
 ## Research Summary
 
-Based on analysis of oh-my-claudecode (OMC), this document outlines a planner-driven
-orchestration architecture to replace Overmind's hardcoded mode templates.
+Based on analysis of **oh-my-opencode** (OMO, also known as **oh-my-openagent** or OMA),
+this document outlines a planner-driven orchestration architecture to replace Overmind's
+hardcoded mode templates.
 
-## Core Concepts from OMC
+Overmind draws inspiration from both:
+- **OMO/OMA** (oh-my-opencode / oh-my-openagent) - Open-source multi-agent orchestration framework
+- **OMC** (oh-my-claudecode) - Claude Code plugin with similar architecture patterns
+
+## Core Concepts from OMO/OMA
 
 ### 1. Three-Agent Planning Layer
 
@@ -166,7 +171,7 @@ if (isScoutPattern(graph)) {
 
 ## References
 
-- OMC Planning System: https://deepwiki.com/code-yeongyu/oh-my-opencode/4.4-planning-system
+- OMO/OMA Planning System: https://deepwiki.com/code-yeongyu/oh-my-opencode/4.4-planning-system
 - Prometheus Agent: https://www.mintlify.com/code-yeongyu/oh-my-opencode/api/agents/prometheus
 - Metis Agent: https://www.mintlify.com/code-yeongyu/oh-my-opencode/api/agents/metis
 - Atlas Executor: https://deepwiki.com/code-yeongyu/oh-my-opencode/4.3-atlas:-plan-executor
