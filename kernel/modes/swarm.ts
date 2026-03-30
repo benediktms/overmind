@@ -161,6 +161,8 @@ export async function executeSwarm(
       verificationStrategies,
       lsp,
       bash,
+      ctx.workspace,
+      ctx.run_id,
     );
     await recordVerifyResult(brain, runCtx, verifyResult.passed, verifyResult.details);
 
@@ -175,7 +177,7 @@ export async function executeSwarm(
         actions,
         outcome,
         tags: ["overmind", "swarm", "orchestration"],
-        importance: 2,
+        importance: 1.0,
       });
 
       if (taskId) {
@@ -197,7 +199,7 @@ export async function executeSwarm(
         actions,
         outcome: `Failed after ${runCtx.iteration + 1} fix attempts: ${verifyResult.details}`,
         tags: ["overmind", "swarm", "failure"],
-        importance: 3,
+        importance: 1.0,
       });
 
       await persistence.failRun(runCtx, `Swarm verification failed: ${verifyResult.details}`);
@@ -302,9 +304,11 @@ async function verifyWave(
   verificationStrategies?: VerificationStrategy[],
   lsp?: LspAdapter,
   bash?: BashAdapter,
+  workspace?: string,
+  runId?: string,
 ): Promise<VerifyResult> {
   if (verificationStrategies && verificationStrategies.length > 0) {
-    return await verifyWithPipeline(neuralLink, roomId, objective, verificationStrategies, lsp, bash);
+    return await verifyWithPipeline(neuralLink, roomId, objective, verificationStrategies, lsp, bash, workspace, runId);
   }
 
   return await verifyWithAgent(neuralLink, roomId, objective);
@@ -341,10 +345,12 @@ async function verifyWithPipeline(
   verificationStrategies: VerificationStrategy[],
   lsp?: LspAdapter,
   bash?: BashAdapter,
+  workspace?: string,
+  runId?: string,
 ): Promise<VerifyResult> {
   const pipeline = createVerificationPipeline(
     verificationStrategies,
-    { workspace: "", objective, runId: "" },
+    { workspace: workspace ?? "", objective, runId: runId ?? "" },
     {
       lsp,
       bash,

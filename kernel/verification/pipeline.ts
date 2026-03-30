@@ -67,9 +67,16 @@ export class VerificationPipeline {
   }
 
   async verify(): Promise<VerificationResult> {
+    const startTime = Date.now();
     let retryState = createRetryState();
 
     while (true) {
+      const elapsed = Date.now() - startTime;
+      const maxTotal = this.config.retry.maxTotalTimeMs ?? 600000;
+      if (elapsed >= maxTotal) {
+        return this.createTimeoutResult(retryState, elapsed);
+      }
+
       if (retryState.circuitState === "open") {
         const lastAttemptMs = new Date(retryState.lastAttempt).getTime();
         if (!shouldAttemptNow(retryState, this.config.retry, lastAttemptMs)) {
@@ -92,14 +99,18 @@ export class VerificationPipeline {
       }
 
       retryState = recordFailure(retryState, this.config.retry);
+      retryState = incrementAttempt(retryState);
+
+      const delayMs = computeDelayMs(retryState, this.config.retry);
+      retryState = {
+        ...retryState,
+        totalDelayMs: retryState.totalDelayMs + delayMs,
+        totalWallClockMs: elapsed + delayMs,
+      };
 
       if (!shouldRetry(retryState, this.config.retry)) {
         return this.enhanceResultWithRetryContext(result, retryState);
       }
-
-      const delayMs = computeDelayMs(retryState, this.config.retry);
-      retryState = incrementAttempt(retryState);
-      retryState = { ...retryState, totalDelayMs: retryState.totalDelayMs + delayMs };
 
       if (delayMs > 0) {
         await sleep(delayMs);
@@ -116,7 +127,7 @@ export class VerificationPipeline {
     }
 
     const passed = results.every((r) => r.passed);
-    const confidence = Math.min(...results.map((r) => r.confidence));
+    const confidence = results.length === 0 ? 0 : Math.min(...results.map((r) => r.confidence));
     const details = passed
       ? `All ${results.length} strategies passed`
       : `Failed strategies: ${results.filter((r) => !r.passed).map((r) => r.details).join("; ")}`;
@@ -321,6 +332,23 @@ export class VerificationPipeline {
       },
       failedTasks: [{ taskId: "circuit-breaker", reason: "Open circuit", evidence: [] }],
       recommendations: ["Circuit breaker is open - manual intervention required"],
+    };
+  }
+
+  private createTimeoutResult(retryState: RetryState, elapsedMs: number): VerificationResult {
+    return {
+      passed: false,
+      confidence: 0,
+      details: `Verification timed out after ${elapsedMs}ms (${retryState.attempt} attempts)`,
+      evidence: {
+        trigger: { type: "manual", source: "agent" },
+        timestamp: new Date().toISOString(),
+        duration_ms: elapsedMs,
+        artifacts: [],
+        diagnostics: [],
+      },
+      failedTasks: [{ taskId: "timeout", reason: `Timed out after ${elapsedMs}ms`, evidence: [] }],
+      recommendations: ["Increase maxTotalTimeMs or reduce retry policy"],
     };
   }
 

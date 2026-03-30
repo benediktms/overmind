@@ -104,16 +104,25 @@ export async function executeTestStrategy(
 }
 
 function parseTestOutput(output: BuildOutput): TestResultSummary {
-  const passed = (output.output.match(/\u2713|passed|PASS/g) || []).length;
-  const failed = (output.output.match(/\u2717|failed|FAIL/g) || []).length;
-  const skipped = (output.output.match(/skipped|SKIP/g) || []).length;
+  const text = output.output;
+
+  const summaryMatch = text.match(/(\d+)\s+(?:test(?:s)?\s+)?passed/i)
+    || text.match(/(?:^|\s)(\d+)\s+(?:passed|ok)/im);
+  const failedMatch = text.match(/(\d+)\s+(?:test(?:s)?\s+)?failed/i)
+    || text.match(/(?:^|\s)(\d+)\s+(?:failed|FAIL)/im);
+  const skippedMatch = text.match(/(\d+)\s+(?:test(?:s)?\s+)?skipped/i)
+    || text.match(/(?:^|\s)(\d+)\s+(?:skipped|SKIP)/im);
+
+  const passed = summaryMatch ? parseInt(summaryMatch[1], 10) : (output.success ? 0 : 0);
+  const failed = failedMatch ? parseInt(failedMatch[1], 10) : (!output.success ? 1 : 0);
+  const skipped = skippedMatch ? parseInt(skippedMatch[1], 10) : 0;
 
   return {
     passed,
     failed,
     skipped,
     duration_ms: output.duration_ms,
-    output: output.output,
+    output: text,
   };
 }
 
@@ -147,20 +156,23 @@ export async function executeAgentStrategy(
   return { evidence: artifact, passed, details };
 }
 
+function isObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
 function isReviewResultPassed(value: unknown): boolean {
-  if (typeof value !== "object" || value === null) {
+  if (!isObject(value)) {
     return false;
   }
-  return (value as Record<string, unknown>).passed === true;
+  return value.passed === true;
 }
 
 function extractReviewDetails(value: unknown): string {
-  if (typeof value !== "object" || value === null) {
+  if (!isObject(value)) {
     return "no response";
   }
-  const record = value as Record<string, unknown>;
-  if (typeof record.details === "string") {
-    return record.details;
+  if (typeof value.details === "string") {
+    return value.details;
   }
   return "verification completed";
 }
@@ -189,25 +201,20 @@ export async function executeCompositeStrategy(
     ? results.every((r) => r.passed)
     : results.some((r) => r.passed);
 
-  const allEvidence = results.flatMap((r) => [r.evidence]);
   const allFailedTasks = results.flatMap((r) => r.failedTasks);
   const allRecommendations = results.flatMap((r) => r.recommendations);
 
   const confidence = strategy.mode === "all"
-    ? Math.min(...results.map((r) => r.confidence))
-    : results.find((r) => r.passed)?.confidence ?? 0;
+    ? (results.length === 0 ? 0 : Math.min(...results.map((r) => r.confidence)))
+    : (results.find((r) => r.passed)?.confidence ?? 0);
+
+  const evidence = mergeEvidenceResults(results, { type: "automated", source: "agent" });
 
   return {
     passed,
     confidence,
     details: `${strategy.mode} mode: ${passed ? "all strategies passed" : "some strategies failed"}`,
-    evidence: {
-      trigger: { type: "automated", source: "agent" },
-      timestamp: new Date().toISOString(),
-      duration_ms: 0,
-      artifacts: [],
-      diagnostics: [],
-    },
+    evidence,
     failedTasks: allFailedTasks,
     recommendations: allRecommendations,
   };

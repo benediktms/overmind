@@ -13,6 +13,7 @@ Deno.test("createRetryState returns initial state", () => {
   const state = createRetryState();
   assertEquals(state.attempt, 0);
   assertEquals(state.totalDelayMs, 0);
+  assertEquals(state.totalWallClockMs, 0);
   assertEquals(state.circuitState, "closed");
   assertEquals(state.consecutiveFailures, 0);
 });

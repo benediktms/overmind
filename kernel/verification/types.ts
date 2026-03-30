@@ -68,6 +68,7 @@ export interface RetryPolicy {
   maxDelayMs: number;
   exponentialBase: number;
   jitterFactor: number;
+  maxTotalTimeMs?: number;
   circuitBreaker?: CircuitBreakerConfig;
 }
 
@@ -85,6 +86,7 @@ export interface RetryState {
   lastAttempt: string;
   circuitState: CircuitState;
   consecutiveFailures: number;
+  totalWallClockMs: number;
 }
 
 export type VerificationStrategy =

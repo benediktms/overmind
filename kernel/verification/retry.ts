@@ -4,6 +4,7 @@ export function createRetryState(): RetryState {
   return {
     attempt: 0,
     totalDelayMs: 0,
+    totalWallClockMs: 0,
     lastAttempt: new Date().toISOString(),
     circuitState: "closed",
     consecutiveFailures: 0,
@@ -80,7 +81,6 @@ export function transitionToHalfOpen(state: RetryState): RetryState {
   return {
     ...state,
     circuitState: "half-open",
-    attempt: 0,
   };
 }
 
