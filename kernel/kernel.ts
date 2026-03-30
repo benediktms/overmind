@@ -11,6 +11,11 @@ import { executeScout } from "./modes/scout.ts";
 import { executeRelay } from "./modes/relay.ts";
 import { executeSwarm } from "./modes/swarm.ts";
 import { PersistenceCoordinator } from "./persistence.ts";
+import { KeywordIntentGate, type IntentClassification } from "./planner/intent_gate.ts";
+import { selectPlanner } from "./planner/template_planners.ts";
+import { determineExecutionMode } from "./planner/planner.ts";
+import { GapAnalyzer } from "./planner/gap_analyzer.ts";
+import { StrictValidator } from "./planner/strict_validator.ts";
 
 export interface KernelOptions {
   registry?: AdapterRegistry;
@@ -97,6 +102,7 @@ export class Kernel {
     objective: string,
     workspace: string,
     runId?: string,
+    _graph?: unknown,
   ): Promise<RunContext> {
     if (!this.adapterRegistry) throw new OvermindError("Kernel not started");
 
@@ -135,6 +141,67 @@ export class Kernel {
       await persistence.failRun({ ...ctx, state: RunState.Failed }, message);
       throw err;
     }
+  }
+
+  async executeWithPlanner(
+    objective: string,
+    workspace = Deno.cwd(),
+    runId?: string,
+  ): Promise<{ runContext: RunContext; intent: IntentClassification; plannedMode: Mode }> {
+    if (!this.adapterRegistry) throw new OvermindError("Kernel not started");
+
+    const intentGate = new KeywordIntentGate();
+    const intent = await intentGate.classify(objective);
+
+    this.emit(EventType.ObjectiveReceived, { objective, intent: intent.type });
+
+    if (intent.requiresInterview && intent.interviewQuestions) {
+      console.log("Clarification needed:");
+      for (const question of intent.interviewQuestions) {
+        console.log(`  - ${question}`);
+      }
+    }
+
+    const planner = selectPlanner(objective);
+    const planContext = {
+      objective,
+      workspace,
+    };
+
+    const graph = await planner.plan(planContext);
+
+    const gapAnalyzer = new GapAnalyzer();
+    const gapAnalysis = gapAnalyzer.analyze(graph, objective);
+
+    if (gapAnalysis.gaps.filter((g) => g.severity === "high").length > 0) {
+      console.log("High-severity gaps detected:");
+      for (const gap of gapAnalysis.gaps.filter((g) => g.severity === "high")) {
+        console.log(`  - ${gap.description}`);
+      }
+    }
+
+    const validator = new StrictValidator();
+    const validation = validator.validate(graph);
+
+    if (!validation.valid) {
+      console.log("Plan validation failed:");
+      for (const issue of validation.issues.filter((i) => i.severity === "error")) {
+        console.log(`  - ${issue.message}`);
+      }
+    }
+
+    const plannedMode = intent.suggestedMode ?? determineExecutionMode(graph);
+    this.emit(EventType.ModeSwitched, { mode: plannedMode, planned: true });
+
+    const runContext = await this.executeModeImpl(
+      plannedMode,
+      objective,
+      workspace,
+      runId,
+      graph,
+    );
+
+    return { runContext, intent, plannedMode };
   }
 
   private emit(type: EventType, payload: Record<string, unknown> = {}): void {
