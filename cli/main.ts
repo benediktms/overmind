@@ -275,7 +275,10 @@ async function cmdSetup(_args: string[], ctx: CliContext): Promise<number> {
     console.log("  Overmind will work in local-only mode\n");
   }
 
-  const projectStateDir = join(Deno.cwd(), ".overmind", "state");
+  const stateRoot = ctx.baseDir.endsWith(".overmind")
+    ? ctx.baseDir
+    : join(ctx.baseDir, ".overmind");
+  const projectStateDir = join(stateRoot, "state");
   console.log(`Creating project state directory: ${projectStateDir}`);
   await Deno.mkdir(projectStateDir, { recursive: true });
   console.log("✓ Project state directory ready\n");

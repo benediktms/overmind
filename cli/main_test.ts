@@ -1,5 +1,8 @@
 import { assertEquals } from "@std/assert";
 import { exists } from "@std/fs";
+import { dirname, fromFileUrl, join } from "@std/path";
+
+const projectRoot = dirname(dirname(fromFileUrl(import.meta.url)));
 
 Deno.test("CLI version command returns 0", async () => {
   const cmd = new Deno.Command(Deno.execPath(), {
@@ -43,13 +46,13 @@ Deno.test("CLI setup creates state directory", async () => {
   const tempDir = await Deno.makeTempDir();
 
   const cmd = new Deno.Command(Deno.execPath(), {
-    args: ["run", "--allow-all", "cli/main.ts", "setup"],
+    args: ["run", "--allow-all", join(projectRoot, "cli/main.ts"), "setup"],
     stdout: "piped",
     stderr: "piped",
     cwd: tempDir,
     env: { OVERMIND_BASE_DIR: `${tempDir}/.overmind` },
   });
-  await cmd.output();
+  const output = await cmd.output();
 
   const stateExists = await exists(`${tempDir}/.overmind/state`);
   assertEquals(stateExists, true);
