@@ -17,7 +17,10 @@ import {
   computeDelayMs,
   createRetryState,
   incrementAttempt,
+  isEvidenceStale,
+  isStuckOnSameFailure,
   recordFailure,
+  recordNormalizedFailure,
   recordSuccess,
   shouldAttemptNow,
   shouldRetry,
@@ -66,7 +69,23 @@ export class VerificationPipeline {
     this.deps = deps;
   }
 
+  private _isVerifying = false;
+
   async verify(): Promise<VerificationResult> {
+    // In-flight guard: reject concurrent verification
+    if (this._isVerifying) {
+      return this.createErrorResult("Verification already in flight");
+    }
+    this._isVerifying = true;
+
+    try {
+      return await this._verifyLoop();
+    } finally {
+      this._isVerifying = false;
+    }
+  }
+
+  private async _verifyLoop(): Promise<VerificationResult> {
     const startTime = Date.now();
     let retryState = createRetryState();
 
@@ -94,12 +113,23 @@ export class VerificationPipeline {
       const result = await this.executeStrategies();
 
       if (result.passed) {
+        // Evidence staleness check: warn if evidence is old
+        const maxAge = this.config.maxEvidenceAgeMs ?? 300_000;
+        if (isEvidenceStale(result.evidence.timestamp, maxAge)) {
+          result.recommendations.push("Evidence is stale — consider re-running verification");
+        }
         retryState = recordSuccess(retryState);
         return result;
       }
 
+      retryState = recordNormalizedFailure(retryState, result.details);
       retryState = recordFailure(retryState, this.config.retry);
       retryState = incrementAttempt(retryState);
+
+      // Same-failure detection: stop early if stuck
+      if (isStuckOnSameFailure(retryState, this.config.retry)) {
+        return this.createStuckResult(result, retryState);
+      }
 
       const delayMs = computeDelayMs(retryState, this.config.retry);
       retryState = {
@@ -119,13 +149,65 @@ export class VerificationPipeline {
   }
 
   private async executeStrategies(): Promise<VerificationResult> {
-    const results: VerificationResult[] = [];
+    const { deterministic, agent, composite } = this.partitionStrategies();
+    const failFast = this.config.failFast ?? true;
+    const allResults: VerificationResult[] = [];
 
-    for (const strategy of this.config.strategies) {
-      const result = await this.executeSingleStrategy(strategy);
-      results.push(result);
+    // Phase 1: Run deterministic strategies (LSP, Build, Test) in parallel
+    if (deterministic.length > 0) {
+      const settled = await Promise.allSettled(
+        deterministic.map((s) => this.executeSingleStrategy(s)),
+      );
+      for (const outcome of settled) {
+        allResults.push(
+          outcome.status === "fulfilled"
+            ? outcome.value
+            : this.createErrorResult(`Strategy error: ${outcome.reason}`),
+        );
+      }
+
+      // Fail-fast: skip agent strategies if deterministic gates failed
+      if (failFast && allResults.some((r) => !r.passed)) {
+        return this.aggregateResults(allResults);
+      }
     }
 
+    // Phase 2: Run agent strategies sequentially (only if deterministic passed or failFast=false)
+    for (const strategy of agent) {
+      allResults.push(await this.executeSingleStrategy(strategy));
+    }
+
+    // Phase 3: Run composite strategies
+    for (const strategy of composite) {
+      allResults.push(await this.executeSingleStrategy(strategy));
+    }
+
+    return this.aggregateResults(allResults);
+  }
+
+  private partitionStrategies(): {
+    deterministic: VerificationStrategy[];
+    agent: VerificationStrategy[];
+    composite: VerificationStrategy[];
+  } {
+    const deterministic: VerificationStrategy[] = [];
+    const agent: VerificationStrategy[] = [];
+    const composite: VerificationStrategy[] = [];
+
+    for (const s of this.config.strategies) {
+      if (s.type === "lsp" || s.type === "build" || s.type === "test") {
+        deterministic.push(s);
+      } else if (s.type === "agent") {
+        agent.push(s);
+      } else {
+        composite.push(s);
+      }
+    }
+
+    return { deterministic, agent, composite };
+  }
+
+  private aggregateResults(results: VerificationResult[]): VerificationResult {
     const passed = results.every((r) => r.passed);
     const confidence = results.length === 0 ? 0 : Math.min(...results.map((r) => r.confidence));
     const details = passed
@@ -335,6 +417,18 @@ export class VerificationPipeline {
     };
   }
 
+  private createStuckResult(lastResult: VerificationResult, retryState: RetryState): VerificationResult {
+    const threshold = this.config.retry.sameFailureThreshold ?? 3;
+    return {
+      ...lastResult,
+      details: `Stuck: same failure repeated ${threshold} times — ${lastResult.details}`,
+      recommendations: [
+        ...lastResult.recommendations,
+        "Same failure detected repeatedly — manual intervention or a different approach is needed",
+      ],
+    };
+  }
+
   private createTimeoutResult(retryState: RetryState, elapsedMs: number): VerificationResult {
     return {
       passed: false,
@@ -372,9 +466,10 @@ export function createVerificationPipeline(
     timeoutMs?: number;
   },
   retryPolicy: RetryPolicy = DEFAULT_RETRY_POLICY,
+  options?: { failFast?: boolean },
 ): VerificationPipeline {
   return new VerificationPipeline(
-    { strategies, retry: retryPolicy, collectEvidence: true },
+    { strategies, retry: retryPolicy, collectEvidence: true, failFast: options?.failFast },
     context,
     deps,
   );

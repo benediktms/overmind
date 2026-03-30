@@ -23,6 +23,7 @@ function makeContext(overrides: Partial<RunContext> = {}): RunContext {
     iteration: 0,
     max_iterations: 3,
     created_at: new Date("2026-01-01T00:00:00.000Z").toISOString(),
+    isVerifying: false,
     ...overrides,
   };
 }

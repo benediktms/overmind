@@ -51,6 +51,7 @@ export function createRunContext(params: CreateRunContextParams): RunContext {
     iteration: 0,
     max_iterations: params.max_iterations ?? DEFAULT_MAX_ITERATIONS_BY_MODE[params.mode],
     created_at: params.created_at ?? new Date().toISOString(),
+    isVerifying: false,
   };
 }
 

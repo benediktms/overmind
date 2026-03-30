@@ -70,6 +70,8 @@ export interface RetryPolicy {
   jitterFactor: number;
   maxTotalTimeMs?: number;
   circuitBreaker?: CircuitBreakerConfig;
+  /** Stop retrying after N consecutive identical normalized failures. Default: 3. */
+  sameFailureThreshold?: number;
 }
 
 export interface CircuitBreakerConfig {
@@ -87,6 +89,8 @@ export interface RetryState {
   circuitState: CircuitState;
   consecutiveFailures: number;
   totalWallClockMs: number;
+  /** Recent normalized failure details for same-failure detection. */
+  recentNormalizedFailures: string[];
 }
 
 export type VerificationStrategy =
@@ -130,6 +134,10 @@ export interface VerificationPipelineConfig {
   strategies: VerificationStrategy[];
   retry: RetryPolicy;
   collectEvidence: boolean;
+  /** When true, skip agent strategies if deterministic gates (LSP/Build/Test) fail. Default: true. */
+  failFast?: boolean;
+  /** Maximum age of evidence before it's considered stale and triggers re-verification. Default: 300_000 (5 min). */
+  maxEvidenceAgeMs?: number;
 }
 
 export const DEFAULT_RETRY_POLICY: RetryPolicy = {

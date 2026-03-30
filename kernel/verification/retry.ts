@@ -8,6 +8,7 @@ export function createRetryState(): RetryState {
     lastAttempt: new Date().toISOString(),
     circuitState: "closed",
     consecutiveFailures: 0,
+    recentNormalizedFailures: [],
   };
 }
 
@@ -90,6 +91,39 @@ export function incrementAttempt(state: RetryState): RetryState {
     attempt: state.attempt + 1,
     lastAttempt: new Date().toISOString(),
   };
+}
+
+/** Normalize failure details by stripping volatile content (timestamps, line numbers, timing, whitespace). */
+export function normalizeFailure(details: string): string {
+  return details
+    .replace(/\d{4}-\d{2}-\d{2}T[\d:.]+Z?/g, "<TS>")
+    .replace(/\d+:\d+/g, "<LOC>")
+    .replace(/\d+(\.\d+)?ms/g, "<DUR>")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/** Check if the retry loop is stuck on the same failure repeated N times. */
+export function isStuckOnSameFailure(state: RetryState, policy: RetryPolicy): boolean {
+  const threshold = policy.sameFailureThreshold ?? 3;
+  if (state.recentNormalizedFailures.length < threshold) return false;
+  const recent = state.recentNormalizedFailures.slice(-threshold);
+  return recent.every((f) => f === recent[0]);
+}
+
+/** Record a normalized failure into retry state for same-failure tracking. */
+export function recordNormalizedFailure(state: RetryState, details: string): RetryState {
+  const normalized = normalizeFailure(details);
+  return {
+    ...state,
+    recentNormalizedFailures: [...state.recentNormalizedFailures, normalized],
+  };
+}
+
+/** Check if verification evidence has exceeded its staleness TTL. */
+export function isEvidenceStale(evidenceTimestamp: string, maxAgeMs: number): boolean {
+  const age = Date.now() - new Date(evidenceTimestamp).getTime();
+  return age > maxAgeMs;
 }
 
 export async function sleep(ms: number): Promise<void> {

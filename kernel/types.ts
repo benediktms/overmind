@@ -70,6 +70,8 @@ export interface RunContext {
   iteration: number;
   max_iterations: number;
   created_at: string;
+  /** Guard to prevent concurrent verification runs. */
+  isVerifying: boolean;
 }
 
 export interface RelayStep {
