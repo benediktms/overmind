@@ -2,6 +2,9 @@
  * Verification evidence and result types for the verification pipeline.
  */
 
+/** Cost-optimized verification tier selected based on change metadata. */
+export type VerificationTier = "light" | "standard" | "thorough";
+
 export interface VerificationTrigger {
   type: "manual" | "automated" | "scheduled";
   source: "agent" | "lsp" | "build" | "test";
@@ -45,6 +48,8 @@ export interface VerificationEvidence {
   diagnostics: Diagnostic[];
   testResults?: TestResultSummary;
   buildOutput?: BuildOutput;
+  /** Which verification tier was selected, for auditability. */
+  tier?: VerificationTier;
 }
 
 export interface FailedTask {
