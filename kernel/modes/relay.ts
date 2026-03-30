@@ -20,6 +20,14 @@ interface BrainRelayAdapter {
   taskComplete(taskId: string): Promise<boolean>;
   taskComment(taskId: string, comment: string): Promise<boolean>;
   taskSetPriority(taskId: string, priority: number): Promise<boolean>;
+  memoryEpisode(params: {
+    goal: string;
+    actions: string;
+    outcome: string;
+    tags?: string[];
+    importance?: number;
+  }): Promise<boolean>;
+  memorySearch(query: string, options?: { k?: number; tags?: string[] }): Promise<Array<{ goal: string; actions: string; outcome: string }>>;
 }
 
 interface NeuralLinkRelayAdapter {
@@ -185,6 +193,16 @@ export async function executeRelay(
         runCtx = transitionState(runCtx, RunState.Failed);
         await recordFailure(brain, runCtx, `Verification failed for ${step.title}: ${verifyResult.details}`);
         await neuralLink.roomClose(roomId, "failed");
+
+        const actions = steps.slice(0, stepIndex + 1).map((s) => s.title).join("; ");
+        await brain.memoryEpisode({
+          goal: `Relay objective (${ctx.run_id}): ${objectiveSummary}`,
+          actions,
+          outcome: `Failed at ${step.title}: ${verifyResult.details}`,
+          tags: ["overmind", "relay", "failure"],
+          importance: 3,
+        });
+
         await persistence.failRun(runCtx, `Verification failed for ${step.title}: ${verifyResult.details}`);
         return runCtx;
       }
@@ -223,11 +241,23 @@ export async function executeRelay(
   }
 
   await neuralLink.roomClose(roomId, "completed");
+
+  const actions = steps.map((s, i) => `${s.title}: ${s.agentRole}`).join("; ");
+  const outcome = `Relay completed all ${steps.length} steps successfully`;
+
+  await brain.memoryEpisode({
+    goal: `Relay objective (${ctx.run_id}): ${objectiveSummary}`,
+    actions,
+    outcome,
+    tags: ["overmind", "relay", "orchestration"],
+    importance: 2,
+  });
+
   if (taskId) {
     await brain.taskComplete(taskId);
   }
   runCtx = transitionState(runCtx, RunState.Completed);
-  await persistence.completeRun(runCtx, "Relay pipeline completed successfully");
+  await persistence.completeRun(runCtx, outcome);
   return runCtx;
 }
 

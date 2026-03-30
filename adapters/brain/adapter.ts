@@ -193,4 +193,19 @@ export class BrainAdapter {
       return false;
     }
   }
+
+  async memorySearch(query: string, options?: { k?: number; tags?: string[] }): Promise<Array<{ goal: string; actions: string; outcome: string }>> {
+    if (!this.connected || !this.client) return [];
+    try {
+      const result = await this.client.callTool("memory_search_minimal", {
+        query,
+        k: options?.k ?? 5,
+        tags: options?.tags ?? [],
+      }) as { results?: Array<{ goal: string; actions: string; outcome: string }> };
+      return result?.results ?? [];
+    } catch (err) {
+      console.error("Brain memory_search failed:", err);
+      return [];
+    }
+  }
 }

@@ -20,6 +20,14 @@ interface BrainSwarmAdapter {
   taskComplete(taskId: string): Promise<boolean>;
   taskComment(taskId: string, comment: string): Promise<boolean>;
   taskSetPriority(taskId: string, priority: number): Promise<boolean>;
+  memoryEpisode(params: {
+    goal: string;
+    actions: string;
+    outcome: string;
+    tags?: string[];
+    importance?: number;
+  }): Promise<boolean>;
+  memorySearch(query: string, options?: { k?: number; tags?: string[] }): Promise<Array<{ goal: string; actions: string; outcome: string }>>;
 }
 
 interface NeuralLinkSwarmAdapter {
@@ -145,11 +153,23 @@ export async function executeSwarm(
 
     if (verifyResult.passed) {
       await neuralLink.roomClose(roomId, "completed");
+
+      const actions = swarmTasks.map((t) => t.title).join("; ");
+      const outcome = `Swarm completed all ${swarmTasks.length} tasks successfully after ${runCtx.iteration + 1} wave(s)`;
+
+      await brain.memoryEpisode({
+        goal: `Swarm objective (${ctx.run_id}): ${objectiveSummary}`,
+        actions,
+        outcome,
+        tags: ["overmind", "swarm", "orchestration"],
+        importance: 2,
+      });
+
       if (taskId) {
         await brain.taskComplete(taskId);
       }
       runCtx = transitionState(runCtx, RunState.Completed);
-      await persistence.completeRun(runCtx, "Swarm execution completed successfully");
+      await persistence.completeRun(runCtx, outcome);
       return runCtx;
     }
 
@@ -157,6 +177,16 @@ export async function executeSwarm(
       runCtx = transitionState(runCtx, RunState.Failed);
       await recordFailure(brain, runCtx, `Swarm verification failed: ${verifyResult.details}`);
       await neuralLink.roomClose(roomId, "failed");
+
+      const actions = swarmTasks.map((t) => t.title).join("; ");
+      await brain.memoryEpisode({
+        goal: `Swarm objective (${ctx.run_id}): ${objectiveSummary}`,
+        actions,
+        outcome: `Failed after ${runCtx.iteration + 1} fix attempts: ${verifyResult.details}`,
+        tags: ["overmind", "swarm", "failure"],
+        importance: 3,
+      });
+
       await persistence.failRun(runCtx, `Swarm verification failed: ${verifyResult.details}`);
       return runCtx;
     }

@@ -18,6 +18,7 @@ interface BrainScoutAdapter {
     tags?: string[];
     importance?: number;
   }): Promise<boolean>;
+  memorySearch(query: string, options?: { k?: number; tags?: string[] }): Promise<Array<{ goal: string; actions: string; outcome: string }>>;
   taskComplete(taskId: string): Promise<boolean>;
   taskComment(taskId: string, comment: string): Promise<boolean>;
 }

@@ -98,4 +98,9 @@ export class MockBrainAdapter {
     this.calls.push({ method: "memoryEpisode", args: [params] });
     return this.memoryEpisodeResult;
   }
+
+  async memorySearch(_query: string, _options?: { k?: number; tags?: string[] }): Promise<Array<{ goal: string; actions: string; outcome: string }>> {
+    this.calls.push({ method: "memorySearch", args: [_query, _options] });
+    return [];
+  }
 }
