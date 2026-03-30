@@ -19,8 +19,8 @@ export interface TaskGraph {
 export interface ValidationResult {
   valid: boolean;
   issues: ValidationIssue[];
-  fileReferenceCoverage: number;
-  acceptanceCriteriaCoverage: number;
+  fileReferenceCoverage?: number;
+  acceptanceCriteriaCoverage?: number;
 }
 
 export interface ValidationIssue {
