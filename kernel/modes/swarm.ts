@@ -9,6 +9,9 @@ import {
   transitionState,
 } from "./shared.ts";
 import type { PersistenceCoordinator } from "../persistence.ts";
+import type { VerificationStrategy } from "../verification/types.ts";
+import { VerificationPipeline, createVerificationPipeline } from "../verification/pipeline.ts";
+import type { LspAdapter, BashAdapter } from "../verification/strategies.ts";
 
 const DEFAULT_WAIT_TIMEOUT_MS = 30_000;
 const LEAD_PARTICIPANT_ID = "overmind-swarm-lead";
@@ -78,6 +81,9 @@ export async function executeSwarm(
   brain: BrainSwarmAdapter,
   neuralLink: NeuralLinkSwarmAdapter,
   persistence: Pick<PersistenceCoordinator, "updateRun" | "completeRun" | "failRun"> = NOOP_PERSISTENCE,
+  verificationStrategies?: VerificationStrategy[],
+  lsp?: LspAdapter,
+  bash?: BashAdapter,
 ): Promise<RunContext> {
   const objectiveSummary = summarizeObjective(ctx.objective);
 
@@ -148,7 +154,14 @@ export async function executeSwarm(
     await persistence.updateRun(runCtx, {
       checkpointSummary: "Verifying swarm wave",
     });
-    const verifyResult = await verifyWave(neuralLink, roomId, ctx.objective);
+    const verifyResult = await verifyWave(
+      neuralLink,
+      roomId,
+      ctx.objective,
+      verificationStrategies,
+      lsp,
+      bash,
+    );
     await recordVerifyResult(brain, runCtx, verifyResult.passed, verifyResult.details);
 
     if (verifyResult.passed) {
@@ -286,6 +299,21 @@ async function verifyWave(
   neuralLink: NeuralLinkSwarmAdapter,
   roomId: string,
   objective: string,
+  verificationStrategies?: VerificationStrategy[],
+  lsp?: LspAdapter,
+  bash?: BashAdapter,
+): Promise<VerifyResult> {
+  if (verificationStrategies && verificationStrategies.length > 0) {
+    return await verifyWithPipeline(neuralLink, roomId, objective, verificationStrategies, lsp, bash);
+  }
+
+  return await verifyWithAgent(neuralLink, roomId, objective);
+}
+
+async function verifyWithAgent(
+  neuralLink: NeuralLinkSwarmAdapter,
+  roomId: string,
+  objective: string,
 ): Promise<VerifyResult> {
   await neuralLink.messageSend({
     roomId,
@@ -304,6 +332,50 @@ async function verifyWave(
   );
 
   return parseVerifyResult(verifyMessage);
+}
+
+async function verifyWithPipeline(
+  neuralLink: NeuralLinkSwarmAdapter,
+  roomId: string,
+  objective: string,
+  verificationStrategies: VerificationStrategy[],
+  lsp?: LspAdapter,
+  bash?: BashAdapter,
+): Promise<VerifyResult> {
+  const pipeline = createVerificationPipeline(
+    verificationStrategies,
+    { workspace: "", objective, runId: "" },
+    {
+      lsp,
+      bash,
+      neuralLink: {
+        messageSend: async (params: { roomId: string; from: string; kind: string; summary: string; to?: string; body?: string }) => {
+          return await neuralLink.messageSend({
+            roomId: params.roomId,
+            from: params.from,
+            kind: params.kind as MessageKind,
+            summary: params.summary,
+            to: params.to,
+            body: params.body,
+          });
+        },
+        waitFor: async (roomId: string, participantId: string, timeoutMs: number, kinds?: string[]) => {
+          return await neuralLink.waitFor(roomId, participantId, timeoutMs, kinds);
+        },
+      },
+      roomId,
+      participantId: LEAD_PARTICIPANT_ID,
+      timeoutMs: DEFAULT_WAIT_TIMEOUT_MS,
+    },
+  );
+
+  const result = await pipeline.verify();
+
+  return {
+    passed: result.passed,
+    details: result.details,
+    failedTasks: result.failedTasks.map((ft: { taskId: string }) => ft.taskId),
+  };
 }
 
 function parseVerifyResult(value: unknown): VerifyResult {
