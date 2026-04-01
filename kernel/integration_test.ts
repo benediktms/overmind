@@ -13,6 +13,7 @@ import { Kernel } from "./kernel.ts";
 import { MockBrainAdapter, type MockCall } from "./test_helpers/mock_brain.ts";
 import { MockNeuralLinkAdapter } from "./test_helpers/mock_neural_link.ts";
 import { Mode, RunState } from "./types.ts";
+import type { WaitForMessage } from "./types.ts";
 
 const MODE_EXECUTION_WAIT_MS = 100;
 
@@ -59,7 +60,7 @@ function callsByMethod(calls: MockCall[], method: string): MockCall[] {
   return calls.filter((call) => call.method === method);
 }
 
-function mockWaitForQueue(neuralLink: MockNeuralLinkAdapter, values: Array<unknown | null>): void {
+function mockWaitForQueue(neuralLink: MockNeuralLinkAdapter, values: Array<unknown>): void {
   const queue = [...values];
   neuralLink.waitFor = async (
     roomId: string,
@@ -67,9 +68,9 @@ function mockWaitForQueue(neuralLink: MockNeuralLinkAdapter, values: Array<unkno
     timeoutMs: number,
     kinds?: string[],
     from?: string[],
-  ): Promise<unknown | null> => {
+  ): Promise<WaitForMessage | null> => {
     neuralLink.calls.push({ method: "waitFor", args: [roomId, participantId, timeoutMs, kinds, from] });
-    return queue.shift() ?? null;
+    return (queue.shift() ?? null) as WaitForMessage | null;
   };
 }
 
@@ -80,14 +81,14 @@ function mockWaitForAlwaysPassing(neuralLink: MockNeuralLinkAdapter): void {
     timeoutMs: number,
     kinds?: string[],
     from?: string[],
-  ): Promise<unknown | null> => {
+  ): Promise<WaitForMessage | null> => {
     neuralLink.calls.push({ method: "waitFor", args: [roomId, participantId, timeoutMs, kinds, from] });
 
     if (kinds?.includes(MessageKind.ReviewResult)) {
-      return { passed: true, details: "verify passed" };
+      return { passed: true, details: "verify passed" } as unknown as WaitForMessage;
     }
 
-    return { from: "mock-agent", summary: "handoff complete" };
+    return { from: "mock-agent", summary: "handoff complete" } as unknown as WaitForMessage;
   };
 }
 

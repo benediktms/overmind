@@ -109,6 +109,29 @@ export interface NeuralLinkConfig {
   roomTtlSeconds: number;
 }
 
+export interface WaitForMessage {
+  message_id: string;
+  from: string;
+  kind: string;
+  summary: string;
+  body?: string;
+  thread_id?: string;
+  sequence: number;
+}
+
+export interface InboxMessage extends WaitForMessage {
+  to?: string;
+  created_at: string;
+}
+
+export interface RoomSummary {
+  decisions: string[];
+  open_questions: string[];
+  blockers: string[];
+  participant_count: number;
+  message_count: number;
+}
+
 export interface SkillsConfig {
   autoInject: boolean;
   projectOverrides: boolean;

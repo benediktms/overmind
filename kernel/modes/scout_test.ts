@@ -2,6 +2,7 @@ import { assertEquals } from "@std/assert";
 
 import { MessageKind } from "../../adapters/neural_link/adapter.ts";
 import { RunState, type RunContext } from "../types.ts";
+import type { WaitForMessage } from "../types.ts";
 import { MockBrainAdapter, type MockCall } from "../test_helpers/mock_brain.ts";
 import { MockNeuralLinkAdapter } from "../test_helpers/mock_neural_link.ts";
 import { createRunContext } from "./shared.ts";
@@ -21,7 +22,7 @@ function makeContext(overrides: Partial<RunContext> = {}): RunContext {
   };
 }
 
-function mockWaitForQueue(neuralLink: MockNeuralLinkAdapter, values: Array<unknown | null>): void {
+function mockWaitForQueue(neuralLink: MockNeuralLinkAdapter, values: Array<unknown>): void {
   const queue = [...values];
   neuralLink.waitFor = async (
     roomId: string,
@@ -29,9 +30,9 @@ function mockWaitForQueue(neuralLink: MockNeuralLinkAdapter, values: Array<unkno
     timeoutMs: number,
     kinds?: string[],
     from?: string[],
-  ): Promise<unknown | null> => {
+  ): Promise<WaitForMessage | null> => {
     neuralLink.calls.push({ method: "waitFor", args: [roomId, participantId, timeoutMs, kinds, from] });
-    return queue.shift() ?? null;
+    return (queue.shift() ?? null) as WaitForMessage | null;
   };
 }
 

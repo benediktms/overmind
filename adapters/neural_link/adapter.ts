@@ -1,4 +1,4 @@
-import type { NeuralLinkConfig } from "../../kernel/types.ts";
+import type { NeuralLinkConfig, RoomSummary, WaitForMessage, InboxMessage } from "../../kernel/types.ts";
 import { NeuralLinkError } from "../../kernel/errors.ts";
 
 export enum MessageKind {
@@ -121,6 +121,31 @@ export class NeuralLinkAdapter {
     return response.ok;
   }
 
+  async roomLeave(
+    roomId: string,
+    participantId: string,
+    timeoutMs?: number,
+  ): Promise<boolean> {
+    if (!this.connected) return false;
+
+    const body: Record<string, unknown> = {
+      room_id: roomId,
+      participant_id: participantId,
+    };
+    if (timeoutMs !== undefined) body.timeout_ms = timeoutMs;
+
+    const response = await fetch(`${this.config!.httpUrl}/room/leave`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(this.sessionId ? { "Mcp-Session-Id": this.sessionId } : {}),
+      },
+      body: JSON.stringify(body),
+    });
+
+    return response.ok;
+  }
+
   async messageSend(params: MessageSendParams): Promise<boolean> {
     if (!this.connected) return false;
 
@@ -145,7 +170,7 @@ export class NeuralLinkAdapter {
     return response.ok;
   }
 
-  async inboxRead(roomId: string, participantId: string): Promise<unknown[]> {
+  async inboxRead(roomId: string, participantId: string): Promise<InboxMessage[]> {
     if (!this.connected) return [];
 
     const response = await fetch(
@@ -158,11 +183,11 @@ export class NeuralLinkAdapter {
     );
 
     if (!response.ok) return [];
-    const data = await response.json() as { messages?: unknown[] };
+    const data = await response.json() as { messages?: InboxMessage[] };
     return data.messages ?? [];
   }
 
-  async messageAck(roomId: string, participantId: string, messageIds: string): Promise<boolean> {
+  async messageAck(roomId: string, participantId: string, messageIds: string[]): Promise<boolean> {
     if (!this.connected) return false;
 
     const response = await fetch(`${this.config!.httpUrl}/message/ack`, {
@@ -205,7 +230,7 @@ export class NeuralLinkAdapter {
     timeoutMs: number,
     kinds?: string[],
     from?: string[],
-  ): Promise<unknown | null> {
+  ): Promise<WaitForMessage | null> {
     if (!this.connected) return null;
 
     const params = new URLSearchParams({
@@ -226,7 +251,29 @@ export class NeuralLinkAdapter {
     );
 
     if (!response.ok) return null;
-    const data = await response.json();
+    const data = await response.json() as { message?: WaitForMessage };
     return data.message ?? null;
+  }
+
+  async threadSummarize(
+    roomId: string,
+    threadId?: string,
+  ): Promise<RoomSummary | null> {
+    if (!this.connected) return null;
+
+    const params = new URLSearchParams({ room_id: roomId });
+    if (threadId) params.set("thread_id", threadId);
+
+    const response = await fetch(
+      `${this.config!.httpUrl}/thread/summarize?${params}`,
+      {
+        headers: {
+          ...(this.sessionId ? { "Mcp-Session-Id": this.sessionId } : {}),
+        },
+      },
+    );
+
+    if (!response.ok) return null;
+    return await response.json() as RoomSummary;
   }
 }

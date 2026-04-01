@@ -1,5 +1,5 @@
 import { MessageKind } from "../../adapters/neural_link/adapter.ts";
-import type { NeuralLinkConfig } from "../../kernel/types.ts";
+import type { NeuralLinkConfig, WaitForMessage, InboxMessage, RoomSummary } from "../../kernel/types.ts";
 
 import type { MockCall } from "./mock_brain.ts";
 
@@ -12,11 +12,13 @@ export class MockNeuralLinkAdapter {
   nextRoomId: string | null = "room-mock-1";
   roomOpenResult: string | null = "room-mock-1";
   roomJoinResult = true;
+  roomLeaveResult = true;
   messageSendResult = true;
-  inboxReadResult: unknown[] = [];
+  inboxReadResult: InboxMessage[] = [];
   messageAckResult = true;
   roomCloseResult = true;
-  waitForResult: unknown | null = null;
+  waitForResult: WaitForMessage | null = null;
+  threadSummarizeResult: RoomSummary | null = null;
 
   async connect(config: NeuralLinkConfig): Promise<void> {
     this.calls.push({ method: "connect", args: [config] });
@@ -57,6 +59,15 @@ export class MockNeuralLinkAdapter {
     return this.roomJoinResult;
   }
 
+  async roomLeave(
+    roomId: string,
+    participantId: string,
+    timeoutMs?: number,
+  ): Promise<boolean> {
+    this.calls.push({ method: "roomLeave", args: [roomId, participantId, timeoutMs] });
+    return this.roomLeaveResult;
+  }
+
   async messageSend(params: {
     roomId: string;
     from: string;
@@ -71,12 +82,12 @@ export class MockNeuralLinkAdapter {
     return this.messageSendResult;
   }
 
-  async inboxRead(roomId: string, participantId: string): Promise<unknown[]> {
+  async inboxRead(roomId: string, participantId: string): Promise<InboxMessage[]> {
     this.calls.push({ method: "inboxRead", args: [roomId, participantId] });
     return this.inboxReadResult;
   }
 
-  async messageAck(roomId: string, participantId: string, messageIds: string): Promise<boolean> {
+  async messageAck(roomId: string, participantId: string, messageIds: string[]): Promise<boolean> {
     this.calls.push({ method: "messageAck", args: [roomId, participantId, messageIds] });
     return this.messageAckResult;
   }
@@ -92,8 +103,16 @@ export class MockNeuralLinkAdapter {
     timeoutMs: number,
     kinds?: string[],
     from?: string[],
-  ): Promise<unknown | null> {
+  ): Promise<WaitForMessage | null> {
     this.calls.push({ method: "waitFor", args: [roomId, participantId, timeoutMs, kinds, from] });
     return this.waitForResult;
+  }
+
+  async threadSummarize(
+    roomId: string,
+    threadId?: string,
+  ): Promise<RoomSummary | null> {
+    this.calls.push({ method: "threadSummarize", args: [roomId, threadId] });
+    return this.threadSummarizeResult;
   }
 }
