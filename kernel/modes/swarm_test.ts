@@ -274,6 +274,37 @@ Deno.test("executeSwarm skips fix-loop on stuck outcome and returns Failed", asy
   assertEquals(roomClose.args[1], "failed");
 });
 
+Deno.test("executeSwarm passes interactionMode informative in roomOpen call", async () => {
+  const brain = new MockBrainAdapter();
+  const neuralLink = new MockNeuralLinkAdapter();
+  mockWaitForQueue(neuralLink, makeHappyPathWaitQueue());
+
+  await executeSwarm(makeContext(), brain, neuralLink);
+
+  const roomOpen = callsByMethod(neuralLink.calls, "roomOpen")[0];
+  const params = roomOpen.args[0] as { interactionMode: string };
+  assertEquals(params.interactionMode, "informative");
+});
+
+Deno.test("executeSwarm includes threadId on task dispatch messageSend calls", async () => {
+  const brain = new MockBrainAdapter();
+  const neuralLink = new MockNeuralLinkAdapter();
+  mockWaitForQueue(neuralLink, makeHappyPathWaitQueue());
+
+  await executeSwarm(makeContext(), brain, neuralLink);
+
+  const messages = callsByMethod(neuralLink.calls, "messageSend");
+  const taskDispatches = messages.filter((message) => {
+    const params = message.args[0] as { kind: MessageKind; summary: string };
+    return params.kind === MessageKind.Finding && params.summary.startsWith("Execute");
+  });
+
+  for (const message of taskDispatches) {
+    const params = message.args[0] as { threadId?: string };
+    assertEquals(typeof params.threadId, "string");
+  }
+});
+
 Deno.test("executeSwarm fresh-context mode produces clean fix body", async () => {
   const brain = new MockBrainAdapter();
   const neuralLink = new MockNeuralLinkAdapter();

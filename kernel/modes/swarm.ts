@@ -1,5 +1,6 @@
 import { MessageKind } from "../../adapters/neural_link/adapter.ts";
-import { Mode, RunState, type RunContext, type SwarmTask } from "../types.ts";
+import { Mode, RunState, type RunContext, type SwarmTask, type InboxMessage, type WaitForMessage } from "../types.ts";
+import { drainInbox, waitAndProcessInbox } from "../coordination.ts";
 import {
   createRunContext,
   recordFailure,
@@ -40,6 +41,7 @@ interface NeuralLinkSwarmAdapter {
     displayName: string;
     purpose?: string;
     externalRef?: string;
+    interactionMode?: string;
   }): Promise<string | null>;
   messageSend(params: {
     roomId: string;
@@ -57,8 +59,13 @@ interface NeuralLinkSwarmAdapter {
     timeoutMs: number,
     kinds?: string[],
     from?: string[],
-  ): Promise<unknown | null>;
+  ): Promise<WaitForMessage | null>;
   roomClose(roomId: string, resolution: string): Promise<boolean>;
+  inboxRead(roomId: string, participantId: string): Promise<InboxMessage[]>;
+  messageAck(roomId: string, participantId: string, messageIds: string[]): Promise<boolean>;
+  isConnected(): boolean;
+  roomJoin(roomId: string, participantId: string, displayName: string, role?: string): Promise<boolean>;
+  roomLeave(roomId: string, participantId: string, timeoutMs?: number): Promise<boolean>;
 }
 
 interface VerifyResult {
@@ -123,6 +130,7 @@ export async function executeSwarm(
     displayName: LEAD_DISPLAY_NAME,
     purpose: ctx.objective,
     externalRef: ctx.run_id,
+    interactionMode: "informative",
   });
 
   if (!roomId) {
@@ -152,6 +160,10 @@ export async function executeSwarm(
   );
 
   while (true) {
+    await drainInbox(neuralLink, roomId, LEAD_PARTICIPANT_ID, async (_msg) => {
+      // Drain any late-arriving messages before starting verification
+    });
+
     runCtx = transitionState(runCtx, RunState.Verifying);
     await persistence.updateRun(runCtx, {
       checkpointSummary: "Verifying swarm wave",
@@ -270,6 +282,7 @@ async function dispatchTasks(
         summary: `Execute ${task.title}`,
         to: task.agentRole,
         body: `${task.description}\nObjective: ${objective}`,
+        threadId: task.agentRole,
       });
     }),
   );
@@ -298,6 +311,7 @@ async function dispatchFixTasks(
         summary: `Fix ${task.title} (attempt ${runCtx.iteration})`,
         to: task.agentRole,
         body,
+        threadId: task.agentRole,
       });
     }),
   );
@@ -336,6 +350,10 @@ async function collectHandoffs(
     if (message !== null) {
       handoffs.push(message);
     }
+
+    await drainInbox(neuralLink, roomId, LEAD_PARTICIPANT_ID, async (_msg) => {
+      // Catch interleaved messages during handoff collection
+    });
   }
 
   return handoffs;

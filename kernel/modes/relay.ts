@@ -1,5 +1,6 @@
 import { MessageKind } from "../../adapters/neural_link/adapter.ts";
-import { Mode, RunState, type RelayStep, type RunContext } from "../types.ts";
+import { Mode, RunState, type RelayStep, type RunContext, type InboxMessage, type WaitForMessage } from "../types.ts";
+import { drainInbox } from "../coordination.ts";
 import type { VerificationOutcome } from "../verification/types.ts";
 import {
   createRunContext,
@@ -38,6 +39,7 @@ interface NeuralLinkRelayAdapter {
     displayName: string;
     purpose?: string;
     externalRef?: string;
+    interactionMode?: string;
   }): Promise<string | null>;
   messageSend(params: {
     roomId: string;
@@ -55,8 +57,13 @@ interface NeuralLinkRelayAdapter {
     timeoutMs: number,
     kinds?: string[],
     from?: string[],
-  ): Promise<unknown | null>;
+  ): Promise<WaitForMessage | null>;
   roomClose(roomId: string, resolution: string): Promise<boolean>;
+  inboxRead(roomId: string, participantId: string): Promise<InboxMessage[]>;
+  messageAck(roomId: string, participantId: string, messageIds: string[]): Promise<boolean>;
+  isConnected(): boolean;
+  roomJoin(roomId: string, participantId: string, displayName: string, role?: string): Promise<boolean>;
+  roomLeave(roomId: string, participantId: string, timeoutMs?: number): Promise<boolean>;
 }
 
 interface VerifyResult {
@@ -115,6 +122,7 @@ export async function executeRelay(
     displayName: LEAD_DISPLAY_NAME,
     purpose: ctx.objective,
     externalRef: ctx.run_id,
+    interactionMode: "supervisory",
   });
 
   if (!roomId) {
@@ -142,6 +150,7 @@ export async function executeRelay(
       summary: `Execute ${step.title}: ${step.description}`,
       to: step.agentRole,
       body: `Objective: ${ctx.objective}`,
+      threadId: `step-${stepIndex}`,
     });
 
     const handoff = await neuralLink.waitFor(
@@ -150,6 +159,10 @@ export async function executeRelay(
       DEFAULT_WAIT_TIMEOUT_MS,
       [MessageKind.Handoff],
     );
+
+    await drainInbox(neuralLink, roomId, LEAD_PARTICIPANT_ID, async (_msg) => {
+      // Log interleaved messages; no action needed in supervisory mode
+    });
 
     await recordStepCompletion(
       brain,
@@ -173,6 +186,7 @@ export async function executeRelay(
         summary: `Verify ${step.title}`,
         to: "verifier",
         body: `Validate output for ${step.title} in objective: ${ctx.objective}`,
+        threadId: `step-${stepIndex}`,
       });
 
       const verifyMessage = await neuralLink.waitFor(
@@ -243,6 +257,7 @@ export async function executeRelay(
         summary: `Fix ${step.title} (attempt ${runCtx.iteration})`,
         to: step.agentRole,
         body: `Address verify failure: ${verifyResult.details}`,
+        threadId: `step-${stepIndex}`,
       });
 
       const fixHandoff = await neuralLink.waitFor(

@@ -203,6 +203,32 @@ Deno.test("executeRelay fix loop exhaustion records failure and returns failed c
   assertEquals(finalCtx.iteration, 2);
 });
 
+Deno.test("executeRelay passes interactionMode supervisory in roomOpen call", async () => {
+  const brain = new MockBrainAdapter();
+  const neuralLink = new MockNeuralLinkAdapter();
+  mockWaitForQueue(neuralLink, makeAllPassWaitQueue());
+
+  await executeRelay(makeContext(), brain, neuralLink);
+
+  const roomOpen = callsByMethod(neuralLink.calls, "roomOpen")[0];
+  const params = roomOpen.args[0] as { interactionMode: string };
+  assertEquals(params.interactionMode, "supervisory");
+});
+
+Deno.test("executeRelay includes threadId on all messageSend calls", async () => {
+  const brain = new MockBrainAdapter();
+  const neuralLink = new MockNeuralLinkAdapter();
+  mockWaitForQueue(neuralLink, makeAllPassWaitQueue());
+
+  await executeRelay(makeContext(), brain, neuralLink);
+
+  const messages = callsByMethod(neuralLink.calls, "messageSend");
+  for (const message of messages) {
+    const params = message.args[0] as { threadId?: string };
+    assertEquals(typeof params.threadId, "string");
+  }
+});
+
 Deno.test("executeRelay does not continue to downstream steps after terminal verify failure", async () => {
   const brain = new MockBrainAdapter();
   const neuralLink = new MockNeuralLinkAdapter();

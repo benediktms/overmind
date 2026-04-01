@@ -1,5 +1,6 @@
 import { MessageKind } from "../../adapters/neural_link/adapter.ts";
-import { Mode, RunState, type RunContext } from "../types.ts";
+import { Mode, RunState, type RunContext, type InboxMessage, type WaitForMessage } from "../types.ts";
+import { drainInbox } from "../coordination.ts";
 import { createRunContext, recordStepCompletion, transitionState } from "./shared.ts";
 import type { PersistenceCoordinator } from "../persistence.ts";
 
@@ -30,6 +31,7 @@ interface NeuralLinkScoutAdapter {
     displayName: string;
     purpose?: string;
     externalRef?: string;
+    interactionMode?: string;
   }): Promise<string | null>;
   messageSend(params: {
     roomId: string;
@@ -47,8 +49,13 @@ interface NeuralLinkScoutAdapter {
     timeoutMs: number,
     kinds?: string[],
     from?: string[],
-  ): Promise<unknown | null>;
+  ): Promise<WaitForMessage | null>;
   roomClose(roomId: string, resolution: string): Promise<boolean>;
+  inboxRead(roomId: string, participantId: string): Promise<InboxMessage[]>;
+  messageAck(roomId: string, participantId: string, messageIds: string[]): Promise<boolean>;
+  isConnected(): boolean;
+  roomJoin(roomId: string, participantId: string, displayName: string, role?: string): Promise<boolean>;
+  roomLeave(roomId: string, participantId: string, timeoutMs?: number): Promise<boolean>;
 }
 
 interface HandoffMessage {
@@ -109,6 +116,7 @@ export async function executeScout(
     displayName: LEAD_DISPLAY_NAME,
     purpose: ctx.objective,
     externalRef: ctx.run_id,
+    interactionMode: "informative",
   });
 
   if (!roomId) {
@@ -134,6 +142,7 @@ export async function executeScout(
         summary: `Explore angle ${index + 1}/${angles.length}: ${angle}`,
         to: `probe-${index + 1}`,
         body: `Objective: ${ctx.objective}`,
+        threadId: `probe-${index}`,
       });
     }),
   );
@@ -153,6 +162,10 @@ export async function executeScout(
     }
   }
   await recordStepCompletion(brain, runCtx, "wait", `Received ${handoffs.length}/${angles.length} handoffs`);
+
+  await drainInbox(neuralLink, roomId, LEAD_PARTICIPANT_ID, async (_msg) => {
+    // Catch late-arriving findings after the handoff collection window closes
+  });
 
   const actions = synthesizeActions(handoffs);
   const outcome = `Scout synthesis complete with ${handoffs.length}/${angles.length} handoffs`;

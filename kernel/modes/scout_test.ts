@@ -150,6 +150,30 @@ Deno.test("executeScout closes room and returns completed run state", async () =
   assertEquals(finalCtx.state, RunState.Completed);
 });
 
+Deno.test("executeScout passes interactionMode informative in roomOpen call", async () => {
+  const brain = new MockBrainAdapter();
+  const neuralLink = new MockNeuralLinkAdapter();
+
+  await executeScout(makeContext(), brain, neuralLink);
+
+  const roomOpen = callsByMethod(neuralLink.calls, "roomOpen")[0];
+  const params = roomOpen.args[0] as { interactionMode: string };
+  assertEquals(params.interactionMode, "informative");
+});
+
+Deno.test("executeScout includes threadId on probe dispatch messageSend calls", async () => {
+  const brain = new MockBrainAdapter();
+  const neuralLink = new MockNeuralLinkAdapter();
+
+  await executeScout(makeContext(), brain, neuralLink);
+
+  const messages = callsByMethod(neuralLink.calls, "messageSend");
+  for (const message of messages) {
+    const params = message.args[0] as { threadId?: string };
+    assertEquals(typeof params.threadId, "string");
+  }
+});
+
 Deno.test("executeScout performs key lifecycle calls in expected order", async () => {
   const brain = new MockBrainAdapter();
   const neuralLink = new MockNeuralLinkAdapter();
