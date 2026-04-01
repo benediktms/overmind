@@ -1,5 +1,5 @@
-import { MessageKind } from "../../adapters/neural_link/adapter.ts";
-import { Mode, RunState, type RelayStep, type RunContext, type InboxMessage, type WaitForMessage } from "../types.ts";
+import { MessageKind, type NeuralLinkPort } from "../types.ts";
+import { Mode, RunState, type RelayStep, type RunContext, type WaitForMessage } from "../types.ts";
 import { drainInbox } from "../coordination.ts";
 import type { VerificationOutcome } from "../verification/types.ts";
 import {
@@ -32,39 +32,6 @@ interface BrainRelayAdapter {
   memorySearch(query: string, options?: { k?: number; tags?: string[] }): Promise<Array<{ goal: string; actions: string; outcome: string }>>;
 }
 
-interface NeuralLinkRelayAdapter {
-  roomOpen(params: {
-    title: string;
-    participantId: string;
-    displayName: string;
-    purpose?: string;
-    externalRef?: string;
-    interactionMode?: string;
-  }): Promise<string | null>;
-  messageSend(params: {
-    roomId: string;
-    from: string;
-    kind: MessageKind;
-    summary: string;
-    to?: string;
-    body?: string;
-    threadId?: string;
-    persistHint?: string;
-  }): Promise<boolean>;
-  waitFor(
-    roomId: string,
-    participantId: string,
-    timeoutMs: number,
-    kinds?: string[],
-    from?: string[],
-  ): Promise<WaitForMessage | null>;
-  roomClose(roomId: string, resolution: string): Promise<boolean>;
-  inboxRead(roomId: string, participantId: string): Promise<InboxMessage[]>;
-  messageAck(roomId: string, participantId: string, messageIds: string[]): Promise<boolean>;
-  isConnected(): boolean;
-  roomJoin(roomId: string, participantId: string, displayName: string, role?: string): Promise<boolean>;
-  roomLeave(roomId: string, participantId: string, timeoutMs?: number): Promise<boolean>;
-}
 
 interface VerifyResult {
   outcome: VerificationOutcome;
@@ -83,7 +50,7 @@ const NOOP_PERSISTENCE: Pick<
 export async function executeRelay(
   ctx: RunContext,
   brain: BrainRelayAdapter,
-  neuralLink: NeuralLinkRelayAdapter,
+  neuralLink: NeuralLinkPort,
   persistence: Pick<PersistenceCoordinator, "updateRun" | "completeRun" | "failRun"> = NOOP_PERSISTENCE,
 ): Promise<RunContext> {
   const objectiveSummary = summarizeObjective(ctx.objective);

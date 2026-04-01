@@ -4,12 +4,8 @@ import {
   waitAndProcessInbox,
   withParticipation,
 } from "./coordination.ts";
-import type {
-  CoordinationPort,
-  InboxMessage,
-  WaitForMessage,
-} from "./coordination.ts";
-import { MessageKind } from "../adapters/neural_link/adapter.ts";
+import type { NeuralLinkPort, InboxMessage, WaitForMessage, RoomOpenParams, MessageSendParams } from "./types.ts";
+import { MessageKind } from "./types.ts";
 
 // ---------------------------------------------------------------------------
 // Mock CoordinationPort
@@ -20,7 +16,7 @@ interface MockCall {
   args: unknown[];
 }
 
-class MockCoordinationPort implements CoordinationPort {
+class MockCoordinationPort implements NeuralLinkPort {
   calls: MockCall[] = [];
   connected = true;
   inboxMessages: InboxMessage[] = [];
@@ -46,15 +42,7 @@ class MockCoordinationPort implements CoordinationPort {
     return this.messageAckResult;
   }
 
-  async messageSend(params: {
-    roomId: string;
-    from: string;
-    kind: MessageKind;
-    summary: string;
-    to?: string;
-    body?: string;
-    threadId?: string;
-  }): Promise<boolean> {
+  async messageSend(params: MessageSendParams): Promise<boolean> {
     this.calls.push({ method: "messageSend", args: [params] });
     return this.messageSendResult;
   }
@@ -81,6 +69,21 @@ class MockCoordinationPort implements CoordinationPort {
   async roomLeave(roomId: string, participantId: string, timeoutMs?: number): Promise<boolean> {
     this.calls.push({ method: "roomLeave", args: [roomId, participantId, timeoutMs] });
     return this.roomLeaveResult;
+  }
+
+  async roomOpen(_params: RoomOpenParams): Promise<string | null> {
+    this.calls.push({ method: "roomOpen", args: [_params] });
+    return null;
+  }
+
+  async roomClose(roomId: string, resolution: string): Promise<boolean> {
+    this.calls.push({ method: "roomClose", args: [roomId, resolution] });
+    return true;
+  }
+
+  async threadSummarize(_roomId: string, _threadId?: string): Promise<null> {
+    this.calls.push({ method: "threadSummarize", args: [_roomId, _threadId] });
+    return null;
   }
 }
 

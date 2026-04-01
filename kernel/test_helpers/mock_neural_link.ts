@@ -1,11 +1,11 @@
 import { MessageKind } from "../../adapters/neural_link/adapter.ts";
-import type { NeuralLinkConfig, WaitForMessage, InboxMessage, RoomSummary } from "../../kernel/types.ts";
+import type { NeuralLinkConfig, WaitForMessage, InboxMessage, RoomSummary, NeuralLinkPort, RoomOpenParams, MessageSendParams } from "../../kernel/types.ts";
 
 import type { MockCall } from "./mock_brain.ts";
 
 export { MessageKind };
 
-export class MockNeuralLinkAdapter {
+export class MockNeuralLinkAdapter implements NeuralLinkPort {
   calls: MockCall[] = [];
   connected = false;
   sessionId: string | null = null;
@@ -35,16 +35,7 @@ export class MockNeuralLinkAdapter {
     return this.sessionId;
   }
 
-  async roomOpen(params: {
-    title: string;
-    participantId: string;
-    displayName: string;
-    purpose?: string;
-    externalRef?: string;
-    tags?: string;
-    brains?: string;
-    interactionMode?: string;
-  }): Promise<string | null> {
+  async roomOpen(params: RoomOpenParams): Promise<string | null> {
     this.calls.push({ method: "roomOpen", args: [params] });
     return this.roomOpenResult;
   }
@@ -68,16 +59,7 @@ export class MockNeuralLinkAdapter {
     return this.roomLeaveResult;
   }
 
-  async messageSend(params: {
-    roomId: string;
-    from: string;
-    kind: MessageKind;
-    summary: string;
-    to?: string;
-    body?: string;
-    threadId?: string;
-    persistHint?: string;
-  }): Promise<boolean> {
+  async messageSend(params: MessageSendParams): Promise<boolean> {
     this.calls.push({ method: "messageSend", args: [params] });
     return this.messageSendResult;
   }

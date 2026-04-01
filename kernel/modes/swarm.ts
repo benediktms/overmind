@@ -1,5 +1,5 @@
-import { MessageKind } from "../../adapters/neural_link/adapter.ts";
-import { Mode, RunState, type RunContext, type SwarmTask, type InboxMessage, type WaitForMessage } from "../types.ts";
+import { MessageKind, type NeuralLinkPort } from "../types.ts";
+import { Mode, RunState, type RunContext, type SwarmTask, type WaitForMessage } from "../types.ts";
 import { drainInbox, waitAndProcessInbox } from "../coordination.ts";
 import {
   createRunContext,
@@ -34,39 +34,6 @@ interface BrainSwarmAdapter {
   memorySearch(query: string, options?: { k?: number; tags?: string[] }): Promise<Array<{ goal: string; actions: string; outcome: string }>>;
 }
 
-interface NeuralLinkSwarmAdapter {
-  roomOpen(params: {
-    title: string;
-    participantId: string;
-    displayName: string;
-    purpose?: string;
-    externalRef?: string;
-    interactionMode?: string;
-  }): Promise<string | null>;
-  messageSend(params: {
-    roomId: string;
-    from: string;
-    kind: MessageKind;
-    summary: string;
-    to?: string;
-    body?: string;
-    threadId?: string;
-    persistHint?: string;
-  }): Promise<boolean>;
-  waitFor(
-    roomId: string,
-    participantId: string,
-    timeoutMs: number,
-    kinds?: string[],
-    from?: string[],
-  ): Promise<WaitForMessage | null>;
-  roomClose(roomId: string, resolution: string): Promise<boolean>;
-  inboxRead(roomId: string, participantId: string): Promise<InboxMessage[]>;
-  messageAck(roomId: string, participantId: string, messageIds: string[]): Promise<boolean>;
-  isConnected(): boolean;
-  roomJoin(roomId: string, participantId: string, displayName: string, role?: string): Promise<boolean>;
-  roomLeave(roomId: string, participantId: string, timeoutMs?: number): Promise<boolean>;
-}
 
 interface VerifyResult {
   outcome: VerificationOutcome;
@@ -87,7 +54,7 @@ const NOOP_PERSISTENCE: Pick<
 export async function executeSwarm(
   ctx: RunContext,
   brain: BrainSwarmAdapter,
-  neuralLink: NeuralLinkSwarmAdapter,
+  neuralLink: NeuralLinkPort,
   persistence: Pick<PersistenceCoordinator, "updateRun" | "completeRun" | "failRun"> = NOOP_PERSISTENCE,
   verificationStrategies?: VerificationStrategy[],
   lsp?: LspAdapter,
@@ -268,7 +235,7 @@ export async function executeSwarm(
 }
 
 async function dispatchTasks(
-  neuralLink: NeuralLinkSwarmAdapter,
+  neuralLink: NeuralLinkPort,
   roomId: string,
   objective: string,
   tasks: SwarmTask[],
@@ -289,7 +256,7 @@ async function dispatchTasks(
 }
 
 async function dispatchFixTasks(
-  neuralLink: NeuralLinkSwarmAdapter,
+  neuralLink: NeuralLinkPort,
   roomId: string,
   runCtx: RunContext,
   tasks: SwarmTask[],
@@ -333,7 +300,7 @@ function buildFreshContextBody(
 }
 
 async function collectHandoffs(
-  neuralLink: NeuralLinkSwarmAdapter,
+  neuralLink: NeuralLinkPort,
   roomId: string,
   expectedCount: number,
 ): Promise<unknown[]> {
@@ -360,7 +327,7 @@ async function collectHandoffs(
 }
 
 async function verifyWave(
-  neuralLink: NeuralLinkSwarmAdapter,
+  neuralLink: NeuralLinkPort,
   roomId: string,
   objective: string,
   verificationStrategies?: VerificationStrategy[],
@@ -377,7 +344,7 @@ async function verifyWave(
 }
 
 async function verifyWithAgent(
-  neuralLink: NeuralLinkSwarmAdapter,
+  neuralLink: NeuralLinkPort,
   roomId: string,
   objective: string,
 ): Promise<VerifyResult> {
@@ -401,7 +368,7 @@ async function verifyWithAgent(
 }
 
 async function verifyWithPipeline(
-  neuralLink: NeuralLinkSwarmAdapter,
+  neuralLink: NeuralLinkPort,
   roomId: string,
   objective: string,
   verificationStrategies: VerificationStrategy[],

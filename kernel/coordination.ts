@@ -1,49 +1,8 @@
-import { MessageKind } from "../adapters/neural_link/adapter.ts";
-
-// Minimal port interface — just what coordination helpers need.
-// Will be replaced by NeuralLinkPort in M4.
-export interface CoordinationPort {
-  messageSend(params: {
-    roomId: string;
-    from: string;
-    kind: MessageKind;
-    summary: string;
-    to?: string;
-    body?: string;
-    threadId?: string;
-  }): Promise<boolean>;
-  inboxRead(roomId: string, participantId: string): Promise<InboxMessage[]>;
-  messageAck(roomId: string, participantId: string, messageIds: string[]): Promise<boolean>;
-  waitFor(
-    roomId: string,
-    participantId: string,
-    timeoutMs: number,
-    kinds?: string[],
-    from?: string[],
-  ): Promise<WaitForMessage | null>;
-  roomJoin(roomId: string, participantId: string, displayName: string, role?: string): Promise<boolean>;
-  roomLeave(roomId: string, participantId: string, timeoutMs?: number): Promise<boolean>;
-  isConnected(): boolean;
-}
-
-// Message types (duplicated here temporarily — M1 is adding these to kernel/types.ts)
-export interface WaitForMessage {
-  message_id: string;
-  from: string;
-  kind: string;
-  summary: string;
-  body?: string;
-  thread_id?: string;
-  sequence: number;
-}
-
-export interface InboxMessage extends WaitForMessage {
-  to?: string;
-  created_at: string;
-}
+import type { NeuralLinkPort, WaitForMessage, InboxMessage } from "./types.ts";
+import { MessageKind } from "./types.ts";
 
 export interface ParticipationContext {
-  port: CoordinationPort;
+  port: NeuralLinkPort;
   roomId: string;
   participantId: string;
 }
@@ -54,7 +13,7 @@ export interface ParticipationContext {
  * Returns 0 if disconnected or inbox is empty.
  */
 export async function drainInbox(
-  port: CoordinationPort,
+  port: NeuralLinkPort,
   roomId: string,
   participantId: string,
   handler: (msg: InboxMessage) => Promise<void>,
@@ -92,7 +51,7 @@ export interface WaitAndProcessOptions {
  * Returns the matching message, or null on timeout/disconnect/max-iterations.
  */
 export async function waitAndProcessInbox(
-  port: CoordinationPort,
+  port: NeuralLinkPort,
   roomId: string,
   participantId: string,
   expectedKinds: string[],
@@ -131,7 +90,7 @@ export async function waitAndProcessInbox(
  * Always sends a handoff and calls roomLeave, even if work() throws.
  */
 export async function withParticipation<T>(
-  port: CoordinationPort,
+  port: NeuralLinkPort,
   roomId: string,
   participant: { id: string; displayName: string; role?: string },
   work: (ctx: ParticipationContext) => Promise<T>,

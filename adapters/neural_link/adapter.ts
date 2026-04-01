@@ -1,4 +1,4 @@
-import type { NeuralLinkConfig, RoomSummary, WaitForMessage, InboxMessage } from "../../kernel/types.ts";
+import type { NeuralLinkConfig, RoomSummary, WaitForMessage, InboxMessage, NeuralLinkPort } from "../../kernel/types.ts";
 import { NeuralLinkError } from "../../kernel/errors.ts";
 
 export enum MessageKind {
@@ -39,7 +39,7 @@ export interface MessageSendParams {
   persistHint?: string;
 }
 
-export class NeuralLinkAdapter {
+export class NeuralLinkAdapter implements NeuralLinkPort {
   private config: NeuralLinkConfig | null = null;
   private connected = false;
   private sessionId: string | null = null;

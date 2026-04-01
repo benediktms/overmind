@@ -1,5 +1,5 @@
-import { MessageKind } from "../../adapters/neural_link/adapter.ts";
-import { Mode, RunState, type RunContext, type InboxMessage, type WaitForMessage } from "../types.ts";
+import { MessageKind, type NeuralLinkPort } from "../types.ts";
+import { Mode, RunState, type RunContext, type WaitForMessage } from "../types.ts";
 import { drainInbox } from "../coordination.ts";
 import { createRunContext, recordStepCompletion, transitionState } from "./shared.ts";
 import type { PersistenceCoordinator } from "../persistence.ts";
@@ -24,39 +24,6 @@ interface BrainScoutAdapter {
   taskComment(taskId: string, comment: string): Promise<boolean>;
 }
 
-interface NeuralLinkScoutAdapter {
-  roomOpen(params: {
-    title: string;
-    participantId: string;
-    displayName: string;
-    purpose?: string;
-    externalRef?: string;
-    interactionMode?: string;
-  }): Promise<string | null>;
-  messageSend(params: {
-    roomId: string;
-    from: string;
-    kind: MessageKind;
-    summary: string;
-    to?: string;
-    body?: string;
-    threadId?: string;
-    persistHint?: string;
-  }): Promise<boolean>;
-  waitFor(
-    roomId: string,
-    participantId: string,
-    timeoutMs: number,
-    kinds?: string[],
-    from?: string[],
-  ): Promise<WaitForMessage | null>;
-  roomClose(roomId: string, resolution: string): Promise<boolean>;
-  inboxRead(roomId: string, participantId: string): Promise<InboxMessage[]>;
-  messageAck(roomId: string, participantId: string, messageIds: string[]): Promise<boolean>;
-  isConnected(): boolean;
-  roomJoin(roomId: string, participantId: string, displayName: string, role?: string): Promise<boolean>;
-  roomLeave(roomId: string, participantId: string, timeoutMs?: number): Promise<boolean>;
-}
 
 interface HandoffMessage {
   from?: string;
@@ -76,7 +43,7 @@ const NOOP_PERSISTENCE: Pick<
 export async function executeScout(
   ctx: RunContext,
   brain: BrainScoutAdapter,
-  neuralLink: NeuralLinkScoutAdapter,
+  neuralLink: NeuralLinkPort,
   persistence: Pick<PersistenceCoordinator, "updateRun" | "completeRun" | "failRun"> = NOOP_PERSISTENCE,
 ): Promise<RunContext> {
   const objectiveSummary = summarizeObjective(ctx.objective);
