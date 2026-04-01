@@ -1,4 +1,5 @@
 import type { VerificationStrategy, VerificationTier } from "./types.ts";
+import type { AgentRole } from "../agents/roles.ts";
 
 export interface TierSelectionInput {
   filesChanged: number;
@@ -14,8 +15,7 @@ export interface TierStrategyConfig {
   testCommand: string;
   buildCwd?: string;
   testCwd?: string;
-  // TODO: Revisit stricter typing for agentRole once role registry is formalized
-  agentRole?: string;
+  agentRole?: AgentRole;
   agentPrompt?: string;
 }
 

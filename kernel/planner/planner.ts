@@ -1,10 +1,11 @@
 import { Mode } from "../types.ts";
+import type { AgentRole } from "../agents/roles.ts";
 
 export interface TaskNode {
   id: string;
   title: string;
   description: string;
-  agentRole: string;
+  agentRole: AgentRole;
   dependencies: string[];
   acceptanceCriteria: string[];
   estimatedEffort?: "small" | "medium" | "large";

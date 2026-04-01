@@ -1,11 +1,13 @@
+import type { BaseAgentRole } from "./roles.ts";
+
 export type AgentTier = "worker" | "coordinator";
 export type ModelTier = "haiku" | "sonnet" | "opus";
 
 export interface AgentDefinition {
-  name: string;
+  name: BaseAgentRole;
   tier: AgentTier;
   model: ModelTier;
-  spawns: string[];
+  spawns: BaseAgentRole[];
   capabilities: string[];
   dispatchTriggers: string[];
 }

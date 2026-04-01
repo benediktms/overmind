@@ -1,6 +1,7 @@
 /**
  * Verification evidence and result types for the verification pipeline.
  */
+import type { AgentRole } from "../agents/roles.ts";
 
 /** Cost-optimized verification tier selected based on change metadata. */
 export type VerificationTier = "light" | "standard" | "thorough";
@@ -128,7 +129,7 @@ export interface TestStrategy {
 
 export interface AgentStrategy {
   type: "agent";
-  agentRole: string;
+  agentRole: AgentRole;
   prompt: string;
 }
 

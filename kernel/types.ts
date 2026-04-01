@@ -1,3 +1,6 @@
+export type { AgentRole, BaseAgentRole } from "./agents/roles.ts";
+import type { AgentRole } from "./agents/roles.ts";
+
 export enum Mode {
   Scout = "scout",
   Relay = "relay",
@@ -77,13 +80,13 @@ export interface RunContext {
 export interface RelayStep {
   title: string;
   description: string;
-  agentRole: string;
+  agentRole: AgentRole;
 }
 
 export interface SwarmTask {
   title: string;
   description: string;
-  agentRole: string;
+  agentRole: AgentRole;
   dependencies: string[];
 }
 
