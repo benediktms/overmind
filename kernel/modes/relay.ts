@@ -1,5 +1,6 @@
 import { MessageKind } from "../../adapters/neural_link/adapter.ts";
 import { Mode, RunState, type RelayStep, type RunContext } from "../types.ts";
+import type { VerificationOutcome } from "../verification/types.ts";
 import {
   createRunContext,
   recordFailure,
@@ -59,7 +60,7 @@ interface NeuralLinkRelayAdapter {
 }
 
 interface VerifyResult {
-  passed: boolean;
+  outcome: VerificationOutcome;
   details: string;
 }
 
@@ -182,11 +183,31 @@ export async function executeRelay(
       );
 
       const verifyResult = parseVerifyResult(verifyMessage, step.title);
-      await recordVerifyResult(brain, runCtx, verifyResult.passed, verifyResult.details);
+      await recordVerifyResult(brain, runCtx, verifyResult.outcome, verifyResult.details);
 
-      if (verifyResult.passed) {
+      if (verifyResult.outcome === "passed") {
         verifyPassed = true;
         continue;
+      }
+
+      // Skip fix-loop on stuck/timeout — retrying won't help
+      if (verifyResult.outcome === "stuck" || verifyResult.outcome === "timeout") {
+        runCtx = transitionState(runCtx, RunState.Failed);
+        const reason = `Relay verification ${verifyResult.outcome} for ${step.title}: ${verifyResult.details}`;
+        await recordFailure(brain, runCtx, reason);
+        await neuralLink.roomClose(roomId, "failed");
+
+        const actions = steps.slice(0, stepIndex + 1).map((s) => s.title).join("; ");
+        await brain.memoryEpisode({
+          goal: `Relay objective (${ctx.run_id}): ${objectiveSummary}`,
+          actions,
+          outcome: `${verifyResult.outcome} at ${step.title}: ${verifyResult.details}`,
+          tags: ["overmind", "relay", verifyResult.outcome],
+          importance: 3,
+        });
+
+        await persistence.failRun(runCtx, reason);
+        return runCtx;
       }
 
       if (!shouldRetry(runCtx)) {
@@ -306,7 +327,7 @@ function summarizeHandoff(value: unknown, fallback: string): string {
 function parseVerifyResult(value: unknown, stepTitle: string): VerifyResult {
   if (!isObject(value)) {
     return {
-      passed: false,
+      outcome: "failed",
       details: `${stepTitle} verify result missing`,
     };
   }
@@ -316,7 +337,7 @@ function parseVerifyResult(value: unknown, stepTitle: string): VerifyResult {
     ? value.details
     : `${stepTitle} verification ${passed ? "passed" : "failed"}`;
 
-  return { passed, details };
+  return { outcome: passed ? "passed" : "failed", details };
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {

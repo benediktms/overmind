@@ -5,6 +5,9 @@
 /** Cost-optimized verification tier selected based on change metadata. */
 export type VerificationTier = "light" | "standard" | "thorough";
 
+/** Typed verification outcome — richer than boolean `passed`. */
+export type VerificationOutcome = "passed" | "failed" | "timeout" | "stuck";
+
 export interface VerificationTrigger {
   type: "manual" | "automated" | "scheduled";
   source: "agent" | "lsp" | "build" | "test";
@@ -59,7 +62,7 @@ export interface FailedTask {
 }
 
 export interface VerificationResult {
-  passed: boolean;
+  outcome: VerificationOutcome;
   confidence: number; // 0.0 - 1.0
   details: string;
   evidence: VerificationEvidence;

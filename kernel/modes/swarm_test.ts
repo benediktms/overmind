@@ -222,3 +222,81 @@ Deno.test("executeSwarm sends full parallel wave before first waitFor call", asy
   assertEquals(dispatchIndexes.length, 5);
   assertEquals(dispatchIndexes.every((index) => index < firstWaitIndex), true);
 });
+
+// --- Outcome model tests ---
+
+Deno.test("executeSwarm skips fix-loop on stuck outcome and returns Failed", async () => {
+  const brain = new MockBrainAdapter();
+  const neuralLink = new MockNeuralLinkAdapter();
+
+  // Provide pipeline strategies so verifyWithPipeline is used
+  const mockBash = {
+    run: async (_cmd: string, _cwd?: string) => ({
+      success: false,
+      exitCode: 1,
+      output: "Build failed: error",
+      duration_ms: 100,
+    }),
+  };
+
+  // 5 handoffs then pipeline will detect stuck (same failure 3x with retry)
+  mockWaitForQueue(neuralLink, [
+    { from: "cortex", summary: "Task 1 done" },
+    { from: "probe", summary: "Task 2 done" },
+    { from: "liaison", summary: "Task 3 done" },
+    { from: "probe-2", summary: "Task 4 done" },
+    { from: "cortex-2", summary: "Task 5 done" },
+  ]);
+
+  const ctx = makeContext({ max_iterations: 5 });
+  const finalCtx = await executeSwarm(
+    ctx,
+    brain,
+    neuralLink,
+    undefined,
+    [{ type: "build", command: "exit 1" }],
+    undefined,
+    mockBash,
+  );
+
+  assertEquals(finalCtx.state, RunState.Failed);
+
+  // No fix messages should have been dispatched — stuck skips fix-loop
+  const fixMessages = callsByMethod(neuralLink.calls, "messageSend").filter((call) => {
+    const params = call.args[0] as { summary: string };
+    return params.summary.startsWith("Fix");
+  });
+  assertEquals(fixMessages.length, 0);
+
+  // Room should be closed as failed
+  const roomClose = callsByMethod(neuralLink.calls, "roomClose")[0];
+  assertEquals(roomClose.args[1], "failed");
+});
+
+Deno.test("executeSwarm fresh-context mode produces clean fix body", async () => {
+  const brain = new MockBrainAdapter();
+  const neuralLink = new MockNeuralLinkAdapter();
+  mockWaitForQueue(neuralLink, [
+    { from: "cortex", summary: "Task 1 done" },
+    { from: "probe", summary: "Task 2 done" },
+    { from: "liaison", summary: "Task 3 done" },
+    { from: "probe-2", summary: "Task 4 done" },
+    { from: "cortex-2", summary: "Task 5 done" },
+    { passed: false, details: "tests failed", failedTasks: ["Task 2"] },
+    { from: "probe", summary: "Fix done" },
+    { passed: true, details: "all passed" },
+  ]);
+
+  const ctx = makeContext();
+  await executeSwarm(ctx, brain, neuralLink, undefined, undefined, undefined, undefined, "fresh-context");
+
+  const fixMessages = callsByMethod(neuralLink.calls, "messageSend").filter((call) => {
+    const params = call.args[0] as { summary: string };
+    return params.summary.startsWith("Fix");
+  });
+
+  assertEquals(fixMessages.length >= 1, true);
+  const body = (fixMessages[0].args[0] as { body: string }).body;
+  assertEquals(body.startsWith("Objective:"), true, `Expected fresh-context body starting with 'Objective:', got: ${body}`);
+  assertEquals(body.includes("Previous attempt"), true);
+});

@@ -9,7 +9,7 @@ import {
   transitionState,
 } from "./shared.ts";
 import type { PersistenceCoordinator } from "../persistence.ts";
-import type { VerificationStrategy } from "../verification/types.ts";
+import type { VerificationOutcome, VerificationResult, VerificationStrategy } from "../verification/types.ts";
 import { VerificationPipeline, createVerificationPipeline } from "../verification/pipeline.ts";
 import type { LspAdapter, BashAdapter } from "../verification/strategies.ts";
 
@@ -62,9 +62,10 @@ interface NeuralLinkSwarmAdapter {
 }
 
 interface VerifyResult {
-  passed: boolean;
+  outcome: VerificationOutcome;
   details: string;
   failedTasks: string[];
+  failedFiles: string[];
 }
 
 const NOOP_PERSISTENCE: Pick<
@@ -84,6 +85,7 @@ export async function executeSwarm(
   verificationStrategies?: VerificationStrategy[],
   lsp?: LspAdapter,
   bash?: BashAdapter,
+  retryMode: "in-context" | "fresh-context" = "in-context",
 ): Promise<RunContext> {
   const objectiveSummary = summarizeObjective(ctx.objective);
 
@@ -164,9 +166,9 @@ export async function executeSwarm(
       ctx.workspace,
       ctx.run_id,
     );
-    await recordVerifyResult(brain, runCtx, verifyResult.passed, verifyResult.details);
+    await recordVerifyResult(brain, runCtx, verifyResult.outcome, verifyResult.details);
 
-    if (verifyResult.passed) {
+    if (verifyResult.outcome === "passed") {
       await neuralLink.roomClose(roomId, "completed");
 
       const actions = swarmTasks.map((t) => t.title).join("; ");
@@ -185,6 +187,26 @@ export async function executeSwarm(
       }
       runCtx = transitionState(runCtx, RunState.Completed);
       await persistence.completeRun(runCtx, outcome);
+      return runCtx;
+    }
+
+    // Skip fix-loop on stuck/timeout — retrying won't help
+    if (verifyResult.outcome === "stuck" || verifyResult.outcome === "timeout") {
+      runCtx = transitionState(runCtx, RunState.Failed);
+      const reason = `Swarm verification ${verifyResult.outcome}: ${verifyResult.details}`;
+      await recordFailure(brain, runCtx, reason);
+      await neuralLink.roomClose(roomId, "failed");
+
+      const actions = swarmTasks.map((t) => t.title).join("; ");
+      await brain.memoryEpisode({
+        goal: `Swarm objective (${ctx.run_id}): ${objectiveSummary}`,
+        actions,
+        outcome: `${verifyResult.outcome} after ${runCtx.iteration + 1} wave(s): ${verifyResult.details}`,
+        tags: ["overmind", "swarm", verifyResult.outcome],
+        importance: 1.0,
+      });
+
+      await persistence.failRun(runCtx, reason);
       return runCtx;
     }
 
@@ -215,7 +237,7 @@ export async function executeSwarm(
     });
 
     const fixTasks = selectFixTasks(swarmTasks, verifyResult.failedTasks);
-    await dispatchFixTasks(neuralLink, roomId, runCtx, fixTasks, verifyResult.details);
+    await dispatchFixTasks(neuralLink, roomId, runCtx, fixTasks, verifyResult.details, ctx.objective, verifyResult.failedFiles, retryMode);
     await recordStepCompletion(
       brain,
       runCtx,
@@ -259,7 +281,14 @@ async function dispatchFixTasks(
   runCtx: RunContext,
   tasks: SwarmTask[],
   verifyDetails: string,
+  objective: string,
+  failedFiles: string[],
+  retryMode: "in-context" | "fresh-context",
 ): Promise<void> {
+  const body = retryMode === "fresh-context"
+    ? buildFreshContextBody(objective, verifyDetails, failedFiles, runCtx.iteration)
+    : `Address verification failure: ${verifyDetails}`;
+
   await Promise.all(
     tasks.map((task) => {
       return neuralLink.messageSend({
@@ -268,10 +297,25 @@ async function dispatchFixTasks(
         kind: MessageKind.Finding,
         summary: `Fix ${task.title} (attempt ${runCtx.iteration})`,
         to: task.agentRole,
-        body: `Address verification failure: ${verifyDetails}`,
+        body,
       });
     }),
   );
+}
+
+function buildFreshContextBody(
+  objective: string,
+  failureSummary: string,
+  failedFiles: string[],
+  attemptNumber: number,
+): string {
+  const brief = failureSummary.length > 500
+    ? failureSummary.slice(0, 497) + "..."
+    : failureSummary;
+  const files = failedFiles.length > 0
+    ? `\nFiles to examine: ${failedFiles.join(", ")}`
+    : "";
+  return `Objective: ${objective}\nPrevious attempt ${attemptNumber} failed: ${brief}${files}`;
 }
 
 async function collectHandoffs(
@@ -378,18 +422,20 @@ async function verifyWithPipeline(
   const result = await pipeline.verify();
 
   return {
-    passed: result.passed,
+    outcome: result.outcome,
     details: result.details,
-    failedTasks: result.failedTasks.map((ft: { taskId: string }) => ft.taskId),
+    failedTasks: result.failedTasks.map((ft) => ft.taskId),
+    failedFiles: extractFailedFiles(result),
   };
 }
 
 function parseVerifyResult(value: unknown): VerifyResult {
   if (!isObject(value)) {
     return {
-      passed: false,
+      outcome: "failed",
       details: "swarm verification result missing",
       failedTasks: [],
+      failedFiles: [],
     };
   }
 
@@ -401,7 +447,8 @@ function parseVerifyResult(value: unknown): VerifyResult {
     ? value.failedTasks.filter((item): item is string => typeof item === "string")
     : [];
 
-  return { passed, details, failedTasks };
+  // Agent-based verification does not return file paths — failedFiles only populated via pipeline strategies
+  return { outcome: passed ? "passed" : "failed", details, failedTasks, failedFiles: [] };
 }
 
 function selectFixTasks(allTasks: SwarmTask[], failedTaskTitles: string[]): SwarmTask[] {
@@ -459,6 +506,19 @@ function getSwarmTasks(objectiveSummary: string): SwarmTask[] {
       dependencies: ["Task 2", "Task 3", "Task 4"],
     },
   ];
+}
+
+function extractFailedFiles(result: VerificationResult): string[] {
+  const files = new Set<string>();
+  for (const ft of result.failedTasks) {
+    for (const e of ft.evidence) {
+      if (e.path) files.add(e.path);
+    }
+  }
+  for (const d of result.evidence.diagnostics) {
+    if (d.file) files.add(d.file);
+  }
+  return [...files];
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {

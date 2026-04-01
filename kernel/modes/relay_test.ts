@@ -141,7 +141,7 @@ Deno.test("executeRelay happy path records verify pass comments and returns comp
 
   const verifyPassComments = callsByMethod(brain.calls, "taskComment").filter((call) => {
     const comment = call.args[1] as string;
-    return comment.startsWith("[verify:pass]");
+    return comment.startsWith("[verify:passed]");
   });
   assertEquals(verifyPassComments.length, 3);
   assertEquals(finalCtx.state, RunState.Completed);

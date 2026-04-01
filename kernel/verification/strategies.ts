@@ -197,23 +197,23 @@ export async function executeCompositeStrategy(
     results.push(result);
   }
 
-  const passed = strategy.mode === "all"
-    ? results.every((r) => r.passed)
-    : results.some((r) => r.passed);
+  const allPassed = strategy.mode === "all"
+    ? results.every((r) => r.outcome === "passed")
+    : results.some((r) => r.outcome === "passed");
 
   const allFailedTasks = results.flatMap((r) => r.failedTasks);
   const allRecommendations = results.flatMap((r) => r.recommendations);
 
   const confidence = strategy.mode === "all"
     ? (results.length === 0 ? 0 : Math.min(...results.map((r) => r.confidence)))
-    : (results.find((r) => r.passed)?.confidence ?? 0);
+    : (results.find((r) => r.outcome === "passed")?.confidence ?? 0);
 
   const evidence = mergeEvidenceResults(results, { type: "automated", source: "agent" });
 
   return {
-    passed,
+    outcome: allPassed ? "passed" : "failed",
     confidence,
-    details: `${strategy.mode} mode: ${passed ? "all strategies passed" : "some strategies failed"}`,
+    details: `${strategy.mode} mode: ${allPassed ? "all strategies passed" : "some strategies failed"}`,
     evidence,
     failedTasks: allFailedTasks,
     recommendations: allRecommendations,

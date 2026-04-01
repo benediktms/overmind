@@ -112,7 +112,7 @@ export class VerificationPipeline {
 
       const result = await this.executeStrategies();
 
-      if (result.passed) {
+      if (result.outcome === "passed") {
         // Evidence staleness check: warn if evidence is old
         const maxAge = this.config.maxEvidenceAgeMs ?? 300_000;
         if (isEvidenceStale(result.evidence.timestamp, maxAge)) {
@@ -167,7 +167,7 @@ export class VerificationPipeline {
       }
 
       // Fail-fast: skip agent strategies if deterministic gates failed
-      if (failFast && allResults.some((r) => !r.passed)) {
+      if (failFast && allResults.some((r) => r.outcome !== "passed")) {
         return this.aggregateResults(allResults);
       }
     }
@@ -208,18 +208,18 @@ export class VerificationPipeline {
   }
 
   private aggregateResults(results: VerificationResult[]): VerificationResult {
-    const passed = results.every((r) => r.passed);
+    const allPassed = results.every((r) => r.outcome === "passed");
     const confidence = results.length === 0 ? 0 : Math.min(...results.map((r) => r.confidence));
-    const details = passed
+    const details = allPassed
       ? `All ${results.length} strategies passed`
-      : `Failed strategies: ${results.filter((r) => !r.passed).map((r) => r.details).join("; ")}`;
+      : `Failed strategies: ${results.filter((r) => r.outcome !== "passed").map((r) => r.details).join("; ")}`;
 
     const evidence = mergeEvidenceResults(results, { type: "automated", source: "agent" });
     const failedTasks = results.flatMap((r) => r.failedTasks);
     const recommendations = results.flatMap((r) => r.recommendations);
 
     return {
-      passed,
+      outcome: allPassed ? "passed" : "failed",
       confidence,
       details,
       evidence,
@@ -248,7 +248,7 @@ export class VerificationPipeline {
     } catch (error) {
       const duration = Date.now() - startTime;
       return {
-        passed: false,
+        outcome: "failed",
         confidence: 0,
         details: `Strategy execution error: ${error instanceof Error ? error.message : String(error)}`,
         evidence: {
@@ -271,11 +271,12 @@ export class VerificationPipeline {
 
     const { diagnostics, evidence } = await executeLspStrategy(strategy, this.context, this.deps.lsp);
     const errors = diagnostics.filter((d) => d.severity === "error");
+    const outcome = errors.length === 0 ? "passed" as const : "failed" as const;
 
     return {
-      passed: errors.length === 0,
-      confidence: errors.length === 0 ? 1.0 : 0.5,
-      details: errors.length === 0
+      outcome,
+      confidence: outcome === "passed" ? 1.0 : 0.5,
+      details: outcome === "passed"
         ? "No LSP errors found"
         : `Found ${errors.length} LSP errors`,
       evidence: {
@@ -285,9 +286,9 @@ export class VerificationPipeline {
         artifacts: evidence,
         diagnostics,
       },
-      failedTasks: errors.length > 0
-        ? [{ taskId: "lsp", reason: `${errors.length} errors`, evidence: [] }]
-        : [],
+      failedTasks: outcome === "passed"
+        ? []
+        : [{ taskId: "lsp", reason: `${errors.length} errors`, evidence: [] }],
       recommendations: [],
     };
   }
@@ -300,7 +301,7 @@ export class VerificationPipeline {
     const { buildOutput, evidence } = await executeBuildStrategy(strategy, this.context, this.deps.bash);
 
     return {
-      passed: buildOutput.success,
+      outcome: buildOutput.success ? "passed" : "failed",
       confidence: 1.0,
       details: buildOutput.success
         ? `Build succeeded in ${buildOutput.duration_ms}ms`
@@ -326,12 +327,12 @@ export class VerificationPipeline {
     }
 
     const { testResults, evidence } = await executeTestStrategy(strategy, this.context, this.deps.bash);
-    const passed = testResults.failed === 0;
+    const outcome = testResults.failed === 0 ? "passed" as const : "failed" as const;
 
     return {
-      passed,
+      outcome,
       confidence: 0.9,
-      details: passed
+      details: outcome === "passed"
         ? `All tests passed (${testResults.passed} passed, ${testResults.skipped} skipped)`
         : `${testResults.failed} tests failed, ${testResults.passed} passed`,
       evidence: {
@@ -342,10 +343,10 @@ export class VerificationPipeline {
         diagnostics: [],
         testResults,
       },
-      failedTasks: passed
+      failedTasks: outcome === "passed"
         ? []
         : [{ taskId: "tests", reason: `${testResults.failed} failed`, evidence: [evidence] }],
-      recommendations: passed ? [] : ["Review failed tests and fix underlying issues"],
+      recommendations: outcome === "passed" ? [] : ["Review failed tests and fix underlying issues"],
     };
   }
 
@@ -354,7 +355,7 @@ export class VerificationPipeline {
       return this.createErrorResult("NeuralLink adapter not configured for agent verification");
     }
 
-    const { evidence, passed, details } = await executeAgentStrategy(
+    const { evidence, passed: agentPassed, details } = await executeAgentStrategy(
       strategy,
       this.context,
       this.deps.neuralLink,
@@ -364,7 +365,7 @@ export class VerificationPipeline {
     );
 
     return {
-      passed,
+      outcome: agentPassed ? "passed" : "failed",
       confidence: 0.8,
       details,
       evidence: {
@@ -374,8 +375,8 @@ export class VerificationPipeline {
         artifacts: [evidence],
         diagnostics: [],
       },
-      failedTasks: passed ? [] : [{ taskId: strategy.agentRole, reason: details, evidence: [evidence] }],
-      recommendations: passed ? [] : ["Review agent verification feedback and address issues"],
+      failedTasks: agentPassed ? [] : [{ taskId: strategy.agentRole, reason: details, evidence: [evidence] }],
+      recommendations: agentPassed ? [] : ["Review agent verification feedback and address issues"],
     };
   }
 
@@ -385,7 +386,7 @@ export class VerificationPipeline {
 
   private createErrorResult(message: string): VerificationResult {
     return {
-      passed: false,
+      outcome: "failed",
       confidence: 0,
       details: message,
       evidence: {
@@ -402,7 +403,7 @@ export class VerificationPipeline {
 
   private createOpenCircuitResult(retryState: RetryState): VerificationResult {
     return {
-      passed: false,
+      outcome: "stuck",
       confidence: 0,
       details: `Circuit breaker open: ${retryState.consecutiveFailures} consecutive failures`,
       evidence: {
@@ -421,6 +422,7 @@ export class VerificationPipeline {
     const threshold = this.config.retry.sameFailureThreshold ?? 3;
     return {
       ...lastResult,
+      outcome: "stuck",
       details: `Stuck: same failure repeated ${threshold} times — ${lastResult.details}`,
       recommendations: [
         ...lastResult.recommendations,
@@ -431,7 +433,7 @@ export class VerificationPipeline {
 
   private createTimeoutResult(retryState: RetryState, elapsedMs: number): VerificationResult {
     return {
-      passed: false,
+      outcome: "timeout",
       confidence: 0,
       details: `Verification timed out after ${elapsedMs}ms (${retryState.attempt} attempts)`,
       evidence: {

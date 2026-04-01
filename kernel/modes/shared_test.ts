@@ -89,18 +89,18 @@ Deno.test("recordStepCompletion writes formatted comment to brain task", async (
   );
 });
 
-Deno.test("recordVerifyResult writes pass/fail with details", async () => {
+Deno.test("recordVerifyResult writes outcome with details", async () => {
   const brain = new MockBrainAdapter();
   const ctx = makeContext({ brain_task_id: "BRN-VERIFY-1" });
 
-  await recordVerifyResult(brain, ctx, true, "deno test --allow-all passed");
+  await recordVerifyResult(brain, ctx, "passed", "deno test --allow-all passed");
 
   assertEquals(brain.calls.length, 1);
   assertEquals(brain.calls[0].method, "taskComment");
   assertEquals(brain.calls[0].args[0], "BRN-VERIFY-1");
   assertEquals(
     brain.calls[0].args[1],
-    "[verify:pass] deno test --allow-all passed",
+    "[verify:passed] deno test --allow-all passed",
   );
 });
 

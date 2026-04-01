@@ -86,14 +86,13 @@ export async function recordStepCompletion(
 export async function recordVerifyResult(
   brain: BrainTaskWriter,
   ctx: RunContext,
-  passed: boolean,
+  outcome: string,
   details: string,
 ): Promise<boolean> {
   if (!ctx.brain_task_id) {
     return false;
   }
-  const status = passed ? "pass" : "fail";
-  return await brain.taskComment(ctx.brain_task_id, `[verify:${status}] ${details}`);
+  return await brain.taskComment(ctx.brain_task_id, `[verify:${outcome}] ${details}`);
 }
 
 export function shouldRetry(ctx: RunContext): boolean {
