@@ -74,6 +74,32 @@ Deno.test("transitionState rejects invalid transitions", () => {
   );
 });
 
+Deno.test("transitionState allows Cancelled from Pending, Running, Verifying, Fixing", () => {
+  const states = [RunState.Pending, RunState.Running, RunState.Verifying, RunState.Fixing];
+
+  for (const state of states) {
+    const ctx = makeContext({ state });
+    const result = transitionState(ctx, RunState.Cancelled);
+    assertEquals(result.state, RunState.Cancelled);
+  }
+});
+
+Deno.test("transitionState rejects transitions from Cancelled", () => {
+  const cancelledCtx = makeContext({ state: RunState.Cancelled });
+
+  assertThrows(
+    () => transitionState(cancelledCtx, RunState.Running),
+    Error,
+    "Invalid state transition",
+  );
+
+  assertThrows(
+    () => transitionState(cancelledCtx, RunState.Failed),
+    Error,
+    "Invalid state transition",
+  );
+});
+
 Deno.test("recordStepCompletion writes formatted comment to brain task", async () => {
   const brain = new MockBrainAdapter();
   const ctx = makeContext({ brain_task_id: "BRN-STEP-1" });

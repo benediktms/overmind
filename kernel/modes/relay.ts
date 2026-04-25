@@ -8,9 +8,14 @@ import {
   recordStepCompletion,
   recordVerifyResult,
   shouldRetry,
+  summarizeObjective,
   transitionState,
 } from "./shared.ts";
+import { isObject } from "../utils.ts";
 import type { PersistenceCoordinator } from "../persistence.ts";
+import { topologicalSort, type TaskGraph, type TaskNode } from "../planner/planner.ts";
+import { safeDispatch, type AgentDispatcher } from "../agent_dispatcher.ts";
+import { CancellationError, throwIfAborted } from "../cancellation.ts";
 
 const DEFAULT_WAIT_TIMEOUT_MS = 30_000;
 const LEAD_PARTICIPANT_ID = "overmind-relay-lead";
@@ -40,35 +45,46 @@ interface VerifyResult {
 
 const NOOP_PERSISTENCE: Pick<
   PersistenceCoordinator,
-  "updateRun" | "completeRun" | "failRun"
+  "updateRun" | "completeRun" | "failRun" | "cancelRun"
 > = {
   updateRun: async () => {},
   completeRun: async () => {},
   failRun: async () => {},
+  cancelRun: async () => {},
 };
 
 export async function executeRelay(
   ctx: RunContext,
   brain: BrainRelayAdapter,
   neuralLink: NeuralLinkPort,
-  persistence: Pick<PersistenceCoordinator, "updateRun" | "completeRun" | "failRun"> = NOOP_PERSISTENCE,
+  persistence: Pick<PersistenceCoordinator, "updateRun" | "completeRun" | "failRun" | "cancelRun"> = NOOP_PERSISTENCE,
+  graph?: TaskGraph,
+  dispatcher?: AgentDispatcher,
 ): Promise<RunContext> {
+  let roomIdForCleanup: string | null = null;
+  let runCtxForCleanup: RunContext | null = null;
+  try {
   const objectiveSummary = summarizeObjective(ctx.objective);
-
-  const taskId = await brain.taskCreate({
-    title: `[overmind:relay] ${objectiveSummary}`,
-  }) ?? "";
 
   let runCtx = createRunContext({
     run_id: ctx.run_id,
     mode: Mode.Relay,
     objective: ctx.objective,
     workspace: ctx.workspace,
-    brain_task_id: taskId,
+    brain_task_id: "",
     room_id: ctx.room_id,
     max_iterations: ctx.max_iterations,
     created_at: ctx.created_at,
   });
+  runCtxForCleanup = runCtx;
+  throwIfAborted(ctx.signal);
+
+  const taskId = await brain.taskCreate({
+    title: `[overmind:relay] ${objectiveSummary}`,
+  }) ?? "";
+
+  runCtx = { ...runCtx, brain_task_id: taskId };
+  runCtxForCleanup = runCtx;
 
   await persistence.updateRun(runCtx, {
     checkpointSummary: taskId ? "Created relay brain task" : "Running relay without Brain task",
@@ -101,24 +117,46 @@ export async function executeRelay(
     ...runCtx,
     room_id: roomId,
   };
+  roomIdForCleanup = roomId;
+  runCtxForCleanup = runCtx;
   await persistence.updateRun(runCtx, {
     checkpointSummary: `Opened relay coordination room ${roomId}`,
   });
 
-  const steps = getRelaySteps(objectiveSummary);
+  const steps = graph
+    ? topologicalSort(graph).map((node): RelayStep => ({
+        title: node.title,
+        description: node.description,
+        agentRole: node.agentRole,
+      }))
+    : getRelaySteps(objectiveSummary);
 
   for (let stepIndex = 0; stepIndex < steps.length; stepIndex += 1) {
+    throwIfAborted(ctx.signal);
+    runCtxForCleanup = runCtx;
     const step = steps[stepIndex];
+    const stepParticipantId = `${step.agentRole}-step-${stepIndex}`;
 
     await neuralLink.messageSend({
       roomId,
       from: LEAD_PARTICIPANT_ID,
       kind: MessageKind.Finding,
       summary: `Execute ${step.title}: ${step.description}`,
-      to: step.agentRole,
+      to: stepParticipantId,
       body: `Objective: ${ctx.objective}`,
       threadId: `step-${stepIndex}`,
     });
+
+    if (dispatcher?.isAvailable()) {
+      await safeDispatch(dispatcher, {
+        agentId: `${ctx.run_id}-${step.agentRole}-step-${stepIndex}`,
+        role: step.agentRole,
+        prompt: `${step.title}: ${step.description}`,
+        roomId,
+        participantId: stepParticipantId,
+        workspace: ctx.workspace,
+      });
+    }
 
     const handoff = await neuralLink.waitFor(
       roomId,
@@ -126,6 +164,7 @@ export async function executeRelay(
       DEFAULT_WAIT_TIMEOUT_MS,
       [MessageKind.Handoff],
     );
+    throwIfAborted(ctx.signal);
 
     await drainInbox(neuralLink, roomId, LEAD_PARTICIPANT_ID, async (_msg) => {
       // Log interleaved messages; no action needed in supervisory mode
@@ -141,20 +180,34 @@ export async function executeRelay(
     let verifyPassed = false;
 
     while (!verifyPassed) {
+      throwIfAborted(ctx.signal);
+      runCtxForCleanup = runCtx;
       runCtx = transitionState(runCtx, RunState.Verifying);
       await persistence.updateRun(runCtx, {
         checkpointSummary: `Verifying ${step.title}`,
       });
 
+      const verifierParticipantId = `verifier-step-${stepIndex}-iter-${runCtx.iteration}`;
       await neuralLink.messageSend({
         roomId,
         from: LEAD_PARTICIPANT_ID,
         kind: MessageKind.ReviewRequest,
         summary: `Verify ${step.title}`,
-        to: "verifier",
+        to: verifierParticipantId,
         body: `Validate output for ${step.title} in objective: ${ctx.objective}`,
         threadId: `step-${stepIndex}`,
       });
+
+      if (dispatcher?.isAvailable()) {
+        await safeDispatch(dispatcher, {
+          agentId: `${ctx.run_id}-verifier-step-${stepIndex}-iter-${runCtx.iteration}`,
+          role: "verifier",
+          prompt: `Verify ${step.title}`,
+          roomId,
+          participantId: verifierParticipantId,
+          workspace: ctx.workspace,
+        });
+      }
 
       const verifyMessage = await neuralLink.waitFor(
         roomId,
@@ -217,15 +270,27 @@ export async function executeRelay(
         checkpointSummary: `Fixing ${step.title} after verification failure`,
       });
 
+      const fixParticipantId = `${step.agentRole}-step-${stepIndex}-fix-${runCtx.iteration}`;
       await neuralLink.messageSend({
         roomId,
         from: LEAD_PARTICIPANT_ID,
         kind: MessageKind.Finding,
         summary: `Fix ${step.title} (attempt ${runCtx.iteration})`,
-        to: step.agentRole,
+        to: fixParticipantId,
         body: `Address verify failure: ${verifyResult.details}`,
         threadId: `step-${stepIndex}`,
       });
+
+      if (dispatcher?.isAvailable()) {
+        await safeDispatch(dispatcher, {
+          agentId: `${ctx.run_id}-${step.agentRole}-step-${stepIndex}-fix-${runCtx.iteration}`,
+          role: step.agentRole,
+          prompt: `Fix ${step.title}: ${verifyResult.details}`,
+          roomId,
+          participantId: fixParticipantId,
+          workspace: ctx.workspace,
+        });
+      }
 
       const fixHandoff = await neuralLink.waitFor(
         roomId,
@@ -262,15 +327,27 @@ export async function executeRelay(
   runCtx = transitionState(runCtx, RunState.Completed);
   await persistence.completeRun(runCtx, outcome);
   return runCtx;
+  } catch (err) {
+    if (!(err instanceof CancellationError)) throw err;
+    return await finalizeCancelledRelay(runCtxForCleanup, roomIdForCleanup, neuralLink, persistence);
+  }
 }
 
-function summarizeObjective(objective: string): string {
-  const cleaned = objective.trim().replace(/\s+/g, " ");
-  if (cleaned.length <= 96) {
-    return cleaned;
+async function finalizeCancelledRelay(
+  runCtx: RunContext | null,
+  roomId: string | null,
+  neuralLink: NeuralLinkPort,
+  persistence: Pick<PersistenceCoordinator, "cancelRun">,
+): Promise<RunContext> {
+  if (!runCtx) {
+    throw new CancellationError();
   }
-
-  return `${cleaned.slice(0, 93)}...`;
+  const cancelledCtx = transitionState(runCtx, RunState.Cancelled);
+  if (roomId) {
+    try { await neuralLink.roomClose(roomId, "cancelled"); } catch { /* best-effort */ }
+  }
+  await persistence.cancelRun(cancelledCtx);
+  return cancelledCtx;
 }
 
 function getRelaySteps(objectiveSummary: string): RelayStep[] {
@@ -320,8 +397,4 @@ function parseVerifyResult(value: unknown, stepTitle: string): VerifyResult {
     : `${stepTitle} verification ${passed ? "passed" : "failed"}`;
 
   return { outcome: passed ? "passed" : "failed", details };
-}
-
-function isObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
 }

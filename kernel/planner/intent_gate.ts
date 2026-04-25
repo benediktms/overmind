@@ -2,6 +2,8 @@ import { Mode } from "../types.ts";
 
 export type IntentType = "trivial" | "explicit" | "exploratory" | "open" | "ambiguous";
 
+export type InterviewCallback = (question: string) => Promise<string>;
+
 export interface IntentClassification {
   type: IntentType;
   confidence: number;
@@ -25,6 +27,12 @@ export interface IntentGate {
 }
 
 export class KeywordIntentGate implements IntentGate {
+  private interviewCallback: InterviewCallback | null;
+
+  constructor(interviewCallback?: InterviewCallback) {
+    this.interviewCallback = interviewCallback ?? null;
+  }
+
   private trivialPatterns = [
     /^\s*fix\s+(typo|import|syntax)\s+/i,
     /^\s*update\s+\w+\s+to\s+/i,
@@ -106,12 +114,21 @@ export class KeywordIntentGate implements IntentGate {
     _objective: string,
     initialClassification: IntentClassification,
   ): Promise<InterviewResponse[]> {
-    // In a real implementation, this would interactively ask questions
-    // For now, return the suggested questions as un-answered
-    return (initialClassification.interviewQuestions ?? []).map((q) => ({
-      question: q,
-      answer: "",
-    }));
+    const questions = initialClassification.interviewQuestions ?? [];
+    if (questions.length === 0) return [];
+
+    if (!this.interviewCallback) {
+      // No callback registered — return unanswered questions
+      // (preserves current behavior for non-interactive contexts)
+      return questions.map((q) => ({ question: q, answer: "" }));
+    }
+
+    const responses: InterviewResponse[] = [];
+    for (const question of questions) {
+      const answer = await this.interviewCallback(question);
+      responses.push({ question, answer });
+    }
+    return responses;
   }
 
   private generateQuestions(objective: string): string[] {

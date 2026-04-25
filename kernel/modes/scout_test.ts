@@ -7,6 +7,8 @@ import { MockBrainAdapter, type MockCall } from "../test_helpers/mock_brain.ts";
 import { MockNeuralLinkAdapter } from "../test_helpers/mock_neural_link.ts";
 import { createRunContext } from "./shared.ts";
 import { executeScout } from "./scout.ts";
+import type { TaskGraph } from "../planner/planner.ts";
+import { MockDispatcher } from "../agent_dispatcher.ts";
 
 function makeContext(overrides: Partial<RunContext> = {}): RunContext {
   return {
@@ -199,4 +201,65 @@ Deno.test("executeScout performs key lifecycle calls in expected order", async (
   for (const expected of mustInclude) {
     assertEquals(combined.includes(expected), true);
   }
+});
+
+Deno.test("executeScout uses graph tasks as explore angles when graph is provided", async () => {
+  const brain = new MockBrainAdapter();
+  const neuralLink = new MockNeuralLinkAdapter();
+
+  const graph: TaskGraph = {
+    tasks: [
+      {
+        id: "t1",
+        title: "Explore API surface",
+        description: "Map all public endpoints",
+        agentRole: "probe",
+        dependencies: [],
+        acceptanceCriteria: [],
+      },
+      {
+        id: "t2",
+        title: "Explore data model",
+        description: "Catalog schema and relations",
+        agentRole: "cortex",
+        dependencies: [],
+        acceptanceCriteria: [],
+      },
+    ],
+    parallelGroups: [["t1", "t2"]],
+    entryPoints: ["t1", "t2"],
+  };
+
+  mockWaitForQueue(neuralLink, [
+    { from: "probe-1", summary: "API mapped" },
+    { from: "probe-2", summary: "Data model mapped" },
+  ]);
+
+  await executeScout(makeContext(), brain, neuralLink, undefined, graph);
+
+  const messages = callsByMethod(neuralLink.calls, "messageSend");
+  assertEquals(messages.length, 2);
+  assertEquals(
+    (messages[0].args[0] as { summary: string }).summary.includes("Explore API surface"),
+    true,
+  );
+  assertEquals(
+    (messages[1].args[0] as { summary: string }).summary.includes("Explore data model"),
+    true,
+  );
+});
+
+Deno.test("executeScout dispatches agents via dispatcher for each probe", async () => {
+  const brain = new MockBrainAdapter();
+  const neuralLink = new MockNeuralLinkAdapter();
+  const dispatcher = new MockDispatcher();
+
+  await executeScout(makeContext(), brain, neuralLink, undefined, undefined, dispatcher);
+
+  assertEquals(dispatcher.dispatched.length, 3);
+  assertEquals(dispatcher.dispatched[0].participantId, "probe-1");
+  assertEquals(dispatcher.dispatched[1].participantId, "probe-2");
+  assertEquals(dispatcher.dispatched[2].participantId, "probe-3");
+  assertEquals(dispatcher.dispatched[0].role, "probe");
+  assertEquals(dispatcher.dispatched[0].roomId, "room-mock-1");
 });

@@ -47,10 +47,31 @@ async function sendRawSocketRequest(socketPath: string, requestBody: string): Pr
   const decoder = new TextDecoder();
 
   try {
-    await conn.write(encoder.encode(requestBody));
+    // Send with NDJSON framing
+    await conn.write(encoder.encode(requestBody + "\n"));
+
+    // Read until newline delimiter
+    const chunks: Uint8Array[] = [];
     const buf = new Uint8Array(4096);
-    const n = await conn.read(buf);
-    return decoder.decode(buf.subarray(0, n ?? 0));
+    while (true) {
+      const n = await conn.read(buf);
+      if (n === null) break;
+      const chunk = buf.slice(0, n);
+      chunks.push(chunk);
+      if (chunk.includes(0x0a)) break;
+    }
+
+    const totalLength = chunks.reduce((sum, c) => sum + c.length, 0);
+    const merged = new Uint8Array(totalLength);
+    let offset = 0;
+    for (const c of chunks) {
+      merged.set(c, offset);
+      offset += c.length;
+    }
+
+    const raw = decoder.decode(merged);
+    const newlineIndex = raw.indexOf("\n");
+    return newlineIndex >= 0 ? raw.slice(0, newlineIndex) : raw;
   } finally {
     conn.close();
   }
@@ -302,19 +323,22 @@ Deno.test("integration: swarm lifecycle via daemon dispatches parallel wave and 
     });
     assertEquals(executeDispatches.length, 5);
 
+    // Wave 0 (Task 1, no deps) is dispatched before the first waitFor.
+    // Subsequent waves are dispatched after their preceding wave's handoffs are collected.
     const firstWaitIndex = harness.neuralLink.calls.findIndex((call) => call.method === "waitFor");
-    const executeIndexes = harness.neuralLink.calls
+    const wave0ExecuteIndexes = harness.neuralLink.calls
       .map((call, index) => ({ call, index }))
-      .filter(({ call }) => {
+      .filter(({ call, index }) => {
         if (call.method !== "messageSend") {
           return false;
         }
         const params = call.args[0] as { summary: string };
-        return params.summary.startsWith("Execute");
+        return params.summary.startsWith("Execute") && index < firstWaitIndex;
       })
       .map(({ index }) => index);
 
-    assertEquals(executeIndexes.every((index) => index < firstWaitIndex), true);
+    // Wave 0 contains exactly 1 task (Task 1 has no dependencies)
+    assertEquals(wave0ExecuteIndexes.length, 1);
     assertEquals(callsByMethod(harness.neuralLink.calls, "roomClose").length, 1);
     assertEquals(callsByMethod(harness.brain.calls, "taskComplete").length, 1);
   } finally {

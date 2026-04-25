@@ -12,6 +12,7 @@ import type {
   VerificationResult,
   VerificationStrategy,
 } from "./types.ts";
+import { isObject } from "../utils.ts";
 
 export interface VerificationContext {
   workspace: string;
@@ -154,10 +155,6 @@ export async function executeAgentStrategy(
   };
 
   return { evidence: artifact, passed, details };
-}
-
-function isObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
 }
 
 function isReviewResultPassed(value: unknown): boolean {

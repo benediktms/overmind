@@ -27,13 +27,29 @@ async function sendRawSocketRequest(socketPath: string, requestBody: string): Pr
   const encoder = new TextEncoder();
   const decoder = new TextDecoder();
 
-  await conn.write(encoder.encode(requestBody));
+  await conn.write(encoder.encode(requestBody + "\n"));
 
+  const chunks: Uint8Array[] = [];
   const buf = new Uint8Array(4096);
-  const n = await conn.read(buf);
+  while (true) {
+    const n = await conn.read(buf);
+    if (n === null) break;
+    const chunk = buf.slice(0, n);
+    chunks.push(chunk);
+    if (chunk.includes(0x0a)) break;
+  }
   conn.close();
 
-  return decoder.decode(buf.subarray(0, n ?? 0));
+  const totalLength = chunks.reduce((sum, c) => sum + c.length, 0);
+  const merged = new Uint8Array(totalLength);
+  let offset = 0;
+  for (const c of chunks) {
+    merged.set(c, offset);
+    offset += c.length;
+  }
+  const raw = decoder.decode(merged);
+  const newlineIndex = raw.indexOf("\n");
+  return newlineIndex >= 0 ? raw.slice(0, newlineIndex) : raw;
 }
 
 Deno.test("OvermindDaemon creates PID and socket files on start", async () => {
@@ -286,14 +302,14 @@ Deno.test("sendToSocket retries until socket becomes available", async () => {
     const listener = Deno.listen({ transport: "unix", path: socketPath });
     const conn = await listener.accept();
     try {
-      const reqRaw = await readConnPayload(conn);
+      const reqRaw = await readNdjsonPayload(conn);
       const req = JSON.parse(reqRaw) as { run_id: string };
       const response = {
         status: "accepted",
         run_id: req.run_id,
         error: null,
       };
-      await conn.write(new TextEncoder().encode(JSON.stringify(response)));
+      await conn.write(new TextEncoder().encode(JSON.stringify(response) + "\n"));
     } finally {
       conn.close();
       listener.close();
@@ -372,26 +388,29 @@ async function waitFor(check: () => boolean | Promise<boolean>, timeoutMs: numbe
   throw new Error(`Timed out after ${timeoutMs}ms`);
 }
 
-async function readConnPayload(conn: Deno.Conn): Promise<string> {
+async function readNdjsonPayload(conn: Deno.Conn): Promise<string> {
   const chunks: Uint8Array[] = [];
-  const buf = new Uint8Array(1024);
+  const buf = new Uint8Array(4096);
 
   while (true) {
     const n = await conn.read(buf);
     if (n === null) break;
-    chunks.push(buf.slice(0, n));
-    if (n < buf.length) break;
+    const chunk = buf.slice(0, n);
+    chunks.push(chunk);
+    if (chunk.includes(0x0a)) break;
   }
 
-  const total = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+  const total = chunks.reduce((sum, c) => sum + c.length, 0);
   const merged = new Uint8Array(total);
   let offset = 0;
-  for (const chunk of chunks) {
-    merged.set(chunk, offset);
-    offset += chunk.length;
+  for (const c of chunks) {
+    merged.set(c, offset);
+    offset += c.length;
   }
 
-  return new TextDecoder().decode(merged);
+  const raw = new TextDecoder().decode(merged);
+  const newlineIndex = raw.indexOf("\n");
+  return newlineIndex >= 0 ? raw.slice(0, newlineIndex) : raw;
 }
 
 function delay(ms: number): Promise<void> {

@@ -18,6 +18,7 @@ export enum RunState {
   Fixing = "fixing",
   Completed = "completed",
   Failed = "failed",
+  Cancelled = "cancelled",
 }
 
 export enum EventType {
@@ -49,7 +50,7 @@ export interface KernelConfig {
   modes: ModesConfig;
 }
 
-export interface SocketRequest {
+export interface ModeRequest {
   type: "mode_request";
   run_id: string;
   mode: Mode;
@@ -59,6 +60,13 @@ export interface SocketRequest {
     max_fix_cycles?: number;
   };
 }
+
+export interface CancelRequest {
+  type: "cancel_request";
+  run_id: string;
+}
+
+export type SocketRequest = ModeRequest | CancelRequest;
 
 export interface SocketResponse {
   status: "accepted" | "error";
@@ -79,6 +87,8 @@ export interface RunContext {
   created_at: string;
   /** Guard to prevent concurrent verification runs. */
   isVerifying: boolean;
+  /** AbortSignal for cooperative cancellation. */
+  signal?: AbortSignal;
 }
 
 export interface RelayStep {
@@ -88,9 +98,17 @@ export interface RelayStep {
 }
 
 export interface SwarmTask {
+  /**
+   * Stable identifier used for dependency resolution. When a SwarmTask is
+   * built from a TaskGraph, this is the TaskNode.id (matching the contract of
+   * planner/topologicalSort). When using the built-in default tasks, the id
+   * defaults to the title.
+   */
+  id: string;
   title: string;
   description: string;
   agentRole: AgentRole;
+  /** Other SwarmTask ids this task depends on. */
   dependencies: string[];
 }
 

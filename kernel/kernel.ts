@@ -7,18 +7,22 @@ import type { KernelConfig, RunContext } from "./types.ts";
 import { Mode, RunState } from "./types.ts";
 import { OvermindError } from "./errors.ts";
 import { createRunContext } from "./modes/shared.ts";
+import { CancellationRegistry } from "./cancellation.ts";
 import { executeScout } from "./modes/scout.ts";
 import { executeRelay } from "./modes/relay.ts";
 import { executeSwarm } from "./modes/swarm.ts";
 import { PersistenceCoordinator } from "./persistence.ts";
-import { KeywordIntentGate, type IntentClassification } from "./planner/intent_gate.ts";
+import { KeywordIntentGate, type IntentClassification, type InterviewCallback, type InterviewResponse } from "./planner/intent_gate.ts";
 import { selectPlanner } from "./planner/template_planners.ts";
-import { determineExecutionMode } from "./planner/planner.ts";
+import { determineExecutionMode, type TaskGraph } from "./planner/planner.ts";
 import { GapAnalyzer } from "./planner/gap_analyzer.ts";
 import { StrictValidator } from "./planner/strict_validator.ts";
+import type { AgentDispatcher } from "./agent_dispatcher.ts";
 
 export interface KernelOptions {
   registry?: AdapterRegistry;
+  interviewCallback?: InterviewCallback;
+  dispatcher?: AgentDispatcher;
 }
 
 export class Kernel {
@@ -29,12 +33,17 @@ export class Kernel {
   private injectedRegistry: AdapterRegistry | null = null;
   private config: KernelConfig | null = null;
   private running = false;
+  private cancellationRegistry = new CancellationRegistry();
+  private interviewCallback: InterviewCallback | null;
+  private dispatcher: AgentDispatcher | null;
 
   constructor(options?: KernelOptions) {
     this.eventBus = new EventBus();
     this.configLoader = new ConfigLoader();
     this.triggerEngine = new TriggerEngine();
     this.injectedRegistry = options?.registry ?? null;
+    this.interviewCallback = options?.interviewCallback ?? null;
+    this.dispatcher = options?.dispatcher ?? null;
   }
 
   async start(): Promise<void> {
@@ -88,6 +97,10 @@ export class Kernel {
     this.emit(EventType.ObjectiveReceived, { objective });
   }
 
+  cancelRun(runId: string): boolean {
+    return this.cancellationRegistry.cancel(runId);
+  }
+
   async executeMode(
     mode: Mode,
     objective: string,
@@ -102,7 +115,7 @@ export class Kernel {
     objective: string,
     workspace: string,
     runId?: string,
-    _graph?: unknown,
+    graph?: TaskGraph,
   ): Promise<RunContext> {
     if (!this.adapterRegistry) throw new OvermindError("Kernel not started");
 
@@ -112,8 +125,11 @@ export class Kernel {
     const modeSettings = config.modes[mode];
     const maxIterations = modeSettings?.maxFixCycles ?? 3;
 
+    const resolvedRunId = runId ?? `run-${crypto.randomUUID()}`;
+    const signal = this.cancellationRegistry.register(resolvedRunId);
+
     const ctx = createRunContext({
-      run_id: runId ?? `run-${crypto.randomUUID()}`,
+      run_id: resolvedRunId,
       mode,
       objective,
       workspace,
@@ -122,24 +138,34 @@ export class Kernel {
       max_iterations: maxIterations,
     });
 
+    const ctxWithSignal: RunContext = { ...ctx, signal };
+
     const brain = this.adapterRegistry.getBrain();
     const neuralLink = this.adapterRegistry.getNeuralLink();
     const persistence = new PersistenceCoordinator(workspace, brain);
-    await persistence.startRun(ctx);
+    await persistence.startRun(ctxWithSignal);
 
     try {
+      // Resolve dispatcher from explicit option or, failing that, from the
+      // adapter registry. This makes AdapterRegistry the single source of
+      // truth when no override is supplied at construction time.
+      const dispatcher = this.dispatcher
+        ?? this.adapterRegistry?.getDispatcher()
+        ?? undefined;
       switch (mode) {
         case Mode.Scout:
-          return await executeScout(ctx, brain, neuralLink, persistence);
+          return await executeScout(ctxWithSignal, brain, neuralLink, persistence, graph, dispatcher);
         case Mode.Relay:
-          return await executeRelay(ctx, brain, neuralLink, persistence);
+          return await executeRelay(ctxWithSignal, brain, neuralLink, persistence, graph, dispatcher);
         case Mode.Swarm:
-          return await executeSwarm(ctx, brain, neuralLink, persistence);
+          return await executeSwarm(ctxWithSignal, brain, neuralLink, persistence, undefined, undefined, undefined, undefined, graph, dispatcher);
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      await persistence.failRun({ ...ctx, state: RunState.Failed }, message);
+      await persistence.failRun({ ...ctxWithSignal, state: RunState.Failed }, message);
       throw err;
+    } finally {
+      this.cancellationRegistry.unregister(resolvedRunId);
     }
   }
 
@@ -150,22 +176,21 @@ export class Kernel {
   ): Promise<{ runContext: RunContext; intent: IntentClassification; plannedMode: Mode }> {
     if (!this.adapterRegistry) throw new OvermindError("Kernel not started");
 
-    const intentGate = new KeywordIntentGate();
+    const intentGate = new KeywordIntentGate(this.interviewCallback ?? undefined);
     const intent = await intentGate.classify(objective);
 
     this.emit(EventType.ObjectiveReceived, { objective, intent: intent.type });
 
-    if (intent.requiresInterview && intent.interviewQuestions) {
-      console.log("Clarification needed:");
-      for (const question of intent.interviewQuestions) {
-        console.log(`  - ${question}`);
-      }
+    let interviewResponses: InterviewResponse[] | undefined;
+    if (intent.requiresInterview) {
+      interviewResponses = await intentGate.conductInterview(objective, intent);
     }
 
     const planner = selectPlanner(objective);
     const planContext = {
       objective,
       workspace,
+      interviewResponses,
     };
 
     const graph = await planner.plan(planContext);

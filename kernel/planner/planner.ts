@@ -68,6 +68,48 @@ export function isSwarmPattern(graph: TaskGraph): boolean {
   return hasParallelStructure && hasGlobalVerification;
 }
 
+export function topologicalSort(graph: TaskGraph): TaskNode[] {
+  const inDegree = new Map<string, number>();
+  const adjacency = new Map<string, string[]>();
+  const nodeMap = new Map<string, TaskNode>();
+
+  for (const task of graph.tasks) {
+    nodeMap.set(task.id, task);
+    inDegree.set(task.id, task.dependencies.length);
+    for (const dep of task.dependencies) {
+      const edges = adjacency.get(dep) ?? [];
+      edges.push(task.id);
+      adjacency.set(dep, edges);
+    }
+  }
+
+  const queue = graph.tasks.filter((t) => t.dependencies.length === 0).map((t) => t.id);
+  const sorted: TaskNode[] = [];
+  const visited = new Set<string>();
+
+  while (queue.length > 0) {
+    const id = queue.shift()!;
+    sorted.push(nodeMap.get(id)!);
+    visited.add(id);
+    for (const next of adjacency.get(id) ?? []) {
+      const deg = (inDegree.get(next) ?? 1) - 1;
+      inDegree.set(next, deg);
+      if (deg === 0) queue.push(next);
+    }
+  }
+
+  // Cycle fallback: append any nodes that the Kahn pass could not reach so
+  // callers receive every task in the graph (matches swarm.computeWaves'
+  // "dump remaining" behavior when validation upstream lets a cycle through).
+  if (sorted.length < graph.tasks.length) {
+    for (const task of graph.tasks) {
+      if (!visited.has(task.id)) sorted.push(task);
+    }
+  }
+
+  return sorted;
+}
+
 export function determineExecutionMode(graph: TaskGraph): Mode {
   if (isScoutPattern(graph)) return Mode.Scout;
   if (isRelayPattern(graph)) return Mode.Relay;

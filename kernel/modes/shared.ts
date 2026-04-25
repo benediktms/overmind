@@ -26,17 +26,19 @@ const DEFAULT_MAX_ITERATIONS_BY_MODE: Record<Mode, number> = {
 };
 
 const VALID_TRANSITIONS: Record<RunState, ReadonlySet<RunState>> = {
-  [RunState.Pending]: new Set([RunState.Running, RunState.Failed]),
+  [RunState.Pending]: new Set([RunState.Running, RunState.Failed, RunState.Cancelled]),
   [RunState.Running]: new Set([
     RunState.Verifying,
     RunState.Fixing,
     RunState.Completed,
     RunState.Failed,
+    RunState.Cancelled,
   ]),
-  [RunState.Verifying]: new Set([RunState.Completed, RunState.Fixing, RunState.Failed]),
-  [RunState.Fixing]: new Set([RunState.Running, RunState.Verifying, RunState.Failed]),
+  [RunState.Verifying]: new Set([RunState.Completed, RunState.Fixing, RunState.Failed, RunState.Cancelled]),
+  [RunState.Fixing]: new Set([RunState.Running, RunState.Verifying, RunState.Failed, RunState.Cancelled]),
   [RunState.Completed]: new Set(),
   [RunState.Failed]: new Set(),
+  [RunState.Cancelled]: new Set(),
 };
 
 export function createRunContext(params: CreateRunContextParams): RunContext {
@@ -93,6 +95,15 @@ export async function recordVerifyResult(
     return false;
   }
   return await brain.taskComment(ctx.brain_task_id, `[verify:${outcome}] ${details}`);
+}
+
+export function summarizeObjective(objective: string): string {
+  const cleaned = objective.trim().replace(/\s+/g, " ");
+  if (cleaned.length <= 96) {
+    return cleaned;
+  }
+
+  return `${cleaned.slice(0, 93)}...`;
 }
 
 export function shouldRetry(ctx: RunContext): boolean {

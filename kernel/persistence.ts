@@ -40,7 +40,7 @@ export interface PersistedRunState {
 
 export interface PersistedJournalEvent {
   timestamp: string;
-  kind: "start" | "update" | "checkpoint" | "complete" | "failed";
+  kind: "start" | "update" | "checkpoint" | "complete" | "failed" | "cancelled";
   snapshot: PersistedRunState;
 }
 
@@ -147,6 +147,14 @@ export class PersistenceCoordinator {
       checkpointSummary: lastError,
       finished: true,
       eventKind: "failed",
+    });
+  }
+
+  async cancelRun(ctx: RunContext, reason = "Run cancelled by user"): Promise<void> {
+    await this.persist(ctx, {
+      checkpointSummary: reason,
+      finished: true,
+      eventKind: "cancelled",
     });
   }
 

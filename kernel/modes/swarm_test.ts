@@ -2,11 +2,13 @@ import { assertEquals } from "@std/assert";
 
 import { MessageKind } from "../../adapters/neural_link/adapter.ts";
 import { Mode, RunState, type RunContext } from "../types.ts";
-import type { WaitForMessage } from "../types.ts";
+import type { SwarmTask, WaitForMessage } from "../types.ts";
 import { MockBrainAdapter, type MockCall } from "../test_helpers/mock_brain.ts";
 import { MockNeuralLinkAdapter } from "../test_helpers/mock_neural_link.ts";
 import { createRunContext } from "./shared.ts";
-import { executeSwarm } from "./swarm.ts";
+import { computeWaves, executeSwarm } from "./swarm.ts";
+import type { TaskGraph } from "../planner/planner.ts";
+import { MockDispatcher } from "../agent_dispatcher.ts";
 
 function makeContext(overrides: Partial<RunContext> = {}): RunContext {
   return {
@@ -201,27 +203,27 @@ Deno.test("executeSwarm fix loop exhaustion records failure and returns failed c
   assertEquals(finalCtx.iteration, 2);
 });
 
-Deno.test("executeSwarm sends full parallel wave before first waitFor call", async () => {
+Deno.test("executeSwarm sends wave-0 tasks before first waitFor call", async () => {
   const brain = new MockBrainAdapter();
   const neuralLink = new MockNeuralLinkAdapter();
   mockWaitForQueue(neuralLink, makeHappyPathWaitQueue());
 
   await executeSwarm(makeContext(), brain, neuralLink);
 
+  // Default tasks: wave 0 = [Task 1] (1 task with no deps)
+  // Only wave-0 dispatches should precede the first waitFor
   const firstWaitIndex = neuralLink.calls.findIndex((call) => call.method === "waitFor");
-  const dispatchIndexes = neuralLink.calls
+  const wave0DispatchIndexes = neuralLink.calls
     .map((call, index) => ({ call, index }))
-    .filter(({ call }) => {
-      if (call.method !== "messageSend") {
-        return false;
-      }
+    .filter(({ call, index }) => {
+      if (call.method !== "messageSend") return false;
       const params = call.args[0] as { summary: string };
-      return params.summary.startsWith("Execute");
+      return params.summary.startsWith("Execute") && index < firstWaitIndex;
     })
     .map(({ index }) => index);
 
-  assertEquals(dispatchIndexes.length, 5);
-  assertEquals(dispatchIndexes.every((index) => index < firstWaitIndex), true);
+  // Wave 0 has exactly 1 task (Task 1 has no dependencies)
+  assertEquals(wave0DispatchIndexes.length, 1);
 });
 
 // --- Outcome model tests ---
@@ -331,4 +333,285 @@ Deno.test("executeSwarm fresh-context mode produces clean fix body", async () =>
   const body = (fixMessages[0].args[0] as { body: string }).body;
   assertEquals(body.startsWith("Objective:"), true, `Expected fresh-context body starting with 'Objective:', got: ${body}`);
   assertEquals(body.includes("Previous attempt"), true);
+});
+
+Deno.test("executeSwarm uses graph tasks as swarm tasks when graph is provided", async () => {
+  const brain = new MockBrainAdapter();
+  const neuralLink = new MockNeuralLinkAdapter();
+
+  const graph: TaskGraph = {
+    tasks: [
+      {
+        id: "t1",
+        title: "Scaffold module",
+        description: "Create module skeleton",
+        agentRole: "probe",
+        dependencies: [],
+        acceptanceCriteria: [],
+      },
+      {
+        id: "t2",
+        title: "Write tests",
+        description: "Add unit tests for module",
+        agentRole: "liaison",
+        dependencies: [],
+        acceptanceCriteria: [],
+      },
+      {
+        id: "t3",
+        title: "Integrate module",
+        description: "Wire module into system",
+        agentRole: "cortex",
+        dependencies: ["t1", "t2"],
+        acceptanceCriteria: [],
+      },
+    ],
+    parallelGroups: [["t1", "t2"]],
+    entryPoints: ["t1", "t2"],
+  };
+
+  mockWaitForQueue(neuralLink, [
+    { from: "probe", summary: "Scaffold done" },
+    { from: "liaison", summary: "Tests done" },
+    { from: "cortex", summary: "Integration done" },
+    { passed: true, details: "all checks passed" },
+  ]);
+
+  const finalCtx = await executeSwarm(
+    makeContext(),
+    brain,
+    neuralLink,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    graph,
+  );
+
+  assertEquals(finalCtx.state, RunState.Completed);
+
+  const taskDispatches = callsByMethod(neuralLink.calls, "messageSend").filter((call) => {
+    const params = call.args[0] as { kind: MessageKind; summary: string };
+    return params.kind === MessageKind.Finding && params.summary.startsWith("Execute");
+  });
+
+  assertEquals(taskDispatches.length, 3);
+  assertEquals(
+    (taskDispatches[0].args[0] as { summary: string }).summary.includes("Scaffold module"),
+    true,
+  );
+  assertEquals(
+    (taskDispatches[1].args[0] as { summary: string }).summary.includes("Write tests"),
+    true,
+  );
+  assertEquals(
+    (taskDispatches[2].args[0] as { summary: string }).summary.includes("Integrate module"),
+    true,
+  );
+});
+
+// --- computeWaves unit tests ---
+
+Deno.test("computeWaves returns single wave when no dependencies", () => {
+  const tasks: SwarmTask[] = [
+    { id: "A", title: "A", description: "desc A", agentRole: "probe", dependencies: [] },
+    { id: "B", title: "B", description: "desc B", agentRole: "liaison", dependencies: [] },
+    { id: "C", title: "C", description: "desc C", agentRole: "cortex", dependencies: [] },
+  ];
+
+  const waves = computeWaves(tasks);
+
+  assertEquals(waves.length, 1);
+  assertEquals(waves[0].map((t) => t.title), ["A", "B", "C"]);
+});
+
+Deno.test("computeWaves returns multiple waves respecting dependencies", () => {
+  const tasks: SwarmTask[] = [
+    { id: "A", title: "A", description: "desc A", agentRole: "probe", dependencies: [] },
+    { id: "B", title: "B", description: "desc B", agentRole: "liaison", dependencies: ["A"] },
+    { id: "C", title: "C", description: "desc C", agentRole: "cortex", dependencies: ["A"] },
+    { id: "D", title: "D", description: "desc D", agentRole: "probe-2", dependencies: ["B", "C"] },
+  ];
+
+  const waves = computeWaves(tasks);
+
+  assertEquals(waves.length, 3);
+  assertEquals(waves[0].map((t) => t.title), ["A"]);
+  assertEquals(waves[1].map((t) => t.title), ["B", "C"]);
+  assertEquals(waves[2].map((t) => t.title), ["D"]);
+});
+
+Deno.test("computeWaves handles circular dependencies gracefully", () => {
+  const tasks: SwarmTask[] = [
+    { id: "A", title: "A", description: "desc A", agentRole: "probe", dependencies: ["B"] },
+    { id: "B", title: "B", description: "desc B", agentRole: "liaison", dependencies: ["A"] },
+    { id: "C", title: "C", description: "desc C", agentRole: "cortex", dependencies: [] },
+  ];
+
+  const waves = computeWaves(tasks);
+
+  assertEquals(waves.length, 2);
+  assertEquals(waves[0].map((t) => t.title), ["C"]);
+  assertEquals(waves[1].map((t) => t.title).sort(), ["A", "B"].sort());
+});
+
+Deno.test("computeWaves resolves dependencies by id, not title (regression: ovr-9bc)", () => {
+  // Distinct ids and titles, with deps expressed as ids — matching the
+  // planner/topologicalSort contract. Previous implementation keyed
+  // bookkeeping on title and would collapse waves 2+ into a single dump wave.
+  const tasks: SwarmTask[] = [
+    { id: "t1", title: "Scaffold module", description: "", agentRole: "probe", dependencies: [] },
+    { id: "t2", title: "Write tests", description: "", agentRole: "liaison", dependencies: ["t1"] },
+    { id: "t3", title: "Integrate module", description: "", agentRole: "cortex", dependencies: ["t1", "t2"] },
+  ];
+
+  const waves = computeWaves(tasks);
+
+  assertEquals(waves.length, 3);
+  assertEquals(waves[0].map((t) => t.id), ["t1"]);
+  assertEquals(waves[1].map((t) => t.id), ["t2"]);
+  assertEquals(waves[2].map((t) => t.id), ["t3"]);
+});
+
+Deno.test("executeSwarm dispatches tasks in dependency order", async () => {
+  const brain = new MockBrainAdapter();
+  const neuralLink = new MockNeuralLinkAdapter();
+
+  // Graph: A (no deps), B depends on A, C depends on B
+  // Expected waves: [A], [B], [C]
+  const graph: TaskGraph = {
+    tasks: [
+      { id: "a", title: "Task A", description: "desc A", agentRole: "probe", dependencies: [], acceptanceCriteria: [] },
+      { id: "b", title: "Task B", description: "desc B", agentRole: "liaison", dependencies: ["a"], acceptanceCriteria: [] },
+      { id: "c", title: "Task C", description: "desc C", agentRole: "cortex", dependencies: ["b"], acceptanceCriteria: [] },
+    ],
+    parallelGroups: [],
+    entryPoints: ["a"],
+  };
+
+  // Wave 0: 1 handoff, wave 1: 1 handoff, wave 2: 1 handoff, then verify passes
+  mockWaitForQueue(neuralLink, [
+    { from: "probe", summary: "Task A done" },
+    { from: "liaison", summary: "Task B done" },
+    { from: "cortex", summary: "Task C done" },
+    { passed: true, details: "all checks passed" },
+  ]);
+
+  const finalCtx = await executeSwarm(
+    makeContext(),
+    brain,
+    neuralLink,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    graph,
+  );
+
+  assertEquals(finalCtx.state, RunState.Completed);
+
+  // Collect Execute dispatches in call order
+  const dispatches = callsByMethod(neuralLink.calls, "messageSend")
+    .filter((call) => {
+      const params = call.args[0] as { kind: MessageKind; summary: string };
+      return params.kind === MessageKind.Finding && params.summary.startsWith("Execute");
+    })
+    .map((call) => (call.args[0] as { summary: string }).summary);
+
+  // A must be dispatched before first waitFor, B before second, C before third
+  assertEquals(dispatches, ["Execute Task A", "Execute Task B", "Execute Task C"]);
+
+  // Verify dispatch A comes before first waitFor
+  const firstWaitIndex = neuralLink.calls.findIndex((call) => call.method === "waitFor");
+  const dispatchAIndex = neuralLink.calls.findIndex(
+    (call) => call.method === "messageSend" &&
+      ((call.args[0] as { summary: string }).summary === "Execute Task A"),
+  );
+  const dispatchBIndex = neuralLink.calls.findIndex(
+    (call) => call.method === "messageSend" &&
+      ((call.args[0] as { summary: string }).summary === "Execute Task B"),
+  );
+
+  assertEquals(dispatchAIndex < firstWaitIndex, true);
+  assertEquals(dispatchBIndex > firstWaitIndex, true);
+});
+
+Deno.test("executeSwarm aborts cleanly mid-run and returns Cancelled (regression: ovr-4cf)", async () => {
+  const brain = new MockBrainAdapter();
+  const neuralLink = new MockNeuralLinkAdapter();
+  const controller = new AbortController();
+
+  // Abort the run as soon as the room is opened so cancellation hits the
+  // wave-loop boundary, exercising the catch + roomClose("cancelled") path.
+  const originalRoomOpen = neuralLink.roomOpen.bind(neuralLink);
+  neuralLink.roomOpen = async (...args: Parameters<typeof originalRoomOpen>) => {
+    const result = await originalRoomOpen(...args);
+    controller.abort();
+    return result;
+  };
+
+  const ctx = makeContext();
+  const finalCtx = await executeSwarm(
+    { ...ctx, signal: controller.signal },
+    brain,
+    neuralLink,
+  );
+
+  assertEquals(finalCtx.state, RunState.Cancelled);
+
+  const dispatchMessages = callsByMethod(neuralLink.calls, "messageSend").filter((call) => {
+    const params = call.args[0] as { summary: string };
+    return params.summary.startsWith("Execute") || params.summary.startsWith("Fix");
+  });
+  assertEquals(dispatchMessages.length, 0);
+
+  const roomClose = callsByMethod(neuralLink.calls, "roomClose")[0];
+  assertEquals(roomClose.args[1], "cancelled");
+});
+
+Deno.test("executeSwarm pre-aborted signal returns Cancelled without opening room (regression: ovr-4cf)", async () => {
+  const brain = new MockBrainAdapter();
+  const neuralLink = new MockNeuralLinkAdapter();
+  const controller = new AbortController();
+  controller.abort();
+
+  const ctx = makeContext();
+  const finalCtx = await executeSwarm(
+    { ...ctx, signal: controller.signal },
+    brain,
+    neuralLink,
+  );
+
+  assertEquals(finalCtx.state, RunState.Cancelled);
+  assertEquals(callsByMethod(neuralLink.calls, "roomOpen").length, 0);
+});
+
+Deno.test("executeSwarm dispatches agents via dispatcher for each task", async () => {
+  const brain = new MockBrainAdapter();
+  const neuralLink = new MockNeuralLinkAdapter();
+  const dispatcher = new MockDispatcher();
+  mockWaitForQueue(neuralLink, makeHappyPathWaitQueue());
+
+  await executeSwarm(
+    makeContext(),
+    brain,
+    neuralLink,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    dispatcher,
+  );
+
+  assertEquals(dispatcher.dispatched.length, 5);
+
+  const roles = dispatcher.dispatched.map((d) => d.role);
+  assertEquals(roles.includes("cortex"), true);
+  assertEquals(roles.includes("probe"), true);
+  assertEquals(roles.includes("liaison"), true);
+  assertEquals(dispatcher.dispatched[0].roomId, "room-mock-1");
 });

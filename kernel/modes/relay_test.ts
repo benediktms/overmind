@@ -7,6 +7,8 @@ import { MockBrainAdapter, type MockCall } from "../test_helpers/mock_brain.ts";
 import { MockNeuralLinkAdapter } from "../test_helpers/mock_neural_link.ts";
 import { createRunContext } from "./shared.ts";
 import { executeRelay } from "./relay.ts";
+import type { TaskGraph } from "../planner/planner.ts";
+import { MockDispatcher } from "../agent_dispatcher.ts";
 
 function makeContext(overrides: Partial<RunContext> = {}): RunContext {
   return {
@@ -248,4 +250,84 @@ Deno.test("executeRelay does not continue to downstream steps after terminal ver
     return comment.startsWith("[step:");
   });
   assertEquals(stepComments.length, 3);
+});
+
+Deno.test("executeRelay uses graph tasks as relay steps in topological order when graph is provided", async () => {
+  const brain = new MockBrainAdapter();
+  const neuralLink = new MockNeuralLinkAdapter();
+
+  const graph: TaskGraph = {
+    tasks: [
+      {
+        id: "plan",
+        title: "Plan changes",
+        description: "Create implementation plan",
+        agentRole: "cortex",
+        dependencies: [],
+        acceptanceCriteria: [],
+      },
+      {
+        id: "impl",
+        title: "Implement changes",
+        description: "Execute the plan",
+        agentRole: "probe",
+        dependencies: ["plan"],
+        acceptanceCriteria: [],
+      },
+    ],
+    parallelGroups: [],
+    entryPoints: ["plan"],
+  };
+
+  mockWaitForQueue(neuralLink, [
+    { from: "cortex", summary: "Plan complete" },
+    { passed: true, details: "Plan verified" },
+    { from: "probe", summary: "Impl complete" },
+    { passed: true, details: "Impl verified" },
+  ]);
+
+  const finalCtx = await executeRelay(makeContext(), brain, neuralLink, undefined, graph);
+
+  assertEquals(finalCtx.state, RunState.Completed);
+
+  const executeMessages = callsByMethod(neuralLink.calls, "messageSend").filter((call) => {
+    const params = call.args[0] as { kind: MessageKind; summary: string };
+    return params.kind === MessageKind.Finding;
+  });
+
+  assertEquals(executeMessages.length, 2);
+  assertEquals(
+    (executeMessages[0].args[0] as { summary: string }).summary.includes("Plan changes"),
+    true,
+  );
+  assertEquals(
+    (executeMessages[1].args[0] as { summary: string }).summary.includes("Implement changes"),
+    true,
+  );
+});
+
+Deno.test("executeRelay dispatches agents via dispatcher for each step and verifier", async () => {
+  const brain = new MockBrainAdapter();
+  const neuralLink = new MockNeuralLinkAdapter();
+  const dispatcher = new MockDispatcher();
+  mockWaitForQueue(neuralLink, makeAllPassWaitQueue());
+
+  await executeRelay(makeContext(), brain, neuralLink, undefined, undefined, dispatcher);
+
+  // 3 steps + 3 verifier dispatches = 6 total
+  assertEquals(dispatcher.dispatched.length, 6);
+
+  const stepDispatches = dispatcher.dispatched.filter((d) => d.role !== "verifier");
+  const verifierDispatches = dispatcher.dispatched.filter((d) => d.role === "verifier");
+
+  assertEquals(stepDispatches.length, 3);
+  assertEquals(verifierDispatches.length, 3);
+  // Per-step suffix prevents participant-id collisions when multiple steps
+  // share the same role across a longer pipeline (regression: ovr-b37 #4).
+  assertEquals(stepDispatches[0].participantId, "cortex-step-0");
+  assertEquals(stepDispatches[1].participantId, "probe-step-1");
+  assertEquals(stepDispatches[2].participantId, "liaison-step-2");
+  for (const v of verifierDispatches) {
+    assertEquals(v.participantId.startsWith("verifier-step-"), true);
+  }
 });

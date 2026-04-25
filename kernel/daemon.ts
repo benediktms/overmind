@@ -1,6 +1,6 @@
 import { OvermindError } from "./errors.ts";
 import { Mode } from "./types.ts";
-import type { SocketRequest, SocketResponse } from "./types.ts";
+import type { CancelRequest, ModeRequest, SocketRequest, SocketResponse } from "./types.ts";
 import { fromFileUrl } from "@std/path";
 import type { Kernel } from "./kernel.ts";
 
@@ -80,10 +80,10 @@ export async function sendToSocket(
     let conn: Deno.Conn | null = null;
     try {
       conn = await Deno.connect({ transport: "unix", path: socketPath });
-      const body = JSON.stringify(request);
+      const body = JSON.stringify(request) + "\n";
       await conn.write(new TextEncoder().encode(body));
 
-      const responseRaw = await readConnPayload(conn);
+      const responseRaw = await readNdjsonPayload(conn);
       const payload = JSON.parse(responseRaw) as SocketResponse;
       if (!isSocketResponse(payload)) {
         throw new OvermindError("Malformed daemon response");
@@ -166,8 +166,8 @@ export class OvermindDaemon {
       this.acceptLoopPromise = null;
     }
 
-    await this.removeIfExists(this.pidPath);
-    await this.removeIfExists(this.socketPath);
+    await removeIfExists(this.pidPath);
+    await removeIfExists(this.socketPath);
   }
 
   isRunning(): boolean {
@@ -214,19 +214,31 @@ export class OvermindDaemon {
 
       let response: SocketResponse;
       if (parsed.request) {
-        response = { status: "accepted", run_id: parsed.request.run_id, error: null };
-        // Fire-and-forget mode execution if kernel is available
-        if (this.kernel) {
-          const req = parsed.request;
-          this.kernel.executeMode(req.mode, req.objective, req.workspace, req.run_id).catch((err) => {
-            console.error(`Mode execution error for ${req.run_id}:`, err);
-          });
+        if (parsed.request.type === "cancel_request") {
+          const req = parsed.request as CancelRequest;
+          if (this.kernel) {
+            const cancelled = this.kernel.cancelRun(req.run_id);
+            response = cancelled
+              ? { status: "accepted", run_id: req.run_id, error: null }
+              : { status: "error", run_id: req.run_id, error: "Run not found" };
+          } else {
+            response = { status: "error", run_id: req.run_id, error: "No kernel available" };
+          }
+        } else {
+          const req = parsed.request as ModeRequest;
+          response = { status: "accepted", run_id: req.run_id, error: null };
+          // Fire-and-forget mode execution if kernel is available
+          if (this.kernel) {
+            this.kernel.executeMode(req.mode, req.objective, req.workspace, req.run_id).catch((err) => {
+              console.error(`Mode execution error for ${req.run_id}:`, err);
+            });
+          }
         }
       } else {
         response = { status: "error", run_id: "", error: parsed.error ?? "Invalid request" };
       }
 
-      const responseBody = JSON.stringify(response);
+      const responseBody = JSON.stringify(response) + "\n";
       await conn.write(new TextEncoder().encode(responseBody));
     } finally {
       conn.close();
@@ -234,33 +246,7 @@ export class OvermindDaemon {
   }
 
   private async readRequestPayload(conn: Deno.Conn): Promise<string> {
-    const chunks: Uint8Array[] = [];
-    const buf = new Uint8Array(4096);
-
-    while (true) {
-      const n = await conn.read(buf);
-      if (n === null) break;
-
-      chunks.push(buf.slice(0, n));
-
-      if (n < buf.length) {
-        break;
-      }
-    }
-
-    if (chunks.length === 0) {
-      return "";
-    }
-
-    const totalLength = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
-    const merged = new Uint8Array(totalLength);
-    let offset = 0;
-    for (const chunk of chunks) {
-      merged.set(chunk, offset);
-      offset += chunk.length;
-    }
-
-    return new TextDecoder().decode(merged);
+    return await readNdjsonPayload(conn);
   }
 
   private parseRequest(raw: string): ParsedRequest {
@@ -271,6 +257,10 @@ export class OvermindDaemon {
       return { request: null, error: "Malformed request: invalid JSON" };
     }
 
+    if (this.isCancelRequest(payload)) {
+      return { request: payload, error: null };
+    }
+
     if (!this.isModeRequest(payload)) {
       return { request: null, error: "Invalid request: expected mode_request contract" };
     }
@@ -278,7 +268,17 @@ export class OvermindDaemon {
     return { request: payload, error: null };
   }
 
-  private isModeRequest(payload: unknown): payload is SocketRequest {
+  private isCancelRequest(payload: unknown): payload is CancelRequest {
+    if (!payload || typeof payload !== 'object') {
+      return false;
+    }
+
+    const value = payload as Record<string, unknown>;
+    return value.type === 'cancel_request' &&
+      typeof value.run_id === 'string' && value.run_id.length > 0;
+  }
+
+  private isModeRequest(payload: unknown): payload is ModeRequest {
     if (!payload || typeof payload !== "object") {
       return false;
     }
@@ -298,13 +298,13 @@ export class OvermindDaemon {
     const pidRaw = (await Deno.readTextFile(this.pidPath)).trim();
     const pid = Number(pidRaw);
     if (!Number.isInteger(pid) || pid <= 0) {
-      await this.removeIfExists(this.pidPath);
+      await removeIfExists(this.pidPath);
       return;
     }
 
-    const exists = this.processExists(pid);
+    const exists = processExists(pid);
     if (!exists) {
-      await this.removeIfExists(this.pidPath);
+      await removeIfExists(this.pidPath);
       return;
     }
 
@@ -313,7 +313,7 @@ export class OvermindDaemon {
       throw new OvermindError(`Daemon already running with PID ${pid}`);
     }
 
-    await this.removeIfExists(this.pidPath);
+    await removeIfExists(this.pidPath);
   }
 
   private async cleanupStaleSocketFile(): Promise<void> {
@@ -332,22 +332,7 @@ export class OvermindDaemon {
       throw new OvermindError("Daemon socket is already active");
     }
 
-    await this.removeIfExists(this.socketPath);
-  }
-
-  private processExists(pid: number): boolean {
-    try {
-      Deno.kill(pid, 0);
-      return true;
-    } catch (err) {
-      if (err instanceof Deno.errors.PermissionDenied) {
-        return true;
-      }
-      if (err instanceof Deno.errors.NotFound) {
-        return false;
-      }
-      return false;
-    }
+    await removeIfExists(this.socketPath);
   }
 
   private async isLikelyOvermindDaemonProcess(pid: number): Promise<boolean> {
@@ -379,15 +364,6 @@ export class OvermindDaemon {
     }
   }
 
-  private async removeIfExists(path: string): Promise<void> {
-    try {
-      await Deno.remove(path);
-    } catch (err) {
-      if (!(err instanceof Deno.errors.NotFound)) {
-        throw err;
-      }
-    }
-  }
 }
 
 function resolveBaseDir(baseDir?: string): string {
@@ -475,8 +451,8 @@ async function waitForSocketReady(
         objective: "daemon readiness probe",
         workspace: resolveBaseDir(),
       };
-      await conn.write(new TextEncoder().encode(JSON.stringify(probeRequest)));
-      const responseRaw = await readConnPayload(conn);
+      await conn.write(new TextEncoder().encode(JSON.stringify(probeRequest) + "\n"));
+      const responseRaw = await readNdjsonPayload(conn);
       const payload = JSON.parse(responseRaw) as SocketResponse;
       if (!isSocketResponse(payload)) {
         throw new OvermindError("Malformed daemon response during readiness check");
@@ -495,26 +471,41 @@ async function waitForSocketReady(
   throw new OvermindError(`Daemon socket was not ready at ${socketPath}: ${String(lastError)}`);
 }
 
-async function readConnPayload(conn: Deno.Conn): Promise<string> {
+const MAX_NDJSON_BUFFER_SIZE = 1024 * 1024; // 1 MB
+
+async function readNdjsonPayload(conn: Deno.Conn): Promise<string> {
   const chunks: Uint8Array[] = [];
   const buf = new Uint8Array(4096);
+  let totalSize = 0;
 
   while (true) {
     const n = await conn.read(buf);
     if (n === null) break;
-    chunks.push(buf.slice(0, n));
-    if (n < buf.length) break;
+
+    const chunk = buf.slice(0, n);
+    chunks.push(chunk);
+    totalSize += n;
+
+    if (totalSize > MAX_NDJSON_BUFFER_SIZE) {
+      throw new OvermindError("Request payload exceeds maximum buffer size");
+    }
+
+    // Check if we've received a newline delimiter
+    if (chunk.includes(0x0a)) break;
   }
 
-  const totalLength = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
-  const merged = new Uint8Array(totalLength);
+  if (chunks.length === 0) return "";
+
+  const merged = new Uint8Array(totalSize);
   let offset = 0;
-  for (const chunk of chunks) {
-    merged.set(chunk, offset);
-    offset += chunk.length;
+  for (const c of chunks) {
+    merged.set(c, offset);
+    offset += c.length;
   }
 
-  return new TextDecoder().decode(merged);
+  const raw = new TextDecoder().decode(merged);
+  const newlineIndex = raw.indexOf("\n");
+  return newlineIndex >= 0 ? raw.slice(0, newlineIndex) : raw;
 }
 
 function isSocketResponse(payload: unknown): payload is SocketResponse {

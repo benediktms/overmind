@@ -1,8 +1,11 @@
 import { MessageKind, type NeuralLinkPort } from "../types.ts";
 import { Mode, RunState, type RunContext, type WaitForMessage } from "../types.ts";
 import { drainInbox } from "../coordination.ts";
-import { createRunContext, recordStepCompletion, transitionState } from "./shared.ts";
+import { createRunContext, recordStepCompletion, summarizeObjective, transitionState } from "./shared.ts";
 import type { PersistenceCoordinator } from "../persistence.ts";
+import type { TaskGraph } from "../planner/planner.ts";
+import { safeDispatch, type AgentDispatcher } from "../agent_dispatcher.ts";
+import { CancellationError, throwIfAborted } from "../cancellation.ts";
 
 const DEFAULT_SCOUT_PARALLEL = 3;
 const DEFAULT_WAIT_TIMEOUT_MS = 30_000;
@@ -33,35 +36,46 @@ interface HandoffMessage {
 
 const NOOP_PERSISTENCE: Pick<
   PersistenceCoordinator,
-  "updateRun" | "completeRun" | "failRun"
+  "updateRun" | "completeRun" | "failRun" | "cancelRun"
 > = {
   updateRun: async () => {},
   completeRun: async () => {},
   failRun: async () => {},
+  cancelRun: async () => {},
 };
 
 export async function executeScout(
   ctx: RunContext,
   brain: BrainScoutAdapter,
   neuralLink: NeuralLinkPort,
-  persistence: Pick<PersistenceCoordinator, "updateRun" | "completeRun" | "failRun"> = NOOP_PERSISTENCE,
+  persistence: Pick<PersistenceCoordinator, "updateRun" | "completeRun" | "failRun" | "cancelRun"> = NOOP_PERSISTENCE,
+  graph?: TaskGraph,
+  dispatcher?: AgentDispatcher,
 ): Promise<RunContext> {
+  let roomIdForCleanup: string | null = null;
+  let runCtxForCleanup: RunContext | null = null;
+  try {
   const objectiveSummary = summarizeObjective(ctx.objective);
-
-  const taskId = await brain.taskCreate({
-    title: `[overmind:scout] ${objectiveSummary}`,
-  }) ?? "";
 
   let runCtx = createRunContext({
     run_id: ctx.run_id,
     mode: Mode.Scout,
     objective: ctx.objective,
     workspace: ctx.workspace,
-    brain_task_id: taskId,
+    brain_task_id: "",
     room_id: ctx.room_id,
     max_iterations: ctx.max_iterations,
     created_at: ctx.created_at,
   });
+  runCtxForCleanup = runCtx;
+  throwIfAborted(ctx.signal);
+
+  const taskId = await brain.taskCreate({
+    title: `[overmind:scout] ${objectiveSummary}`,
+  }) ?? "";
+
+  runCtx = { ...runCtx, brain_task_id: taskId };
+  runCtxForCleanup = runCtx;
 
   await persistence.updateRun(runCtx, {
     checkpointSummary: taskId ? "Created scout brain task" : "Running without Brain task",
@@ -95,11 +109,15 @@ export async function executeScout(
     ...runCtx,
     room_id: roomId,
   };
+  roomIdForCleanup = roomId;
+  runCtxForCleanup = runCtx;
   await persistence.updateRun(runCtx, {
     checkpointSummary: `Opened scout coordination room ${roomId}`,
   });
 
-  const angles = getExploreAngles(objectiveSummary, DEFAULT_SCOUT_PARALLEL);
+  const angles = graph
+    ? graph.tasks.map((t) => `${t.title}: ${t.description}`)
+    : getExploreAngles(objectiveSummary, DEFAULT_SCOUT_PARALLEL);
   await Promise.all(
     angles.map((angle, index) => {
       return neuralLink.messageSend({
@@ -113,16 +131,34 @@ export async function executeScout(
       });
     }),
   );
+
+  if (dispatcher?.isAvailable()) {
+    await Promise.allSettled(
+      angles.map((prompt, index) =>
+        safeDispatch(dispatcher, {
+          agentId: `${ctx.run_id}-probe-${index + 1}`,
+          role: "probe",
+          prompt,
+          roomId,
+          participantId: `probe-${index + 1}`,
+          workspace: ctx.workspace,
+        })
+      ),
+    );
+  }
+
   await recordStepCompletion(brain, runCtx, "dispatch", `Dispatched ${angles.length} scout probes`);
 
   const handoffs: HandoffMessage[] = [];
   for (let index = 0; index < angles.length; index += 1) {
+    throwIfAborted(ctx.signal);
     const message = await neuralLink.waitFor(
       roomId,
       LEAD_PARTICIPANT_ID,
       DEFAULT_WAIT_TIMEOUT_MS,
       [MessageKind.Handoff],
     );
+    throwIfAborted(ctx.signal);
 
     if (isHandoffMessage(message)) {
       handoffs.push(message);
@@ -154,15 +190,16 @@ export async function executeScout(
   runCtx = transitionState(runCtx, RunState.Completed);
   await persistence.completeRun(runCtx, outcome);
   return runCtx;
-}
-
-function summarizeObjective(objective: string): string {
-  const cleaned = objective.trim().replace(/\s+/g, " ");
-  if (cleaned.length <= 96) {
-    return cleaned;
+  } catch (err) {
+    if (!(err instanceof CancellationError)) throw err;
+    if (!runCtxForCleanup) throw err;
+    const cancelledCtx = transitionState(runCtxForCleanup, RunState.Cancelled);
+    if (roomIdForCleanup) {
+      try { await neuralLink.roomClose(roomIdForCleanup, "cancelled"); } catch { /* best-effort */ }
+    }
+    await persistence.cancelRun(cancelledCtx);
+    return cancelledCtx;
   }
-
-  return `${cleaned.slice(0, 93)}...`;
 }
 
 function getExploreAngles(objectiveSummary: string, parallelism: number): string[] {

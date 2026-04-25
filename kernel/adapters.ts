@@ -2,17 +2,21 @@ import { Kernel } from "./kernel.ts";
 import { BrainAdapter, TaskCreateParams, TaskUpdateParams, MemoryEpisodeParams } from "../adapters/brain/adapter.ts";
 import { NeuralLinkAdapter, MessageKind } from "../adapters/neural_link/adapter.ts";
 import { EventType } from "./types.ts";
+import type { AgentDispatcher } from "./agent_dispatcher.ts";
+import { NoopDispatcher } from "./agent_dispatcher.ts";
 
 export class AdapterRegistry {
   private brain: BrainAdapter;
   private neuralLink: NeuralLinkAdapter;
   private kernel: Kernel;
   private currentRoomId: string | null = null;
+  private dispatcher: AgentDispatcher;
 
-  constructor(kernel: Kernel, options?: { brain?: BrainAdapter; neuralLink?: NeuralLinkAdapter }) {
+  constructor(kernel: Kernel, options?: { brain?: BrainAdapter; neuralLink?: NeuralLinkAdapter; dispatcher?: AgentDispatcher }) {
     this.kernel = kernel;
     this.brain = options?.brain ?? new BrainAdapter();
     this.neuralLink = options?.neuralLink ?? new NeuralLinkAdapter();
+    this.dispatcher = options?.dispatcher ?? new NoopDispatcher();
   }
 
   async connect(): Promise<void> {
@@ -127,5 +131,9 @@ export class AdapterRegistry {
 
   getCurrentRoomId(): string | null {
     return this.currentRoomId;
+  }
+
+  getDispatcher(): AgentDispatcher {
+    return this.dispatcher;
   }
 }

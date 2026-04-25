@@ -7,9 +7,14 @@ import {
   recordStepCompletion,
   recordVerifyResult,
   shouldRetry,
+  summarizeObjective,
   transitionState,
 } from "./shared.ts";
+import { isObject } from "../utils.ts";
 import type { PersistenceCoordinator } from "../persistence.ts";
+import type { TaskGraph } from "../planner/planner.ts";
+import { safeDispatch, type AgentDispatcher } from "../agent_dispatcher.ts";
+import { CancellationError, throwIfAborted } from "../cancellation.ts";
 import type { VerificationOutcome, VerificationResult, VerificationStrategy } from "../verification/types.ts";
 import { VerificationPipeline, createVerificationPipeline } from "../verification/pipeline.ts";
 import type { LspAdapter, BashAdapter } from "../verification/strategies.ts";
@@ -44,39 +49,50 @@ interface VerifyResult {
 
 const NOOP_PERSISTENCE: Pick<
   PersistenceCoordinator,
-  "updateRun" | "completeRun" | "failRun"
+  "updateRun" | "completeRun" | "failRun" | "cancelRun"
 > = {
   updateRun: async () => {},
   completeRun: async () => {},
   failRun: async () => {},
+  cancelRun: async () => {},
 };
 
 export async function executeSwarm(
   ctx: RunContext,
   brain: BrainSwarmAdapter,
   neuralLink: NeuralLinkPort,
-  persistence: Pick<PersistenceCoordinator, "updateRun" | "completeRun" | "failRun"> = NOOP_PERSISTENCE,
+  persistence: Pick<PersistenceCoordinator, "updateRun" | "completeRun" | "failRun" | "cancelRun"> = NOOP_PERSISTENCE,
   verificationStrategies?: VerificationStrategy[],
   lsp?: LspAdapter,
   bash?: BashAdapter,
   retryMode: "in-context" | "fresh-context" = "in-context",
+  graph?: TaskGraph,
+  dispatcher?: AgentDispatcher,
 ): Promise<RunContext> {
+  let roomIdForCleanup: string | null = null;
+  let runCtxForCleanup: RunContext | null = null;
+  try {
   const objectiveSummary = summarizeObjective(ctx.objective);
-
-  const taskId = await brain.taskCreate({
-    title: `[overmind:swarm] ${objectiveSummary}`,
-  }) ?? "";
 
   let runCtx = createRunContext({
     run_id: ctx.run_id,
     mode: Mode.Swarm,
     objective: ctx.objective,
     workspace: ctx.workspace,
-    brain_task_id: taskId,
+    brain_task_id: "",
     room_id: ctx.room_id,
     max_iterations: ctx.max_iterations,
     created_at: ctx.created_at,
   });
+  runCtxForCleanup = runCtx;
+  throwIfAborted(ctx.signal);
+
+  const taskId = await brain.taskCreate({
+    title: `[overmind:swarm] ${objectiveSummary}`,
+  }) ?? "";
+
+  runCtx = { ...runCtx, brain_task_id: taskId };
+  runCtxForCleanup = runCtx;
 
   await persistence.updateRun(runCtx, {
     checkpointSummary: taskId ? "Created swarm brain task" : "Running swarm without Brain task",
@@ -109,24 +125,37 @@ export async function executeSwarm(
     ...runCtx,
     room_id: roomId,
   };
+  roomIdForCleanup = roomId;
+  runCtxForCleanup = runCtx;
   await persistence.updateRun(runCtx, {
     checkpointSummary: `Opened swarm coordination room ${roomId}`,
   });
 
-  const swarmTasks = getSwarmTasks(objectiveSummary);
+  const swarmTasks = graph
+    ? graph.tasks.map((node): SwarmTask => ({
+        id: node.id,
+        title: node.title,
+        description: node.description,
+        agentRole: node.agentRole,
+        dependencies: node.dependencies,
+      }))
+    : getSwarmTasks(objectiveSummary);
 
-  await dispatchTasks(neuralLink, roomId, ctx.objective, swarmTasks);
-  await recordStepCompletion(brain, runCtx, "dispatch", `Dispatched ${swarmTasks.length} swarm tasks`);
+  const waves = computeWaves(swarmTasks);
+  for (let waveIndex = 0; waveIndex < waves.length; waveIndex++) {
+    throwIfAborted(ctx.signal);
+    runCtxForCleanup = runCtx;
+    const wave = waves[waveIndex];
+    await dispatchTasks(neuralLink, roomId, ctx.objective, wave, ctx, dispatcher);
+    await recordStepCompletion(brain, runCtx, `wave_${waveIndex}`, `Dispatched wave ${waveIndex} with ${wave.length} tasks`);
 
-  const initialHandoffs = await collectHandoffs(neuralLink, roomId, swarmTasks.length);
-  await recordStepCompletion(
-    brain,
-    runCtx,
-    "wait",
-    `Received ${initialHandoffs.length}/${swarmTasks.length} handoffs from initial wave`,
-  );
+    const waveHandoffs = await collectHandoffs(neuralLink, roomId, wave.length);
+    await recordStepCompletion(brain, runCtx, `wave_${waveIndex}_wait`, `Received ${waveHandoffs.length}/${wave.length} handoffs`);
+  }
 
   while (true) {
+    throwIfAborted(ctx.signal);
+    runCtxForCleanup = runCtx;
     await drainInbox(neuralLink, roomId, LEAD_PARTICIPANT_ID, async (_msg) => {
       // Drain any late-arriving messages before starting verification
     });
@@ -216,22 +245,68 @@ export async function executeSwarm(
     });
 
     const fixTasks = selectFixTasks(swarmTasks, verifyResult.failedTasks);
-    await dispatchFixTasks(neuralLink, roomId, runCtx, fixTasks, verifyResult.details, ctx.objective, verifyResult.failedFiles, retryMode);
-    await recordStepCompletion(
-      brain,
-      runCtx,
-      `fix_dispatch_${runCtx.iteration}`,
-      `Dispatched ${fixTasks.length} fix tasks`,
+    const fixWaves = computeWaves(fixTasks);
+    for (let fixWaveIndex = 0; fixWaveIndex < fixWaves.length; fixWaveIndex++) {
+      throwIfAborted(ctx.signal);
+      runCtxForCleanup = runCtx;
+      const fixWave = fixWaves[fixWaveIndex];
+      await dispatchFixTasks(neuralLink, roomId, runCtx, fixWave, verifyResult.details, ctx.objective, verifyResult.failedFiles, retryMode, dispatcher);
+      await recordStepCompletion(
+        brain,
+        runCtx,
+        `fix_dispatch_${runCtx.iteration}_wave_${fixWaveIndex}`,
+        `Dispatched ${fixWave.length} fix tasks in wave ${fixWaveIndex}`,
+      );
+
+      const fixHandoffs = await collectHandoffs(neuralLink, roomId, fixWave.length);
+      await recordStepCompletion(
+        brain,
+        runCtx,
+        `fix_wait_${runCtx.iteration}_wave_${fixWaveIndex}`,
+        `Received ${fixHandoffs.length}/${fixWave.length} fix handoffs`,
+      );
+    }
+  }
+  } catch (err) {
+    if (!(err instanceof CancellationError)) throw err;
+    if (!runCtxForCleanup) throw err;
+    const cancelledCtx = transitionState(runCtxForCleanup, RunState.Cancelled);
+    if (roomIdForCleanup) {
+      try { await neuralLink.roomClose(roomIdForCleanup, "cancelled"); } catch { /* best-effort */ }
+    }
+    await persistence.cancelRun(cancelledCtx);
+    return cancelledCtx;
+  }
+}
+
+export function computeWaves(tasks: SwarmTask[]): SwarmTask[][] {
+  // Dependencies refer to other tasks by id (matching planner/topologicalSort).
+  // Both `completed` and `remaining` are keyed on id so the comparison is
+  // homogeneous regardless of whether ids and titles coincide.
+  const completed = new Set<string>();
+  const waves: SwarmTask[][] = [];
+  const remaining = new Set(tasks.map((t) => t.id));
+
+  while (remaining.size > 0) {
+    const wave = tasks.filter((t) =>
+      remaining.has(t.id) &&
+      t.dependencies.every((dep) => completed.has(dep))
     );
 
-    const fixHandoffs = await collectHandoffs(neuralLink, roomId, fixTasks.length);
-    await recordStepCompletion(
-      brain,
-      runCtx,
-      `fix_wait_${runCtx.iteration}`,
-      `Received ${fixHandoffs.length}/${fixTasks.length} fix handoffs`,
-    );
+    if (wave.length === 0) {
+      // Circular dependency or unresolvable — dispatch all remaining as final wave
+      waves.push(tasks.filter((t) => remaining.has(t.id)));
+      break;
+    }
+
+    waves.push(wave);
+    for (const t of wave) {
+      completed.add(t.id);
+      remaining.delete(t.id);
+    }
   }
+
+  return waves;
 }
 
 async function dispatchTasks(
@@ -239,6 +314,8 @@ async function dispatchTasks(
   roomId: string,
   objective: string,
   tasks: SwarmTask[],
+  ctx?: RunContext,
+  dispatcher?: AgentDispatcher,
 ): Promise<void> {
   await Promise.all(
     tasks.map((task) => {
@@ -247,12 +324,27 @@ async function dispatchTasks(
         from: LEAD_PARTICIPANT_ID,
         kind: MessageKind.Finding,
         summary: `Execute ${task.title}`,
-        to: task.agentRole,
+        to: task.id,
         body: `${task.description}\nObjective: ${objective}`,
-        threadId: task.agentRole,
+        threadId: task.id,
       });
     }),
   );
+
+  if (dispatcher?.isAvailable() && ctx) {
+    await Promise.allSettled(
+      tasks.map((task) =>
+        safeDispatch(dispatcher, {
+          agentId: `${ctx.run_id}-${task.id}`,
+          role: task.agentRole,
+          prompt: `${task.title}: ${task.description}`,
+          roomId,
+          participantId: task.id,
+          workspace: ctx.workspace,
+        })
+      ),
+    );
+  }
 }
 
 async function dispatchFixTasks(
@@ -264,6 +356,7 @@ async function dispatchFixTasks(
   objective: string,
   failedFiles: string[],
   retryMode: "in-context" | "fresh-context",
+  dispatcher?: AgentDispatcher,
 ): Promise<void> {
   const body = retryMode === "fresh-context"
     ? buildFreshContextBody(objective, verifyDetails, failedFiles, runCtx.iteration)
@@ -276,12 +369,27 @@ async function dispatchFixTasks(
         from: LEAD_PARTICIPANT_ID,
         kind: MessageKind.Finding,
         summary: `Fix ${task.title} (attempt ${runCtx.iteration})`,
-        to: task.agentRole,
+        to: task.id,
         body,
-        threadId: task.agentRole,
+        threadId: task.id,
       });
     }),
   );
+
+  if (dispatcher?.isAvailable()) {
+    await Promise.allSettled(
+      tasks.map((task) =>
+        safeDispatch(dispatcher, {
+          agentId: `${runCtx.run_id}-${task.id}-fix-${runCtx.iteration}`,
+          role: task.agentRole,
+          prompt: `Fix ${task.title}: ${verifyDetails}`,
+          roomId,
+          participantId: task.id,
+          workspace: runCtx.workspace,
+        })
+      ),
+    );
+  }
 }
 
 function buildFreshContextBody(
@@ -436,12 +544,17 @@ function parseVerifyResult(value: unknown): VerifyResult {
   return { outcome: passed ? "passed" : "failed", details, failedTasks, failedFiles: [] };
 }
 
-function selectFixTasks(allTasks: SwarmTask[], failedTaskTitles: string[]): SwarmTask[] {
-  if (failedTaskTitles.length === 0) {
+function selectFixTasks(allTasks: SwarmTask[], failedTaskRefs: string[]): SwarmTask[] {
+  if (failedTaskRefs.length === 0) {
     return allTasks;
   }
 
-  const selected = allTasks.filter((task) => failedTaskTitles.includes(task.title));
+  // Verification can refer to failed tasks by either id or title depending on
+  // whether the swarm runs from a TaskGraph (id-keyed) or default tasks
+  // (id===title). Match either.
+  const selected = allTasks.filter((task) =>
+    failedTaskRefs.includes(task.id) || failedTaskRefs.includes(task.title)
+  );
   if (selected.length === 0) {
     return allTasks;
   }
@@ -449,42 +562,40 @@ function selectFixTasks(allTasks: SwarmTask[], failedTaskTitles: string[]): Swar
   return selected;
 }
 
-function summarizeObjective(objective: string): string {
-  const cleaned = objective.trim().replace(/\s+/g, " ");
-  if (cleaned.length <= 96) {
-    return cleaned;
-  }
-
-  return `${cleaned.slice(0, 93)}...`;
-}
-
 function getSwarmTasks(objectiveSummary: string): SwarmTask[] {
+  // Default tasks use the title as their id so that the inline dependency
+  // strings (e.g. "Task 1") line up with computeWaves' id-based bookkeeping.
   return [
     {
+      id: "Task 1",
       title: "Task 1",
       description: `Map architecture impacts for ${objectiveSummary}`,
       agentRole: "cortex",
       dependencies: [],
     },
     {
+      id: "Task 2",
       title: "Task 2",
       description: `Implement core orchestration changes for ${objectiveSummary}`,
       agentRole: "probe",
       dependencies: ["Task 1"],
     },
     {
+      id: "Task 3",
       title: "Task 3",
       description: `Prepare integration tests for ${objectiveSummary}`,
       agentRole: "liaison",
       dependencies: ["Task 1"],
     },
     {
+      id: "Task 4",
       title: "Task 4",
       description: `Harden error handling paths for ${objectiveSummary}`,
       agentRole: "probe-2",
       dependencies: ["Task 2"],
     },
     {
+      id: "Task 5",
       title: "Task 5",
       description: `Assemble completion evidence for ${objectiveSummary}`,
       agentRole: "cortex-2",
@@ -504,8 +615,4 @@ function extractFailedFiles(result: VerificationResult): string[] {
     if (d.file) files.add(d.file);
   }
   return [...files];
-}
-
-function isObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
 }
