@@ -175,7 +175,12 @@ async function createHarness(): Promise<IntegrationHarness> {
   const kernel = new Kernel({ registry });
   await kernel.start();
 
-  const daemon = new OvermindDaemon({ baseDir: paths.baseDir, kernel });
+  const daemon = new OvermindDaemon({
+    baseDir: paths.baseDir,
+    kernel,
+    // Bind to an ephemeral port so tests never collide on 8080.
+    httpPort: 0,
+  });
   await daemon.start();
 
   return {
@@ -582,6 +587,117 @@ Deno.test("integration: scout continues with local persistence when brain task c
 
     assertEquals(callsByMethod(harness.brain.calls, "taskComplete").length, 0);
   } finally {
+    await shutdownHarness(harness);
+  }
+});
+
+Deno.test("integration: cancelling a run releases all of its locks (HTTP + LockRegistry)", async () => {
+  const harness = await createHarness();
+  const previousHarnessFlag = Deno.env.get("OVERMIND_EDIT_HARNESS");
+  Deno.env.set("OVERMIND_EDIT_HARNESS", "1");
+
+  try {
+    const port = harness.daemon.getHttpPort();
+    assertNotEquals(port, 0, "expected daemon HTTP server to be running");
+    const baseUrl = `http://127.0.0.1:${port}`;
+    const runId = "run-integration-locks";
+
+    // Acquire two locks via HTTP — the same path the hook will eventually use.
+    for (
+      const [path, taskId, agentId] of [
+        ["/foo.ts", "T1", "A"],
+        ["/bar.ts", "T2", "B"],
+      ]
+    ) {
+      const res = await fetch(`${baseUrl}/lock`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ path, taskId, agentId, runId }),
+      });
+      assertEquals(res.status, 200);
+      await res.body?.cancel();
+    }
+
+    const registry = harness.daemon.getLockRegistry();
+    assert(registry, "expected lock registry to be attached to daemon");
+    assertEquals(
+      registry.snapshot().filter((e) => e.runId === runId).length,
+      2,
+    );
+
+    // Cancelling the run should release every lock owned by that run, even
+    // when no executor was running for it (cancelRun fans out to the
+    // registry directly so manual operator cancels still clean up).
+    harness.kernel.cancelRun(runId);
+
+    const deadline = Date.now() + 2000;
+    while (Date.now() < deadline) {
+      const remaining = registry.snapshot().filter((e) => e.runId === runId);
+      if (remaining.length === 0) break;
+      await delay(20);
+    }
+    assertEquals(
+      registry.snapshot().filter((e) => e.runId === runId).length,
+      0,
+    );
+
+    // A different run's locks (none here) are unaffected.
+    assertEquals(registry.snapshot().length, 0);
+  } finally {
+    if (previousHarnessFlag === undefined) {
+      Deno.env.delete("OVERMIND_EDIT_HARNESS");
+    } else {
+      Deno.env.set("OVERMIND_EDIT_HARNESS", previousHarnessFlag);
+    }
+    await shutdownHarness(harness);
+  }
+});
+
+Deno.test("integration: HTTP /lock returns 409 with holder on cross-task contention", async () => {
+  const harness = await createHarness();
+  const previousHarnessFlag = Deno.env.get("OVERMIND_EDIT_HARNESS");
+  Deno.env.set("OVERMIND_EDIT_HARNESS", "1");
+
+  try {
+    const baseUrl = `http://127.0.0.1:${harness.daemon.getHttpPort()}`;
+
+    const first = await fetch(`${baseUrl}/lock`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        path: "/contested.ts",
+        taskId: "T1",
+        agentId: "A",
+        runId: "R-contention",
+      }),
+    });
+    assertEquals(first.status, 200);
+    await first.body?.cancel();
+
+    const second = await fetch(`${baseUrl}/lock`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        path: "/contested.ts",
+        taskId: "T2",
+        agentId: "B",
+        runId: "R-contention",
+      }),
+    });
+    assertEquals(second.status, 409);
+    const body = await second.json();
+    assertEquals(body.ok, false);
+    assertEquals(body.holder, {
+      taskId: "T1",
+      agentId: "A",
+      runId: "R-contention",
+    });
+  } finally {
+    if (previousHarnessFlag === undefined) {
+      Deno.env.delete("OVERMIND_EDIT_HARNESS");
+    } else {
+      Deno.env.set("OVERMIND_EDIT_HARNESS", previousHarnessFlag);
+    }
     await shutdownHarness(harness);
   }
 });

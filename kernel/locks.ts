@@ -1,0 +1,145 @@
+import { dirname } from "@std/path";
+
+export interface LockEntry {
+  readonly path: string;
+  readonly taskId: string;
+  readonly agentId: string;
+  readonly runId: string;
+  readonly acquiredAt: string;
+}
+
+export type LockHolder = Pick<LockEntry, "taskId" | "agentId" | "runId">;
+
+export interface AcquireResult {
+  readonly ok: boolean;
+  readonly holder?: LockHolder;
+}
+
+export type AcquireInput = Omit<LockEntry, "acquiredAt">;
+
+interface JournalEvent {
+  readonly ts: string;
+  readonly kind: "acquired" | "released";
+  readonly entry: LockEntry;
+}
+
+/**
+ * Per-task file lock store. Re-entrant for the same taskId. Every transition
+ * is appended to a JSONL journal so the registry can be rebuilt on kernel
+ * restart. Synchronous map mutation runs before any await, so concurrent
+ * acquire/release calls are race-free without an explicit mutex.
+ */
+export class LockRegistry {
+  private readonly locks = new Map<string, LockEntry>();
+  private appendQueue: Promise<void> = Promise.resolve();
+
+  constructor(private readonly journalPath: string) {}
+
+  async load(): Promise<void> {
+    this.locks.clear();
+    let content: string;
+    try {
+      content = await Deno.readTextFile(this.journalPath);
+    } catch (err) {
+      if (err instanceof Deno.errors.NotFound) return;
+      throw err;
+    }
+    for (const line of content.split("\n")) {
+      if (!line.trim()) continue;
+      let event: JournalEvent;
+      try {
+        event = JSON.parse(line) as JournalEvent;
+      } catch {
+        console.warn(
+          `LockRegistry: skipping malformed journal line: ${
+            line.slice(0, 120)
+          }`,
+        );
+        continue;
+      }
+      const entry = event.entry;
+      if (!entry?.path || !entry.taskId) continue;
+      if (event.kind === "acquired") {
+        this.locks.set(entry.path, entry);
+      } else if (event.kind === "released") {
+        const current = this.locks.get(entry.path);
+        if (current && current.taskId === entry.taskId) {
+          this.locks.delete(entry.path);
+        }
+      }
+    }
+  }
+
+  async acquire(input: AcquireInput): Promise<AcquireResult> {
+    const existing = this.locks.get(input.path);
+    if (existing && existing.taskId !== input.taskId) {
+      return {
+        ok: false,
+        holder: {
+          taskId: existing.taskId,
+          agentId: existing.agentId,
+          runId: existing.runId,
+        },
+      };
+    }
+    const entry: LockEntry = {
+      ...input,
+      acquiredAt: new Date().toISOString(),
+    };
+    this.locks.set(input.path, entry);
+    await this.appendEvents([{
+      ts: entry.acquiredAt,
+      kind: "acquired",
+      entry,
+    }]);
+    return { ok: true };
+  }
+
+  async release(path: string, taskId: string): Promise<boolean> {
+    const existing = this.locks.get(path);
+    if (!existing) return true;
+    if (existing.taskId !== taskId) return false;
+    this.locks.delete(path);
+    await this.appendEvents([{
+      ts: new Date().toISOString(),
+      kind: "released",
+      entry: existing,
+    }]);
+    return true;
+  }
+
+  async releaseAllForRun(runId: string): Promise<number> {
+    const targets: LockEntry[] = [];
+    for (const entry of this.locks.values()) {
+      if (entry.runId === runId) targets.push(entry);
+    }
+    if (targets.length === 0) return 0;
+    for (const entry of targets) {
+      this.locks.delete(entry.path);
+    }
+    const now = new Date().toISOString();
+    await this.appendEvents(
+      targets.map((entry) => ({ ts: now, kind: "released" as const, entry })),
+    );
+    return targets.length;
+  }
+
+  snapshot(): readonly LockEntry[] {
+    return Array.from(this.locks.values());
+  }
+
+  private appendEvents(events: readonly JournalEvent[]): Promise<void> {
+    // Chain journal writes so concurrent acquire/release calls cannot produce
+    // torn JSONL lines via interleaved file appends.
+    const next = this.appendQueue.then(async () => {
+      await Deno.mkdir(dirname(this.journalPath), { recursive: true });
+      const payload = events.map((e) => `${JSON.stringify(e)}\n`).join("");
+      await Deno.writeTextFile(this.journalPath, payload, {
+        append: true,
+        create: true,
+      });
+    });
+    this.appendQueue = next.catch(() => {});
+    return next;
+  }
+}

@@ -8,10 +8,15 @@ import type {
 } from "./types.ts";
 import { fromFileUrl } from "@std/path";
 import type { Kernel } from "./kernel.ts";
+import { LockRegistry } from "./locks.ts";
+import { OvermindHttpServer } from "./http.ts";
 
 interface OvermindDaemonOptions {
   baseDir?: string;
   kernel?: Kernel;
+  httpPort?: number;
+  httpHostname?: string;
+  enableHttp?: boolean;
 }
 
 interface ParsedRequest {
@@ -22,6 +27,11 @@ interface ParsedRequest {
 const SOCKET_FILE_NAME = "daemon.sock";
 const PID_FILE_NAME = "daemon.pid";
 const LOCK_FILE_NAME = "daemon.lock";
+const LOCK_JOURNAL_FILE_NAME = "locks.jsonl";
+const HTTP_PORT_ENV_VAR = "OVERMIND_KERNEL_HTTP_PORT";
+const HTTP_BIND_ENV_VAR = "OVERMIND_KERNEL_HTTP_BIND";
+const HTTP_DEFAULT_PORT = 8080;
+const HTTP_DEFAULT_BIND = "127.0.0.1";
 const STARTUP_RETRY_ATTEMPTS = 5;
 const STARTUP_RETRY_INTERVAL_MS = 200;
 const managedDaemonChildren = new Map<string, Deno.ChildProcess>();
@@ -121,12 +131,18 @@ export class OvermindDaemon {
   private readonly baseDir: string;
   private readonly socketPath: string;
   private readonly pidPath: string;
+  private readonly lockJournalPath: string;
   private readonly kernel: Kernel | null;
+  private readonly httpPort: number;
+  private readonly httpHostname: string;
+  private readonly enableHttp: boolean;
 
   private listener: Deno.Listener | null = null;
   private acceptLoopPromise: Promise<void> | null = null;
   private running = false;
   private signalHandlersRegistered = false;
+  private lockRegistry: LockRegistry | null = null;
+  private httpServer: OvermindHttpServer | null = null;
 
   private readonly sigintHandler = () => {
     void this.shutdown().finally(() => Deno.exit(0));
@@ -140,7 +156,16 @@ export class OvermindDaemon {
     this.baseDir = options.baseDir ?? defaultBaseDir;
     this.socketPath = `${this.baseDir}/${SOCKET_FILE_NAME}`;
     this.pidPath = `${this.baseDir}/${PID_FILE_NAME}`;
+    this.lockJournalPath = `${this.baseDir}/${LOCK_JOURNAL_FILE_NAME}`;
     this.kernel = options.kernel ?? null;
+    this.httpPort = options.httpPort ?? readPortFromEnv() ?? HTTP_DEFAULT_PORT;
+    this.httpHostname = options.httpHostname ??
+      Deno.env.get(HTTP_BIND_ENV_VAR) ?? HTTP_DEFAULT_BIND;
+    // Default the HTTP listener on only when a kernel is wired in. The
+    // script-mode subprocess (started by ensureDaemonRunning) has no kernel
+    // today, so locks would never be auto-released — the listener would just
+    // burn port 8080 for nothing.
+    this.enableHttp = options.enableHttp ?? this.kernel !== null;
   }
 
   async start(): Promise<void> {
@@ -157,15 +182,30 @@ export class OvermindDaemon {
     this.running = true;
     this.registerSignalHandlers();
     this.acceptLoopPromise = this.acceptLoop();
+
+    if (this.enableHttp) {
+      await this.startHttp();
+    }
   }
 
   async shutdown(): Promise<void> {
-    if (!this.running && !this.listener) {
+    if (!this.running && !this.listener && !this.httpServer) {
       return;
     }
 
     this.running = false;
     this.unregisterSignalHandlers();
+
+    // HTTP shutdown first so in-flight requests don't race the lock state.
+    if (this.httpServer) {
+      try {
+        await this.httpServer.shutdown();
+      } catch (err) {
+        console.error("HTTP server shutdown error:", err);
+      }
+      this.httpServer = null;
+    }
+    this.lockRegistry = null;
 
     if (this.listener) {
       this.listener.close();
@@ -179,6 +219,34 @@ export class OvermindDaemon {
 
     await removeIfExists(this.pidPath);
     await removeIfExists(this.socketPath);
+  }
+
+  getLockRegistry(): LockRegistry | null {
+    return this.lockRegistry;
+  }
+
+  getHttpPort(): number {
+    return this.httpServer?.port() ?? 0;
+  }
+
+  private async startHttp(): Promise<void> {
+    // HTTP failures must not abort the daemon — the Unix socket remains the
+    // source of truth for daemon health. We log and continue.
+    try {
+      const registry = new LockRegistry(this.lockJournalPath);
+      await registry.load();
+      const server = new OvermindHttpServer({
+        registry,
+        port: this.httpPort,
+        hostname: this.httpHostname,
+      });
+      server.start();
+      this.lockRegistry = registry;
+      this.httpServer = server;
+      this.kernel?.attachLockRegistry(registry);
+    } catch (err) {
+      console.error("Failed to start kernel HTTP listener:", err);
+    }
   }
 
   isRunning(): boolean {
@@ -573,6 +641,14 @@ async function removeIfExists(path: string): Promise<void> {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function readPortFromEnv(): number | null {
+  const raw = Deno.env.get(HTTP_PORT_ENV_VAR);
+  if (!raw) return null;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed < 0 || parsed > 65535) return null;
+  return parsed;
 }
 
 if (import.meta.main) {

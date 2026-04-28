@@ -12,6 +12,7 @@ import { executeScout } from "./modes/scout.ts";
 import { executeRelay } from "./modes/relay.ts";
 import { executeSwarm } from "./modes/swarm.ts";
 import { PersistenceCoordinator } from "./persistence.ts";
+import type { LockRegistry } from "./locks.ts";
 import {
   type IntentClassification,
   type InterviewCallback,
@@ -28,6 +29,7 @@ export interface KernelOptions {
   registry?: AdapterRegistry;
   interviewCallback?: InterviewCallback;
   dispatcher?: AgentDispatcher;
+  lockRegistry?: LockRegistry;
 }
 
 export class Kernel {
@@ -41,6 +43,7 @@ export class Kernel {
   private cancellationRegistry = new CancellationRegistry();
   private interviewCallback: InterviewCallback | null;
   private dispatcher: AgentDispatcher | null;
+  private lockRegistry: LockRegistry | null;
 
   constructor(options?: KernelOptions) {
     this.eventBus = new EventBus();
@@ -49,6 +52,15 @@ export class Kernel {
     this.injectedRegistry = options?.registry ?? null;
     this.interviewCallback = options?.interviewCallback ?? null;
     this.dispatcher = options?.dispatcher ?? null;
+    this.lockRegistry = options?.lockRegistry ?? null;
+  }
+
+  attachLockRegistry(registry: LockRegistry): void {
+    this.lockRegistry = registry;
+  }
+
+  getLockRegistry(): LockRegistry | null {
+    return this.lockRegistry;
   }
 
   async start(): Promise<void> {
@@ -103,7 +115,17 @@ export class Kernel {
   }
 
   cancelRun(runId: string): boolean {
-    return this.cancellationRegistry.cancel(runId);
+    const cancelled = this.cancellationRegistry.cancel(runId);
+    // Lock release is best-effort — never block cancel on it. The mode
+    // executor's finally block also calls releaseAllForRun, so this is
+    // belt-and-suspenders for the case where the executor stays stuck
+    // past the cancel signal.
+    if (this.lockRegistry) {
+      this.lockRegistry.releaseAllForRun(runId).catch((err) => {
+        console.error(`Lock release error for run ${runId}:`, err);
+      });
+    }
+    return cancelled;
   }
 
   async executeMode(
@@ -189,6 +211,8 @@ export class Kernel {
             graph,
             dispatcher,
           );
+        default:
+          throw new OvermindError(`Unknown mode: ${String(mode)}`);
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -199,6 +223,20 @@ export class Kernel {
       throw err;
     } finally {
       this.cancellationRegistry.unregister(resolvedRunId);
+      // Release every lock owned by this run. Hooks rely on the kernel for
+      // auto-release rather than per-edit unlocks, so this is the canonical
+      // cleanup point and runs after every terminal path (success / fail /
+      // cancel).
+      if (this.lockRegistry) {
+        try {
+          await this.lockRegistry.releaseAllForRun(resolvedRunId);
+        } catch (err) {
+          console.error(
+            `Lock release error for run ${resolvedRunId}:`,
+            err,
+          );
+        }
+      }
     }
   }
 
