@@ -245,3 +245,42 @@ Deno.test("load reflects a re-entrant acquire by replacing acquiredAt", async ()
     assertEquals(reader.snapshot()[0].acquiredAt, expected);
   });
 });
+
+Deno.test("acquire refuses new entries past the 10k cap (OOM defense)", async () => {
+  await withTempJournal(async (journalPath) => {
+    const registry = new LockRegistry(journalPath);
+    // Fill to the cap. Fast — pure in-memory work, journal append serialized.
+    const total = 10_000;
+    for (let i = 0; i < total; i++) {
+      const result = await registry.acquire({
+        path: `/file_${i}.ts`,
+        taskId: `T${i}`,
+        agentId: "A",
+        runId: "R",
+      });
+      assertEquals(result.ok, true);
+    }
+    assertEquals(registry.snapshot().length, total);
+
+    // The next new path should be rejected.
+    const overflow = await registry.acquire({
+      path: "/overflow.ts",
+      taskId: "T-overflow",
+      agentId: "A",
+      runId: "R",
+    });
+    assertEquals(overflow.ok, false);
+    assertEquals(overflow.holder, undefined);
+
+    // Re-entrant acquire on an existing path still succeeds even at the cap
+    // (no new map entry created).
+    const reentrant = await registry.acquire({
+      path: "/file_0.ts",
+      taskId: "T0",
+      agentId: "A",
+      runId: "R",
+    });
+    assertEquals(reentrant.ok, true);
+    assertEquals(registry.snapshot().length, total);
+  });
+});

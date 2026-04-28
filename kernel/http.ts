@@ -72,8 +72,17 @@ export class OvermindHttpServer {
   }
 
   private async handle(req: Request): Promise<Response> {
+    // DNS-rebinding defense. Localhost HTTP services are reachable by any
+    // browser tab via attacker-controlled domains that resolve to 127.0.0.1.
+    // The Host header check rejects requests whose Host doesn't match the
+    // bound address+port we're listening on.
+    if (!this.isHostAllowed(req)) {
+      await req.body?.cancel();
+      return jsonResponse({ error: "forbidden" }, 403);
+    }
     const url = new URL(req.url);
     if (req.method !== "POST") {
+      await req.body?.cancel();
       return jsonResponse({ error: "method_not_allowed" }, 405);
     }
     try {
@@ -85,17 +94,32 @@ export class OvermindHttpServer {
         case "/event":
           return await this.handleEvent(req);
         default:
+          await req.body?.cancel();
           return jsonResponse({ error: "not_found" }, 404);
       }
     } catch (err) {
       if (err instanceof HttpError) {
         return jsonResponse({ error: err.code }, err.status);
       }
-      return jsonResponse(
-        { error: "internal_error", detail: String(err) },
-        500,
-      );
+      // Log details server-side; never echo to the client. Avoids leaking
+      // stack traces, file paths, and internal state to localhost callers.
+      console.error("OvermindHttpServer handler error:", err);
+      return jsonResponse({ error: "internal_error" }, 500);
     }
+  }
+
+  private isHostAllowed(req: Request): boolean {
+    const host = req.headers.get("host");
+    if (!host) return false;
+    // Accept the bound port on either the literal IP or the localhost name.
+    // Refuse anything else (e.g. attacker.example.com pointing to 127.0.0.1).
+    const port = this.boundPort;
+    const allowed = [
+      `127.0.0.1:${port}`,
+      `localhost:${port}`,
+      `[::1]:${port}`,
+    ];
+    return allowed.includes(host);
   }
 
   private async handleLock(req: Request): Promise<Response> {
@@ -158,7 +182,14 @@ function defaultHarnessOn(): boolean {
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
     status,
-    headers: { "content-type": "application/json" },
+    headers: {
+      "content-type": "application/json",
+      // Defense-in-depth — POSTs with application/json already trigger CORS
+      // preflight which lacks an Allow-Origin and so already fails in the
+      // browser. The empty Allow-Origin makes that explicit and protects
+      // future routes that might accept simple-CORS content types.
+      "access-control-allow-origin": "null",
+    },
   });
 }
 

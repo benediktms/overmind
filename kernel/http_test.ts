@@ -291,3 +291,173 @@ Deno.test("shutdown is idempotent", async () => {
   await server.shutdown();
   await Deno.remove(dir, { recursive: true });
 });
+
+Deno.test("POST /lock with oversized body returns 413", async () => {
+  const h = await startTestServer();
+  try {
+    // Hand-roll a body just over the 1 MB cap so the streaming guard fires.
+    const oversized = "x".repeat(1024 * 1024 + 16);
+    const res = await fetch(`${h.url}/lock`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ payload: oversized }),
+    });
+    assertEquals(res.status, 413);
+    const body = await res.json();
+    assertEquals(body.error, "payload_too_large");
+  } finally {
+    await h.shutdown();
+  }
+});
+
+async function rawHttpPost(
+  port: number,
+  path: string,
+  hostHeader: string,
+  body: string,
+): Promise<{ status: number; body: string }> {
+  // fetch() silently strips the Host header (forbidden by spec), so the
+  // DNS-rebinding test has to drop to a raw TCP socket to set Host directly.
+  const conn = await Deno.connect({ hostname: "127.0.0.1", port });
+  const req = [
+    `POST ${path} HTTP/1.1`,
+    `Host: ${hostHeader}`,
+    `Content-Type: application/json`,
+    `Content-Length: ${new TextEncoder().encode(body).length}`,
+    `Connection: close`,
+    ``,
+    body,
+  ].join("\r\n");
+  try {
+    await conn.write(new TextEncoder().encode(req));
+    const chunks: Uint8Array[] = [];
+    const buf = new Uint8Array(4096);
+    while (true) {
+      const n = await conn.read(buf);
+      if (n === null) break;
+      chunks.push(buf.slice(0, n));
+    }
+    let total = 0;
+    for (const c of chunks) total += c.length;
+    const merged = new Uint8Array(total);
+    let off = 0;
+    for (const c of chunks) {
+      merged.set(c, off);
+      off += c.length;
+    }
+    const text = new TextDecoder().decode(merged);
+    const statusLine = text.split("\r\n", 1)[0] ?? "";
+    const status = Number(statusLine.split(" ")[1] ?? "0");
+    const bodyStart = text.indexOf("\r\n\r\n");
+    const responseBody = bodyStart >= 0 ? text.slice(bodyStart + 4) : "";
+    return { status, body: responseBody };
+  } finally {
+    try {
+      conn.close();
+    } catch {
+      // already closed
+    }
+  }
+}
+
+Deno.test("rejects requests with mismatched Host header (DNS rebinding defense)", async () => {
+  const h = await startTestServer();
+  try {
+    const port = Number(new URL(h.url).port);
+    const result = await rawHttpPost(
+      port,
+      "/lock",
+      "attacker.example.com:80",
+      JSON.stringify({
+        path: "/foo.ts",
+        taskId: "T1",
+        agentId: "A",
+        runId: "R",
+      }),
+    );
+    assertEquals(result.status, 403);
+    // Lock state should be untouched.
+    assertEquals(h.registry.snapshot().length, 0);
+  } finally {
+    await h.shutdown();
+  }
+});
+
+Deno.test("accepts a request whose Host header matches the bound port", async () => {
+  const h = await startTestServer();
+  try {
+    const port = Number(new URL(h.url).port);
+    const result = await rawHttpPost(
+      port,
+      "/lock",
+      `127.0.0.1:${port}`,
+      JSON.stringify({
+        path: "/foo.ts",
+        taskId: "T1",
+        agentId: "A",
+        runId: "R",
+      }),
+    );
+    assertEquals(result.status, 200);
+    assertEquals(h.registry.snapshot().length, 1);
+  } finally {
+    await h.shutdown();
+  }
+});
+
+Deno.test("accepts both 127.0.0.1 and localhost Host headers on the bound port", async () => {
+  const h = await startTestServer();
+  try {
+    const port = new URL(h.url).port;
+    // Hit the same server via 127.0.0.1; Host header reflects that.
+    const res = await fetch(`http://127.0.0.1:${port}/lock`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        path: "/foo.ts",
+        taskId: "T1",
+        agentId: "A",
+        runId: "R",
+      }),
+    });
+    assertEquals(res.status, 200);
+    await res.body?.cancel();
+  } finally {
+    await h.shutdown();
+  }
+});
+
+Deno.test("500 response does not leak error detail", async () => {
+  // Inject a faulty registry so acquire throws unexpectedly.
+  const dir = await Deno.makeTempDir();
+  const registry = new LockRegistry(join(dir, "locks.jsonl"));
+  // deno-lint-ignore no-explicit-any
+  (registry as any).acquire = () => {
+    throw new Error("super-secret internal path: /etc/shadow");
+  };
+  const server = new OvermindHttpServer({
+    registry,
+    port: 0,
+    harnessOn: () => true,
+  });
+  const { port, hostname } = server.start();
+  try {
+    const res = await fetch(`http://${hostname}:${port}/lock`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        path: "/foo.ts",
+        taskId: "T1",
+        agentId: "A",
+        runId: "R",
+      }),
+    });
+    assertEquals(res.status, 500);
+    const body = await res.json();
+    assertEquals(body, { error: "internal_error" });
+    // No "detail" key, no leak of the secret string.
+  } finally {
+    await server.shutdown();
+    await Deno.remove(dir, { recursive: true });
+  }
+});

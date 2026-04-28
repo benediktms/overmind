@@ -17,6 +17,12 @@ export interface AcquireResult {
 
 export type AcquireInput = Omit<LockEntry, "acquiredAt">;
 
+// Cap the in-memory lock map so a misbehaving (or malicious) localhost caller
+// cannot OOM the kernel by spamming /lock with unique paths. 10k locks is far
+// above any plausible legitimate working set; agents typically hold <50 at
+// once.
+const MAX_LOCKS = 10_000;
+
 interface JournalEvent {
   readonly ts: string;
   readonly kind: "acquired" | "released";
@@ -32,6 +38,7 @@ interface JournalEvent {
 export class LockRegistry {
   private readonly locks = new Map<string, LockEntry>();
   private appendQueue: Promise<void> = Promise.resolve();
+  private journalDirReady = false;
 
   constructor(private readonly journalPath: string) {}
 
@@ -81,6 +88,9 @@ export class LockRegistry {
           runId: existing.runId,
         },
       };
+    }
+    if (!existing && this.locks.size >= MAX_LOCKS) {
+      return { ok: false };
     }
     const entry: LockEntry = {
       ...input,
@@ -132,7 +142,10 @@ export class LockRegistry {
     // Chain journal writes so concurrent acquire/release calls cannot produce
     // torn JSONL lines via interleaved file appends.
     const next = this.appendQueue.then(async () => {
-      await Deno.mkdir(dirname(this.journalPath), { recursive: true });
+      if (!this.journalDirReady) {
+        await Deno.mkdir(dirname(this.journalPath), { recursive: true });
+        this.journalDirReady = true;
+      }
       const payload = events.map((e) => `${JSON.stringify(e)}\n`).join("");
       await Deno.writeTextFile(this.journalPath, payload, {
         append: true,

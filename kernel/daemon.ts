@@ -647,7 +647,10 @@ function readPortFromEnv(): number | null {
   const raw = Deno.env.get(HTTP_PORT_ENV_VAR);
   if (!raw) return null;
   const parsed = Number(raw);
-  if (!Number.isFinite(parsed) || parsed < 0 || parsed > 65535) return null;
+  // Reject 0 from the env path — operators setting OVERMIND_KERNEL_HTTP_PORT=0
+  // probably typoed. Tests still pick ephemeral ports via the explicit
+  // `httpPort: 0` constructor option.
+  if (!Number.isInteger(parsed) || parsed <= 0 || parsed > 65535) return null;
   return parsed;
 }
 
