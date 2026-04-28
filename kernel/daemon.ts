@@ -243,7 +243,6 @@ export class OvermindDaemon {
       server.start();
       this.lockRegistry = registry;
       this.httpServer = server;
-      this.kernel?.attachLockRegistry(registry);
     } catch (err) {
       console.error("Failed to start kernel HTTP listener:", err);
     }

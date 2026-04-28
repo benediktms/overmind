@@ -1,5 +1,15 @@
 import type { AcquireInput, LockRegistry } from "./locks.ts";
 
+interface ReleaseBody {
+  path: string;
+  sessionId: string;
+  agentId: string;
+}
+
+interface ReleaseSessionBody {
+  sessionId: string;
+}
+
 const MAX_BODY_BYTES = 1024 * 1024; // 1 MB, matches the Unix socket cap.
 const HARNESS_ENV_VAR = "OVERMIND_EDIT_HARNESS";
 const DEFAULT_HOSTNAME = "127.0.0.1";
@@ -13,11 +23,6 @@ export interface HttpServerOptions {
   hostname?: string;
   eventSink?: EventSink;
   harnessOn?: () => boolean;
-}
-
-interface ReleaseBody {
-  path: string;
-  taskId: string;
 }
 
 class HttpError extends Error {
@@ -91,6 +96,8 @@ export class OvermindHttpServer {
           return await this.handleLock(req);
         case "/unlock":
           return await this.handleUnlock(req);
+        case "/release-session-locks":
+          return await this.handleReleaseSessionLocks(req);
         case "/event":
           return await this.handleEvent(req);
         default:
@@ -148,12 +155,31 @@ export class OvermindHttpServer {
     }
     const released = await this.options.registry.release(
       body.path,
-      body.taskId,
+      body.sessionId,
+      body.agentId,
     );
     if (!released) {
       return jsonResponse({ ok: false, error: "lock_held_by_other" }, 409);
     }
     return jsonResponse({ ok: true });
+  }
+
+  private async handleReleaseSessionLocks(req: Request): Promise<Response> {
+    // Idempotent bulk release. Called by the SessionEnd hook on every CC
+    // session disconnect. Always returns 200 with the count freed; treats
+    // harness-off as "nothing to do" (no journal write).
+    if (!this.harnessOn()) {
+      await req.body?.cancel();
+      return jsonResponse({ ok: true, harness: "off", released: 0 });
+    }
+    const body = await readJsonBody(req);
+    if (!isReleaseSessionBody(body)) {
+      return jsonResponse({ error: "invalid_body" }, 400);
+    }
+    const released = await this.options.registry.releaseAllForSession(
+      body.sessionId,
+    );
+    return jsonResponse({ ok: true, released });
   }
 
   private async handleEvent(req: Request): Promise<Response> {
@@ -235,15 +261,22 @@ function isAcquireBody(value: unknown): value is AcquireInput {
   if (!value || typeof value !== "object") return false;
   const v = value as Record<string, unknown>;
   return nonEmptyString(v.path) &&
-    nonEmptyString(v.taskId) &&
-    nonEmptyString(v.agentId) &&
-    nonEmptyString(v.runId);
+    nonEmptyString(v.sessionId) &&
+    nonEmptyString(v.agentId);
 }
 
 function isReleaseBody(value: unknown): value is ReleaseBody {
   if (!value || typeof value !== "object") return false;
   const v = value as Record<string, unknown>;
-  return nonEmptyString(v.path) && nonEmptyString(v.taskId);
+  return nonEmptyString(v.path) &&
+    nonEmptyString(v.sessionId) &&
+    nonEmptyString(v.agentId);
+}
+
+function isReleaseSessionBody(value: unknown): value is ReleaseSessionBody {
+  if (!value || typeof value !== "object") return false;
+  const v = value as Record<string, unknown>;
+  return nonEmptyString(v.sessionId);
 }
 
 function nonEmptyString(value: unknown): value is string {

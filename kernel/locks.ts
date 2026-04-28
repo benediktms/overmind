@@ -2,13 +2,12 @@ import { dirname } from "@std/path";
 
 export interface LockEntry {
   readonly path: string;
-  readonly taskId: string;
+  readonly sessionId: string;
   readonly agentId: string;
-  readonly runId: string;
   readonly acquiredAt: string;
 }
 
-export type LockHolder = Pick<LockEntry, "taskId" | "agentId" | "runId">;
+export type LockHolder = Pick<LockEntry, "sessionId" | "agentId">;
 
 export interface AcquireResult {
   readonly ok: boolean;
@@ -30,10 +29,11 @@ interface JournalEvent {
 }
 
 /**
- * Per-task file lock store. Re-entrant for the same taskId. Every transition
- * is appended to a JSONL journal so the registry can be rebuilt on kernel
- * restart. Synchronous map mutation runs before any await, so concurrent
- * acquire/release calls are race-free without an explicit mutex.
+ * Per-session file lock store. Owner identity is `(sessionId, agentId)` from
+ * CC's hook payload; re-entrant when both match, conflict when either differs.
+ * Every transition is appended to a JSONL journal so the registry can be
+ * rebuilt on kernel restart. Synchronous map mutation runs before any await,
+ * so concurrent acquire/release calls are race-free without an explicit mutex.
  */
 export class LockRegistry {
   private readonly locks = new Map<string, LockEntry>();
@@ -65,12 +65,16 @@ export class LockRegistry {
         continue;
       }
       const entry = event.entry;
-      if (!entry?.path || !entry.taskId) continue;
+      if (!entry?.path || !entry.sessionId || !entry.agentId) continue;
       if (event.kind === "acquired") {
         this.locks.set(entry.path, entry);
       } else if (event.kind === "released") {
         const current = this.locks.get(entry.path);
-        if (current && current.taskId === entry.taskId) {
+        if (
+          current &&
+          current.sessionId === entry.sessionId &&
+          current.agentId === entry.agentId
+        ) {
           this.locks.delete(entry.path);
         }
       }
@@ -79,13 +83,16 @@ export class LockRegistry {
 
   async acquire(input: AcquireInput): Promise<AcquireResult> {
     const existing = this.locks.get(input.path);
-    if (existing && existing.taskId !== input.taskId) {
+    if (
+      existing &&
+      (existing.sessionId !== input.sessionId ||
+        existing.agentId !== input.agentId)
+    ) {
       return {
         ok: false,
         holder: {
-          taskId: existing.taskId,
+          sessionId: existing.sessionId,
           agentId: existing.agentId,
-          runId: existing.runId,
         },
       };
     }
@@ -105,10 +112,16 @@ export class LockRegistry {
     return { ok: true };
   }
 
-  async release(path: string, taskId: string): Promise<boolean> {
+  async release(
+    path: string,
+    sessionId: string,
+    agentId: string,
+  ): Promise<boolean> {
     const existing = this.locks.get(path);
     if (!existing) return true;
-    if (existing.taskId !== taskId) return false;
+    if (existing.sessionId !== sessionId || existing.agentId !== agentId) {
+      return false;
+    }
     this.locks.delete(path);
     await this.appendEvents([{
       ts: new Date().toISOString(),
@@ -118,10 +131,10 @@ export class LockRegistry {
     return true;
   }
 
-  async releaseAllForRun(runId: string): Promise<number> {
+  async releaseAllForSession(sessionId: string): Promise<number> {
     const targets: LockEntry[] = [];
     for (const entry of this.locks.values()) {
-      if (entry.runId === runId) targets.push(entry);
+      if (entry.sessionId === sessionId) targets.push(entry);
     }
     if (targets.length === 0) return 0;
     for (const entry of targets) {

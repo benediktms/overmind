@@ -19,38 +19,34 @@ Deno.test("acquire on empty path returns ok and records the entry", async () => 
     const registry = new LockRegistry(journalPath);
     const result = await registry.acquire({
       path: "/foo.ts",
-      taskId: "T1",
+      sessionId: "S1",
       agentId: "A",
-      runId: "R",
     });
     assertEquals(result.ok, true);
     assertEquals(result.holder, undefined);
     const snapshot = registry.snapshot();
     assertEquals(snapshot.length, 1);
     assertEquals(snapshot[0].path, "/foo.ts");
-    assertEquals(snapshot[0].taskId, "T1");
+    assertEquals(snapshot[0].sessionId, "S1");
+    assertEquals(snapshot[0].agentId, "A");
   });
 });
 
-Deno.test("acquire with same taskId is re-entrant and refreshes acquiredAt", async () => {
+Deno.test("acquire with same (sessionId, agentId) is re-entrant and refreshes acquiredAt", async () => {
   await withTempJournal(async (journalPath) => {
     const registry = new LockRegistry(journalPath);
-    const first = await registry.acquire({
+    await registry.acquire({
       path: "/foo.ts",
-      taskId: "T1",
+      sessionId: "S1",
       agentId: "A",
-      runId: "R",
     });
     const firstAt = registry.snapshot()[0].acquiredAt;
-    // Allow the wall clock to advance so acquiredAt is observably newer.
     await new Promise((r) => setTimeout(r, 5));
     const second = await registry.acquire({
       path: "/foo.ts",
-      taskId: "T1",
+      sessionId: "S1",
       agentId: "A",
-      runId: "R",
     });
-    assertEquals(first.ok, true);
     assertEquals(second.ok, true);
     const secondAt = registry.snapshot()[0].acquiredAt;
     assert(
@@ -60,51 +56,81 @@ Deno.test("acquire with same taskId is re-entrant and refreshes acquiredAt", asy
   });
 });
 
-Deno.test("acquire with different taskId returns conflict with holder details", async () => {
+Deno.test("acquire conflicts when sessionId differs", async () => {
   await withTempJournal(async (journalPath) => {
     const registry = new LockRegistry(journalPath);
     await registry.acquire({
       path: "/foo.ts",
-      taskId: "T1",
+      sessionId: "S1",
       agentId: "A",
-      runId: "R1",
     });
     const result = await registry.acquire({
       path: "/foo.ts",
-      taskId: "T2",
-      agentId: "B",
-      runId: "R2",
+      sessionId: "S2",
+      agentId: "A",
     });
     assertEquals(result.ok, false);
-    assertEquals(result.holder, { taskId: "T1", agentId: "A", runId: "R1" });
+    assertEquals(result.holder, { sessionId: "S1", agentId: "A" });
   });
 });
 
-Deno.test("release with matching taskId frees the lock", async () => {
+Deno.test("acquire conflicts when agentId differs (same session)", async () => {
+  // Two agents within the same CC session race on the same file —
+  // intra-session race detection.
   await withTempJournal(async (journalPath) => {
     const registry = new LockRegistry(journalPath);
     await registry.acquire({
       path: "/foo.ts",
-      taskId: "T1",
+      sessionId: "S1",
       agentId: "A",
-      runId: "R",
     });
-    const ok = await registry.release("/foo.ts", "T1");
+    const result = await registry.acquire({
+      path: "/foo.ts",
+      sessionId: "S1",
+      agentId: "B",
+    });
+    assertEquals(result.ok, false);
+    assertEquals(result.holder, { sessionId: "S1", agentId: "A" });
+  });
+});
+
+Deno.test("release with matching owner frees the lock", async () => {
+  await withTempJournal(async (journalPath) => {
+    const registry = new LockRegistry(journalPath);
+    await registry.acquire({
+      path: "/foo.ts",
+      sessionId: "S1",
+      agentId: "A",
+    });
+    const ok = await registry.release("/foo.ts", "S1", "A");
     assertEquals(ok, true);
     assertEquals(registry.snapshot().length, 0);
   });
 });
 
-Deno.test("release with mismatching taskId refuses to steal the lock", async () => {
+Deno.test("release with mismatched sessionId refuses to steal", async () => {
   await withTempJournal(async (journalPath) => {
     const registry = new LockRegistry(journalPath);
     await registry.acquire({
       path: "/foo.ts",
-      taskId: "T1",
+      sessionId: "S1",
       agentId: "A",
-      runId: "R",
     });
-    const ok = await registry.release("/foo.ts", "T2");
+    const ok = await registry.release("/foo.ts", "S2", "A");
+    assertEquals(ok, false);
+    assertEquals(registry.snapshot().length, 1);
+  });
+});
+
+Deno.test("release with mismatched agentId refuses to steal", async () => {
+  await withTempJournal(async (journalPath) => {
+    const registry = new LockRegistry(journalPath);
+    await registry.acquire({
+      path: "/foo.ts",
+      sessionId: "S1",
+      agentId: "A",
+    });
+    const ok = await registry.release("/foo.ts", "S1", "B");
     assertEquals(ok, false);
     assertEquals(registry.snapshot().length, 1);
   });
@@ -113,50 +139,32 @@ Deno.test("release with mismatching taskId refuses to steal the lock", async () 
 Deno.test("release on absent path is idempotent", async () => {
   await withTempJournal(async (journalPath) => {
     const registry = new LockRegistry(journalPath);
-    const ok = await registry.release("/nope.ts", "T1");
+    const ok = await registry.release("/nope.ts", "S1", "A");
     assertEquals(ok, true);
   });
 });
 
-Deno.test("releaseAllForRun frees only entries owned by the run", async () => {
+Deno.test("releaseAllForSession frees every lock owned by the session", async () => {
   await withTempJournal(async (journalPath) => {
     const registry = new LockRegistry(journalPath);
-    await registry.acquire({
-      path: "/a.ts",
-      taskId: "T1",
-      agentId: "A",
-      runId: "R1",
-    });
-    await registry.acquire({
-      path: "/b.ts",
-      taskId: "T2",
-      agentId: "B",
-      runId: "R1",
-    });
-    await registry.acquire({
-      path: "/c.ts",
-      taskId: "T3",
-      agentId: "C",
-      runId: "R2",
-    });
-    const freed = await registry.releaseAllForRun("R1");
+    await registry.acquire({ path: "/a.ts", sessionId: "S1", agentId: "A" });
+    await registry.acquire({ path: "/b.ts", sessionId: "S1", agentId: "B" });
+    await registry.acquire({ path: "/c.ts", sessionId: "S2", agentId: "C" });
+
+    const freed = await registry.releaseAllForSession("S1");
     assertEquals(freed, 2);
     const remaining = registry.snapshot();
     assertEquals(remaining.length, 1);
     assertEquals(remaining[0].path, "/c.ts");
+    assertEquals(remaining[0].sessionId, "S2");
   });
 });
 
-Deno.test("releaseAllForRun returns 0 when the run holds no locks", async () => {
+Deno.test("releaseAllForSession returns 0 when the session holds no locks", async () => {
   await withTempJournal(async (journalPath) => {
     const registry = new LockRegistry(journalPath);
-    await registry.acquire({
-      path: "/a.ts",
-      taskId: "T1",
-      agentId: "A",
-      runId: "R1",
-    });
-    const freed = await registry.releaseAllForRun("R-unknown");
+    await registry.acquire({ path: "/a.ts", sessionId: "S1", agentId: "A" });
+    const freed = await registry.releaseAllForSession("S-unknown");
     assertEquals(freed, 0);
     assertEquals(registry.snapshot().length, 1);
   });
@@ -165,19 +173,9 @@ Deno.test("releaseAllForRun returns 0 when the run holds no locks", async () => 
 Deno.test("load rebuilds state — released entries do not reappear", async () => {
   await withTempJournal(async (journalPath) => {
     const writer = new LockRegistry(journalPath);
-    await writer.acquire({
-      path: "/a.ts",
-      taskId: "T1",
-      agentId: "A",
-      runId: "R",
-    });
-    await writer.acquire({
-      path: "/b.ts",
-      taskId: "T2",
-      agentId: "B",
-      runId: "R",
-    });
-    await writer.release("/a.ts", "T1");
+    await writer.acquire({ path: "/a.ts", sessionId: "S1", agentId: "A" });
+    await writer.acquire({ path: "/b.ts", sessionId: "S2", agentId: "B" });
+    await writer.release("/a.ts", "S1", "A");
 
     const reader = new LockRegistry(journalPath);
     await reader.load();
@@ -197,23 +195,13 @@ Deno.test("load on a missing journal yields an empty registry", async () => {
 Deno.test("load tolerates a malformed journal line", async () => {
   await withTempJournal(async (journalPath) => {
     const writer = new LockRegistry(journalPath);
-    await writer.acquire({
-      path: "/a.ts",
-      taskId: "T1",
-      agentId: "A",
-      runId: "R",
-    });
+    await writer.acquire({ path: "/a.ts", sessionId: "S1", agentId: "A" });
     await Deno.writeTextFile(
       journalPath,
       "{ this is not json\n",
       { append: true },
     );
-    await writer.acquire({
-      path: "/b.ts",
-      taskId: "T2",
-      agentId: "B",
-      runId: "R",
-    });
+    await writer.acquire({ path: "/b.ts", sessionId: "S1", agentId: "B" });
 
     const reader = new LockRegistry(journalPath);
     await reader.load();
@@ -222,22 +210,49 @@ Deno.test("load tolerates a malformed journal line", async () => {
   });
 });
 
+Deno.test("load skips entries missing required identity fields", async () => {
+  await withTempJournal(async (journalPath) => {
+    // Hand-craft a journal containing a legacy-shape entry (with taskId/runId
+    // but no sessionId). The new replay must skip it rather than crash.
+    const lines = [
+      JSON.stringify({
+        ts: "2026-01-01T00:00:00Z",
+        kind: "acquired",
+        entry: {
+          path: "/legacy.ts",
+          taskId: "T1",
+          agentId: "A",
+          runId: "R",
+          acquiredAt: "2026-01-01T00:00:00Z",
+        },
+      }),
+      JSON.stringify({
+        ts: "2026-01-01T00:00:01Z",
+        kind: "acquired",
+        entry: {
+          path: "/new.ts",
+          sessionId: "S1",
+          agentId: "A",
+          acquiredAt: "2026-01-01T00:00:01Z",
+        },
+      }),
+      "",
+    ].join("\n");
+    await Deno.writeTextFile(journalPath, lines);
+
+    const reader = new LockRegistry(journalPath);
+    await reader.load();
+    const paths = reader.snapshot().map((e) => e.path);
+    assertEquals(paths, ["/new.ts"]);
+  });
+});
+
 Deno.test("load reflects a re-entrant acquire by replacing acquiredAt", async () => {
   await withTempJournal(async (journalPath) => {
     const writer = new LockRegistry(journalPath);
-    await writer.acquire({
-      path: "/a.ts",
-      taskId: "T1",
-      agentId: "A",
-      runId: "R",
-    });
+    await writer.acquire({ path: "/a.ts", sessionId: "S1", agentId: "A" });
     await new Promise((r) => setTimeout(r, 5));
-    await writer.acquire({
-      path: "/a.ts",
-      taskId: "T1",
-      agentId: "A",
-      runId: "R",
-    });
+    await writer.acquire({ path: "/a.ts", sessionId: "S1", agentId: "A" });
     const expected = writer.snapshot()[0].acquiredAt;
 
     const reader = new LockRegistry(journalPath);
@@ -249,25 +264,21 @@ Deno.test("load reflects a re-entrant acquire by replacing acquiredAt", async ()
 Deno.test("acquire refuses new entries past the 10k cap (OOM defense)", async () => {
   await withTempJournal(async (journalPath) => {
     const registry = new LockRegistry(journalPath);
-    // Fill to the cap. Fast — pure in-memory work, journal append serialized.
     const total = 10_000;
     for (let i = 0; i < total; i++) {
       const result = await registry.acquire({
         path: `/file_${i}.ts`,
-        taskId: `T${i}`,
+        sessionId: `S${i}`,
         agentId: "A",
-        runId: "R",
       });
       assertEquals(result.ok, true);
     }
     assertEquals(registry.snapshot().length, total);
 
-    // The next new path should be rejected.
     const overflow = await registry.acquire({
       path: "/overflow.ts",
-      taskId: "T-overflow",
+      sessionId: "S-overflow",
       agentId: "A",
-      runId: "R",
     });
     assertEquals(overflow.ok, false);
     assertEquals(overflow.holder, undefined);
@@ -276,9 +287,8 @@ Deno.test("acquire refuses new entries past the 10k cap (OOM defense)", async ()
     // (no new map entry created).
     const reentrant = await registry.acquire({
       path: "/file_0.ts",
-      taskId: "T0",
+      sessionId: "S0",
       agentId: "A",
-      runId: "R",
     });
     assertEquals(reentrant.ok, true);
     assertEquals(registry.snapshot().length, total);

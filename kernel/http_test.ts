@@ -49,9 +49,8 @@ Deno.test("POST /lock acquires an empty path with 200", async () => {
   try {
     const res = await postJson(`${h.url}/lock`, {
       path: "/foo.ts",
-      taskId: "T1",
+      sessionId: "S1",
       agentId: "A",
-      runId: "R",
     });
     assertEquals(res.status, 200);
     assertEquals(await res.json(), { ok: true });
@@ -61,42 +60,61 @@ Deno.test("POST /lock acquires an empty path with 200", async () => {
   }
 });
 
-Deno.test("POST /lock returns 409 with holder on conflict", async () => {
+Deno.test("POST /lock returns 409 with holder on cross-session conflict", async () => {
   const h = await startTestServer();
   try {
     await h.registry.acquire({
       path: "/foo.ts",
-      taskId: "T1",
+      sessionId: "S1",
       agentId: "A",
-      runId: "R1",
     });
     const res = await postJson(`${h.url}/lock`, {
       path: "/foo.ts",
-      taskId: "T2",
+      sessionId: "S2",
       agentId: "B",
-      runId: "R2",
     });
     assertEquals(res.status, 409);
     const body = await res.json();
     assertEquals(body.ok, false);
-    assertEquals(body.holder, { taskId: "T1", agentId: "A", runId: "R1" });
+    assertEquals(body.holder, { sessionId: "S1", agentId: "A" });
   } finally {
     await h.shutdown();
   }
 });
 
-Deno.test("POST /unlock releases a held lock", async () => {
+Deno.test("POST /lock returns 409 on intra-session cross-agent conflict", async () => {
   const h = await startTestServer();
   try {
     await h.registry.acquire({
       path: "/foo.ts",
-      taskId: "T1",
+      sessionId: "S1",
       agentId: "A",
-      runId: "R",
+    });
+    const res = await postJson(`${h.url}/lock`, {
+      path: "/foo.ts",
+      sessionId: "S1",
+      agentId: "B",
+    });
+    assertEquals(res.status, 409);
+    const body = await res.json();
+    assertEquals(body.holder, { sessionId: "S1", agentId: "A" });
+  } finally {
+    await h.shutdown();
+  }
+});
+
+Deno.test("POST /unlock releases a held lock with matching owner", async () => {
+  const h = await startTestServer();
+  try {
+    await h.registry.acquire({
+      path: "/foo.ts",
+      sessionId: "S1",
+      agentId: "A",
     });
     const res = await postJson(`${h.url}/unlock`, {
       path: "/foo.ts",
-      taskId: "T1",
+      sessionId: "S1",
+      agentId: "A",
     });
     assertEquals(res.status, 200);
     assertEquals(await res.json(), { ok: true });
@@ -106,18 +124,18 @@ Deno.test("POST /unlock releases a held lock", async () => {
   }
 });
 
-Deno.test("POST /unlock returns 409 when taskId does not match", async () => {
+Deno.test("POST /unlock returns 409 when owner does not match", async () => {
   const h = await startTestServer();
   try {
     await h.registry.acquire({
       path: "/foo.ts",
-      taskId: "T1",
+      sessionId: "S1",
       agentId: "A",
-      runId: "R",
     });
     const res = await postJson(`${h.url}/unlock`, {
       path: "/foo.ts",
-      taskId: "T2",
+      sessionId: "S2",
+      agentId: "A",
     });
     assertEquals(res.status, 409);
     await res.body?.cancel();
@@ -132,10 +150,59 @@ Deno.test("POST /unlock on absent path is idempotent", async () => {
   try {
     const res = await postJson(`${h.url}/unlock`, {
       path: "/nope.ts",
-      taskId: "T1",
+      sessionId: "S1",
+      agentId: "A",
     });
     assertEquals(res.status, 200);
     assertEquals(await res.json(), { ok: true });
+  } finally {
+    await h.shutdown();
+  }
+});
+
+Deno.test("POST /release-session-locks frees only matching session", async () => {
+  const h = await startTestServer();
+  try {
+    await h.registry.acquire({
+      path: "/a.ts",
+      sessionId: "S1",
+      agentId: "A",
+    });
+    await h.registry.acquire({
+      path: "/b.ts",
+      sessionId: "S1",
+      agentId: "B",
+    });
+    await h.registry.acquire({
+      path: "/c.ts",
+      sessionId: "S2",
+      agentId: "C",
+    });
+
+    const res = await postJson(`${h.url}/release-session-locks`, {
+      sessionId: "S1",
+    });
+    assertEquals(res.status, 200);
+    const body = await res.json();
+    assertEquals(body.ok, true);
+    assertEquals(body.released, 2);
+
+    const remaining = h.registry.snapshot().map((e) => e.path);
+    assertEquals(remaining, ["/c.ts"]);
+  } finally {
+    await h.shutdown();
+  }
+});
+
+Deno.test("POST /release-session-locks is idempotent on unknown session", async () => {
+  const h = await startTestServer();
+  try {
+    const res = await postJson(`${h.url}/release-session-locks`, {
+      sessionId: "S-unknown",
+    });
+    assertEquals(res.status, 200);
+    const body = await res.json();
+    assertEquals(body, { ok: true, released: 0 });
   } finally {
     await h.shutdown();
   }
@@ -172,12 +239,23 @@ Deno.test("POST /lock with empty-string field returns 400", async () => {
   try {
     const res = await postJson(`${h.url}/lock`, {
       path: "",
-      taskId: "T",
+      sessionId: "S1",
       agentId: "A",
-      runId: "R",
     });
     assertEquals(res.status, 400);
     await res.body?.cancel();
+  } finally {
+    await h.shutdown();
+  }
+});
+
+Deno.test("POST /release-session-locks with missing sessionId returns 400", async () => {
+  const h = await startTestServer();
+  try {
+    const res = await postJson(`${h.url}/release-session-locks`, {});
+    assertEquals(res.status, 400);
+    const body = await res.json();
+    assertEquals(body.error, "invalid_body");
   } finally {
     await h.shutdown();
   }
@@ -252,15 +330,38 @@ Deno.test("POST /lock with harness off returns 200 + harness:off", async () => {
   try {
     const res = await postJson(`${h.url}/lock`, {
       path: "/foo.ts",
-      taskId: "T1",
+      sessionId: "S1",
       agentId: "A",
-      runId: "R",
     });
     assertEquals(res.status, 200);
     const body = await res.json();
     assertEquals(body, { ok: true, harness: "off" });
-    // Lock was not actually recorded.
     assertEquals(h.registry.snapshot().length, 0);
+  } finally {
+    await h.shutdown();
+  }
+});
+
+Deno.test("POST /release-session-locks with harness off returns harness:off + released:0", async () => {
+  const h = await startTestServer({ harnessOn: () => false });
+  try {
+    // Even if the registry happened to hold something, harness-off must not
+    // mutate state.
+    await h.registry.acquire({
+      path: "/foo.ts",
+      sessionId: "S1",
+      agentId: "A",
+    });
+    const res = await postJson(`${h.url}/release-session-locks`, {
+      sessionId: "S1",
+    });
+    assertEquals(res.status, 200);
+    assertEquals(await res.json(), {
+      ok: true,
+      harness: "off",
+      released: 0,
+    });
+    assertEquals(h.registry.snapshot().length, 1);
   } finally {
     await h.shutdown();
   }
@@ -295,7 +396,6 @@ Deno.test("shutdown is idempotent", async () => {
 Deno.test("POST /lock with oversized body returns 413", async () => {
   const h = await startTestServer();
   try {
-    // Hand-roll a body just over the 1 MB cap so the streaming guard fires.
     const oversized = "x".repeat(1024 * 1024 + 16);
     const res = await fetch(`${h.url}/lock`, {
       method: "POST",
@@ -370,13 +470,11 @@ Deno.test("rejects requests with mismatched Host header (DNS rebinding defense)"
       "attacker.example.com:80",
       JSON.stringify({
         path: "/foo.ts",
-        taskId: "T1",
+        sessionId: "S1",
         agentId: "A",
-        runId: "R",
       }),
     );
     assertEquals(result.status, 403);
-    // Lock state should be untouched.
     assertEquals(h.registry.snapshot().length, 0);
   } finally {
     await h.shutdown();
@@ -393,9 +491,8 @@ Deno.test("accepts a request whose Host header matches the bound port", async ()
       `127.0.0.1:${port}`,
       JSON.stringify({
         path: "/foo.ts",
-        taskId: "T1",
+        sessionId: "S1",
         agentId: "A",
-        runId: "R",
       }),
     );
     assertEquals(result.status, 200);
@@ -409,15 +506,13 @@ Deno.test("accepts both 127.0.0.1 and localhost Host headers on the bound port",
   const h = await startTestServer();
   try {
     const port = new URL(h.url).port;
-    // Hit the same server via 127.0.0.1; Host header reflects that.
     const res = await fetch(`http://127.0.0.1:${port}/lock`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         path: "/foo.ts",
-        taskId: "T1",
+        sessionId: "S1",
         agentId: "A",
-        runId: "R",
       }),
     });
     assertEquals(res.status, 200);
@@ -428,7 +523,6 @@ Deno.test("accepts both 127.0.0.1 and localhost Host headers on the bound port",
 });
 
 Deno.test("500 response does not leak error detail", async () => {
-  // Inject a faulty registry so acquire throws unexpectedly.
   const dir = await Deno.makeTempDir();
   const registry = new LockRegistry(join(dir, "locks.jsonl"));
   // deno-lint-ignore no-explicit-any
@@ -447,15 +541,13 @@ Deno.test("500 response does not leak error detail", async () => {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         path: "/foo.ts",
-        taskId: "T1",
+        sessionId: "S1",
         agentId: "A",
-        runId: "R",
       }),
     });
     assertEquals(res.status, 500);
     const body = await res.json();
     assertEquals(body, { error: "internal_error" });
-    // No "detail" key, no leak of the secret string.
   } finally {
     await server.shutdown();
     await Deno.remove(dir, { recursive: true });
