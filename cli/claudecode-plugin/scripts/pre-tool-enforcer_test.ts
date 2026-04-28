@@ -578,6 +578,20 @@ Deno.test("parseBashWriteCandidates: noclobber `>|` without space", () => {
   assertEquals(c.includes("forced.txt"), true);
 });
 
+Deno.test("parseBashWriteCandidates: noclobber `>|` inside a pipeline", () => {
+  // Pipe operator and noclobber must coexist: `cmd1 | cmd2 >| file` runs
+  // cmd1 piped to cmd2, with cmd2's stdout force-redirected to `file`.
+  const c = parseBashWriteCandidates("cat src.txt | sort >| forced.txt");
+  assertEquals(c.includes("forced.txt"), true);
+});
+
+Deno.test("parseBashWriteCandidates: relative path with `..` is captured verbatim", () => {
+  // The parser is purely lexical — path normalization happens later in
+  // resolvePathSafely (which receives cwd and runs realPath).
+  const c = parseBashWriteCandidates("sed -i '' 's/x/y/' ../parent.ts");
+  assertEquals(c.includes("../parent.ts"), true);
+});
+
 Deno.test("evaluateBashCacheBypass: relative path resolves against data.cwd", async () => {
   await withTempHomeAndFile(async (home, cwd, filePath) => {
     // filePath is absolute (e.g., /var/folders/.../cwd/file.ts).

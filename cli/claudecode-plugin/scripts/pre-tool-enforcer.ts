@@ -172,6 +172,8 @@ function splitTopLevelSegments(command: string): string[] {
 // Redirect operator + path. Reused by parser to capture redirect targets and
 // to strip redirects from segments before sed/awk file detection. The
 // optional `\|` after `>{1,2}` matches the `>|` noclobber-override form.
+// Also matches `>>|` (which is not valid bash) — harmless over-match per
+// the fail-open warn-not-block contract.
 const REDIRECT_RE =
   /(?:^|\s)(?:1|2|&)?>{1,2}\|?\s*("([^"]+)"|'([^']+)'|([^\s|;&<>()]+))/g;
 

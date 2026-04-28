@@ -28,9 +28,19 @@ export async function readStdin(
     while (true) {
       const read = await Deno.stdin.read(buffer);
       if (read === null) break;
+      // Clamp the final chunk so totalLen never exceeds maxBytes by more
+      // than zero. Without the clamp the cap could over-read by up to one
+      // buffer (4KB), making the contract fuzzy.
+      const room = maxBytes - totalLen;
+      if (read > room) {
+        if (room > 0) {
+          chunks.push(buffer.slice(0, room));
+          totalLen += room;
+        }
+        break;
+      }
       chunks.push(buffer.slice(0, read));
       totalLen += read;
-      if (totalLen > maxBytes) break;
     }
   } catch {
     // stdin closed by timeout or externally

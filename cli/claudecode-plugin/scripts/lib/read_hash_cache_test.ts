@@ -9,6 +9,7 @@ import {
   isTransientPath,
   loadCache,
   pruneStale,
+  resolvePathSafely,
   saveCache,
   upsertEntry,
 } from "./read_hash_cache.ts";
@@ -163,6 +164,44 @@ Deno.test("isTransientPath detects cacheDir prefix", () => {
 Deno.test("isTransientPath leaves source files alone", () => {
   assertEquals(isTransientPath("/repo/src/main.ts"), false);
   assertEquals(isTransientPath("/Users/u/code/repo/file.ts"), false);
+});
+
+Deno.test("resolvePathSafely: absolute path with cwd given is a no-op (cwd ignored)", async () => {
+  const tmp = await Deno.makeTempDir();
+  try {
+    const file = `${tmp}/file.ts`;
+    await Deno.writeTextFile(file, "x");
+    const real = await Deno.realPath(file);
+    // Pass an unrelated cwd; result must still match `realPath(file)`,
+    // not `realPath(join(cwd, file))`.
+    const resolved = await resolvePathSafely(file, "/some/other/dir");
+    assertEquals(resolved, real);
+  } finally {
+    await Deno.remove(tmp, { recursive: true });
+  }
+});
+
+Deno.test("resolvePathSafely: relative path resolves against cwd", async () => {
+  const tmp = await Deno.makeTempDir();
+  try {
+    const file = `${tmp}/data.txt`;
+    await Deno.writeTextFile(file, "x");
+    const real = await Deno.realPath(file);
+    // Relative path "data.txt" + cwd should land on the same realPath.
+    const resolved = await resolvePathSafely("data.txt", tmp);
+    assertEquals(resolved, real);
+  } finally {
+    await Deno.remove(tmp, { recursive: true });
+  }
+});
+
+Deno.test("resolvePathSafely: relative path without cwd falls through (no resolve)", async () => {
+  // No cwd given: the function may not realPath successfully; falls back
+  // to the input path unchanged.
+  const result = await resolvePathSafely("./not_an_absolute_path.ts");
+  // Either the realPath resolved (if the file exists relative to cwd) or
+  // the original is returned. Either way, no exception.
+  assertEquals(typeof result, "string");
 });
 
 Deno.test("isTransientPath respects cwd: paths under cwd are never transient", () => {

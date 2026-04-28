@@ -1,12 +1,15 @@
-import { assertEquals, assert } from "@std/assert";
+import { assert, assertEquals } from "@std/assert";
 
 Deno.test("readStdin reads piped input completely", async () => {
   const cmd = new Deno.Command("deno", {
-    args: ["eval", `
+    args: [
+      "eval",
+      `
       import { readStdin } from "./cli/claudecode-plugin/scripts/lib/stdin.ts";
       const result = await readStdin(2000);
       Deno.stdout.writeSync(new TextEncoder().encode(result));
-    `],
+    `,
+    ],
     stdin: "piped",
     stdout: "piped",
     stderr: "piped",
@@ -23,11 +26,14 @@ Deno.test("readStdin reads piped input completely", async () => {
 
 Deno.test("readStdin returns empty string for empty input", async () => {
   const cmd = new Deno.Command("deno", {
-    args: ["eval", `
+    args: [
+      "eval",
+      `
       import { readStdin } from "./cli/claudecode-plugin/scripts/lib/stdin.ts";
       const result = await readStdin(1000);
       Deno.stdout.writeSync(new TextEncoder().encode(result));
-    `],
+    `,
+    ],
     stdin: "piped",
     stdout: "piped",
     stderr: "piped",
@@ -44,11 +50,14 @@ Deno.test("readStdin returns empty string for empty input", async () => {
 Deno.test("readStdin handles large payloads", async () => {
   const payload = JSON.stringify({ data: "x".repeat(8192) });
   const cmd = new Deno.Command("deno", {
-    args: ["eval", `
+    args: [
+      "eval",
+      `
       import { readStdin } from "./cli/claudecode-plugin/scripts/lib/stdin.ts";
       const result = await readStdin(3000);
       Deno.stdout.writeSync(new TextEncoder().encode(String(result.length)));
-    `],
+    `,
+    ],
     stdin: "piped",
     stdout: "piped",
     stderr: "piped",
@@ -60,5 +69,32 @@ Deno.test("readStdin handles large payloads", async () => {
   const output = await process.output();
   const text = new TextDecoder().decode(output.stdout);
   assertEquals(text, String(payload.length));
+  assertEquals(output.code, 0);
+});
+
+Deno.test("readStdin enforces maxBytes cap exactly", async () => {
+  // Pipe 10_000 bytes, cap at 1_000. Subprocess reports the resulting length.
+  const payload = "x".repeat(10_000);
+  const cmd = new Deno.Command("deno", {
+    args: [
+      "eval",
+      `
+      import { readStdin } from "./cli/claudecode-plugin/scripts/lib/stdin.ts";
+      const result = await readStdin(2000, 1000);
+      Deno.stdout.writeSync(new TextEncoder().encode(String(result.length)));
+    `,
+    ],
+    stdin: "piped",
+    stdout: "piped",
+    stderr: "piped",
+  });
+  const process = cmd.spawn();
+  const writer = process.stdin.getWriter();
+  await writer.write(new TextEncoder().encode(payload));
+  await writer.close();
+  const output = await process.output();
+  const text = new TextDecoder().decode(output.stdout);
+  // Cap is exact (no over-read by buffer-size). Result is exactly maxBytes.
+  assertEquals(text, "1000");
   assertEquals(output.code, 0);
 });
