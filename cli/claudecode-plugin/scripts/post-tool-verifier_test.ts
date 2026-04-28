@@ -154,34 +154,30 @@ Deno.test("generateMessage returns undefined for unknown tools", () => {
 
 // --- refreshCacheIfApplicable ---
 
-async function withTempEnv(
+// Pure helper: builds an isolated home + cwd + seeded file. Never mutates
+// real `Deno.env` (the harness opt-in is plumbed via `opts.harnessOn` so
+// concurrent tests don't fight over a single global flag).
+async function withTempDirs(
   fn: (home: string, cwd: string, filePath: string) => Promise<void>,
 ): Promise<void> {
   const home = await Deno.makeTempDir();
   const cwd = await Deno.makeTempDir();
   const filePath = `${cwd}/file.ts`;
   await Deno.writeTextFile(filePath, "export const x = 1;\n");
-  const prevHome = Deno.env.get("HOME");
-  const prevHarness = Deno.env.get("OVERMIND_EDIT_HARNESS");
-  Deno.env.set("HOME", home);
   try {
     await fn(home, cwd, filePath);
   } finally {
-    if (prevHome === undefined) Deno.env.delete("HOME");
-    else Deno.env.set("HOME", prevHome);
-    if (prevHarness === undefined) Deno.env.delete("OVERMIND_EDIT_HARNESS");
-    else Deno.env.set("OVERMIND_EDIT_HARNESS", prevHarness);
     await Deno.remove(home, { recursive: true });
     await Deno.remove(cwd, { recursive: true });
   }
 }
 
 Deno.test("refreshCacheIfApplicable does nothing when harness off", async () => {
-  await withTempEnv(async (home, cwd, filePath) => {
-    Deno.env.delete("OVERMIND_EDIT_HARNESS");
+  await withTempDirs(async (home, cwd, filePath) => {
     await refreshCacheIfApplicable(
       { tool_name: "Read", tool_input: { file_path: filePath }, cwd },
       "ok",
+      { home, harnessOn: false },
     );
     const cache = await loadCache(getCachePath(cwd, home));
     assertEquals(cache.entries, {});
@@ -189,11 +185,11 @@ Deno.test("refreshCacheIfApplicable does nothing when harness off", async () => 
 });
 
 Deno.test("refreshCacheIfApplicable populates cache on Read success", async () => {
-  await withTempEnv(async (home, cwd, filePath) => {
-    Deno.env.set("OVERMIND_EDIT_HARNESS", "1");
+  await withTempDirs(async (home, cwd, filePath) => {
     await refreshCacheIfApplicable(
       { tool_name: "Read", tool_input: { file_path: filePath }, cwd },
       "file contents read successfully",
+      { home, harnessOn: true },
     );
     const real = await Deno.realPath(filePath);
     const cache = await loadCache(getCachePath(cwd, home));
@@ -202,11 +198,11 @@ Deno.test("refreshCacheIfApplicable populates cache on Read success", async () =
 });
 
 Deno.test("refreshCacheIfApplicable refreshes on Edit success", async () => {
-  await withTempEnv(async (home, cwd, filePath) => {
-    Deno.env.set("OVERMIND_EDIT_HARNESS", "1");
+  await withTempDirs(async (home, cwd, filePath) => {
     await refreshCacheIfApplicable(
       { tool_name: "Read", tool_input: { file_path: filePath }, cwd },
       "ok",
+      { home, harnessOn: true },
     );
     const real = await Deno.realPath(filePath);
     const before = getEntry(await loadCache(getCachePath(cwd, home)), real)!;
@@ -215,6 +211,7 @@ Deno.test("refreshCacheIfApplicable refreshes on Edit success", async () => {
     await refreshCacheIfApplicable(
       { tool_name: "Edit", tool_input: { file_path: filePath }, cwd },
       "Edit applied successfully",
+      { home, harnessOn: true },
     );
 
     const after = getEntry(await loadCache(getCachePath(cwd, home)), real)!;
@@ -223,14 +220,14 @@ Deno.test("refreshCacheIfApplicable refreshes on Edit success", async () => {
 });
 
 Deno.test("refreshCacheIfApplicable refreshes on Write success", async () => {
-  await withTempEnv(async (home, cwd, filePath) => {
-    Deno.env.set("OVERMIND_EDIT_HARNESS", "1");
+  await withTempDirs(async (home, cwd, filePath) => {
     // No prior Read — Write success on a freshly-created file should still
     // populate the cache so a subsequent Edit can validate.
     await Deno.writeTextFile(filePath, "export const x = 7;\n");
     await refreshCacheIfApplicable(
       { tool_name: "Write", tool_input: { file_path: filePath }, cwd },
       "Wrote file successfully.",
+      { home, harnessOn: true },
     );
     const real = await Deno.realPath(filePath);
     const entry = getEntry(await loadCache(getCachePath(cwd, home)), real);
@@ -239,11 +236,11 @@ Deno.test("refreshCacheIfApplicable refreshes on Write success", async () => {
 });
 
 Deno.test("refreshCacheIfApplicable skips on detected write failure", async () => {
-  await withTempEnv(async (home, cwd, filePath) => {
-    Deno.env.set("OVERMIND_EDIT_HARNESS", "1");
+  await withTempDirs(async (home, cwd, filePath) => {
     await refreshCacheIfApplicable(
       { tool_name: "Edit", tool_input: { file_path: filePath }, cwd },
       "Permission denied", // matches WRITE_ERROR_PATTERNS
+      { home, harnessOn: true },
     );
     const cache = await loadCache(getCachePath(cwd, home));
     assertEquals(cache.entries, {});
@@ -251,12 +248,12 @@ Deno.test("refreshCacheIfApplicable skips on detected write failure", async () =
 });
 
 Deno.test("refreshCacheIfApplicable refreshes on Update success", async () => {
-  await withTempEnv(async (home, cwd, filePath) => {
-    Deno.env.set("OVERMIND_EDIT_HARNESS", "1");
+  await withTempDirs(async (home, cwd, filePath) => {
     await Deno.writeTextFile(filePath, "export const x = 9;\n");
     await refreshCacheIfApplicable(
       { tool_name: "Update", tool_input: { file_path: filePath }, cwd },
       "Updated.",
+      { home, harnessOn: true },
     );
     const real = await Deno.realPath(filePath);
     const entry = getEntry(await loadCache(getCachePath(cwd, home)), real);
@@ -265,12 +262,12 @@ Deno.test("refreshCacheIfApplicable refreshes on Update success", async () => {
 });
 
 Deno.test("refreshCacheIfApplicable refreshes on MultiEdit success", async () => {
-  await withTempEnv(async (home, cwd, filePath) => {
-    Deno.env.set("OVERMIND_EDIT_HARNESS", "1");
+  await withTempDirs(async (home, cwd, filePath) => {
     await Deno.writeTextFile(filePath, "export const x = 11;\n");
     await refreshCacheIfApplicable(
       { tool_name: "MultiEdit", tool_input: { file_path: filePath }, cwd },
       "All edits applied.",
+      { home, harnessOn: true },
     );
     const real = await Deno.realPath(filePath);
     const entry = getEntry(await loadCache(getCachePath(cwd, home)), real);
@@ -279,12 +276,11 @@ Deno.test("refreshCacheIfApplicable refreshes on MultiEdit success", async () =>
 });
 
 Deno.test("refreshCacheIfApplicable skips non-cache-relevant tools", async () => {
-  await withTempEnv(async (home, cwd, filePath) => {
-    Deno.env.set("OVERMIND_EDIT_HARNESS", "1");
+  await withTempDirs(async (home, cwd, filePath) => {
     await refreshCacheIfApplicable(
       { tool_name: "Bash", tool_input: { command: "ls" }, cwd },
       "ok",
-      // No file_path even available; ensures the early-return is by tool name.
+      { home, harnessOn: true },
     );
     // Spell out: even if filePath happened to match cwd, Bash is skipped.
     void filePath;
