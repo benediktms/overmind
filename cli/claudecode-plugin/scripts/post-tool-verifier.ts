@@ -137,6 +137,8 @@ export function generateMessage(
     }
 
     case "Edit":
+    case "Update":
+    case "MultiEdit":
       if (detectWriteFailure(toolOutput)) {
         return "Edit operation failed. Verify file exists and content matches exactly.";
       }
@@ -195,7 +197,13 @@ export async function refreshCacheIfApplicable(
 ): Promise<void> {
   if (!isHarnessEnabled()) return;
   const toolName = data.tool_name ?? data.toolName ?? "";
-  if (toolName !== "Read" && toolName !== "Edit" && toolName !== "Write") {
+  // Cache-relevant tools: Read populates, Edit/Write/Update/MultiEdit refresh
+  // after a successful mutation. Update was added to CC after Edit/Write —
+  // missing it here would silently leave the cache stale post-Update.
+  if (
+    toolName !== "Read" && toolName !== "Edit" && toolName !== "Write" &&
+    toolName !== "Update" && toolName !== "MultiEdit"
+  ) {
     return;
   }
   if (detectWriteFailure(toolOutput)) return;

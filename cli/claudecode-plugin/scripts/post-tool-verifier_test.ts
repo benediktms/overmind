@@ -250,6 +250,34 @@ Deno.test("refreshCacheIfApplicable skips on detected write failure", async () =
   });
 });
 
+Deno.test("refreshCacheIfApplicable refreshes on Update success", async () => {
+  await withTempEnv(async (home, cwd, filePath) => {
+    Deno.env.set("OVERMIND_EDIT_HARNESS", "1");
+    await Deno.writeTextFile(filePath, "export const x = 9;\n");
+    await refreshCacheIfApplicable(
+      { tool_name: "Update", tool_input: { file_path: filePath }, cwd },
+      "Updated.",
+    );
+    const real = await Deno.realPath(filePath);
+    const entry = getEntry(await loadCache(getCachePath(cwd, home)), real);
+    assertNotEquals(entry, undefined);
+  });
+});
+
+Deno.test("refreshCacheIfApplicable refreshes on MultiEdit success", async () => {
+  await withTempEnv(async (home, cwd, filePath) => {
+    Deno.env.set("OVERMIND_EDIT_HARNESS", "1");
+    await Deno.writeTextFile(filePath, "export const x = 11;\n");
+    await refreshCacheIfApplicable(
+      { tool_name: "MultiEdit", tool_input: { file_path: filePath }, cwd },
+      "All edits applied.",
+    );
+    const real = await Deno.realPath(filePath);
+    const entry = getEntry(await loadCache(getCachePath(cwd, home)), real);
+    assertNotEquals(entry, undefined);
+  });
+});
+
 Deno.test("refreshCacheIfApplicable skips non-cache-relevant tools", async () => {
   await withTempEnv(async (home, cwd, filePath) => {
     Deno.env.set("OVERMIND_EDIT_HARNESS", "1");
