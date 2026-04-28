@@ -16,11 +16,12 @@ import {
   saveCache,
   upsertEntry,
 } from "./lib/read_hash_cache.ts";
+import { isHarnessEnabled } from "./lib/harness_config.ts";
 
 const OVERMIND_KERNEL_HTTP_URL = Deno.env.get("OVERMIND_KERNEL_HTTP_URL") ??
   "http://localhost:8080";
 
-interface HookData {
+export interface HookData {
   tool_name?: string;
   toolName?: string;
   tool_input?: Record<string, unknown>;
@@ -35,8 +36,9 @@ interface HookData {
   sessionId?: string;
 }
 
-function isHarnessEnabled(): boolean {
-  return Deno.env.get("OVERMIND_EDIT_HARNESS") === "1";
+export interface RefreshOptions {
+  home?: string;
+  harnessOn?: boolean;
 }
 
 const BASH_ERROR_PATTERNS = [
@@ -194,8 +196,10 @@ function outputHookResult(message?: string): void {
 export async function refreshCacheIfApplicable(
   data: HookData,
   toolOutput: string,
+  opts: RefreshOptions = {},
 ): Promise<void> {
-  if (!isHarnessEnabled()) return;
+  const harnessOn = opts.harnessOn ?? isHarnessEnabled();
+  if (!harnessOn) return;
   const toolName = data.tool_name ?? data.toolName ?? "";
   // Cache-relevant tools: Read populates, Edit/Write/Update/MultiEdit refresh
   // after a successful mutation. Update was added to CC after Edit/Write —
@@ -214,11 +218,11 @@ export async function refreshCacheIfApplicable(
   if (!rawPath) return;
 
   const cwd = data.cwd ?? data.directory ?? Deno.cwd();
-  const home = Deno.env.get("HOME") ?? "/";
+  const home = opts.home ?? Deno.env.get("HOME") ?? "/";
   const sessionId = data.session_id ?? data.sessionId ?? "default";
   const cachePath = getCachePath(cwd, home);
   const cacheDir = cachePath.substring(0, cachePath.lastIndexOf("/"));
-  const filePath = await resolvePathSafely(rawPath);
+  const filePath = await resolvePathSafely(rawPath, cwd);
   const cwdReal = await resolvePathSafely(cwd);
 
   if (isTransientPath(filePath, cacheDir, cwdReal)) return;

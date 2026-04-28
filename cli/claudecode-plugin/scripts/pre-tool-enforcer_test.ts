@@ -436,9 +436,11 @@ Deno.test("evaluateBashCacheBypass: multiple cached paths → comma-listed", asy
     );
     assertEquals(d.kind, "allow");
     if (d.kind === "allow") {
-      // `>` redirect captures `second`; `cat <file>` is read-only so `filePath`
-      // alone shouldn't appear unless we also captured the redirect target.
+      // `>` redirect captures `second`; `cat <file>` reads, doesn't write.
       assertEquals(d.message?.includes(second), true);
+      // Negative assertion: the cat source is a READ, not a write target,
+      // so it must not appear in the warning even though it's cached.
+      assertEquals(d.message?.includes(filePath), false);
     }
   });
 });
@@ -564,6 +566,39 @@ Deno.test("decideStaleness denies MultiEdit on stale cache", () => {
     isTransient: false,
   });
   assertEquals(d.kind, "deny");
+});
+
+Deno.test("parseBashWriteCandidates: noclobber `>|` is captured", () => {
+  const c = parseBashWriteCandidates("echo hi >| forced.txt");
+  assertEquals(c.includes("forced.txt"), true);
+});
+
+Deno.test("parseBashWriteCandidates: noclobber `>|` without space", () => {
+  const c = parseBashWriteCandidates("echo hi >|forced.txt");
+  assertEquals(c.includes("forced.txt"), true);
+});
+
+Deno.test("evaluateBashCacheBypass: relative path resolves against data.cwd", async () => {
+  await withTempHomeAndFile(async (home, cwd, filePath) => {
+    // filePath is absolute (e.g., /var/folders/.../cwd/file.ts).
+    // Compute the basename to use as a relative reference inside the cwd.
+    const basename = filePath.substring(cwd.length + 1);
+    const cachePath = getCachePath(cwd, home);
+    const realPath = await Deno.realPath(filePath);
+    await saveCache(cachePath, upsertEntry(emptyCache(), realPath, "x", "s"));
+
+    // Bash command uses the relative path. Without cwd-aware resolution
+    // this would resolve against the hook process cwd and miss the cache.
+    const d = await evaluateBashCacheBypass(
+      `sed -i '' 's/x/y/' ${basename}`,
+      { cwd },
+      { home, harnessOn: true },
+    );
+    assertEquals(d.kind, "allow");
+    if (d.kind === "allow") {
+      assertEquals(d.message?.includes(basename), true);
+    }
+  });
 });
 
 Deno.test("evaluateHarness denies stale Update", async () => {

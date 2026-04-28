@@ -303,6 +303,28 @@ harness will not see it. Prefer `Edit`/`Write` or invalidate the cache first."
 | Hook ordering                                           | Low      | `pre-tool-enforcer` already runs PreToolUse for `Edit`/`Write`; we extend, not register a new hook |
 | Persistence file corruption                             | Low      | Treat as "no cache" on parse failure; fall back to allow-with-warning                              |
 
+### Known TOCTOU window (inherent to Option B)
+
+The PreToolUse hook computes the file's sha256 _before_ CC's actual `Edit`
+applies. Between that check and the apply there is a small window (milliseconds)
+during which a concurrent writer (parallel agent, IDE formatter, filesystem
+watcher) can mutate the file. If that happens, the harness will have given a
+"clean" verdict against an instant-stale state, and CC's `Edit` will land on
+whatever's now on disk.
+
+This is an inherent limitation of any hook-side approach (the kernel does not
+own the `Edit` execution). Option A — a kernel-mediated MCP edit tool that owns
+the read-check-write transaction — would close this window entirely, at the cost
+of removing `Edit` from every subagent's tool whitelist and routing through an
+HTTP round-trip. The trade-off was explicitly evaluated and B was chosen for its
+much lower implementation cost. The residual TOCTOU is documented for the
+eventual v2 ADR that revisits Option A.
+
+The threat-model implications are narrow: the race requires another writer on
+the _exact same file_ within milliseconds. The primary threat the harness
+addresses — agent reads at t=0, modifies at t=10 min after a mutation at t=5 min
+— is fully covered.
+
 ---
 
 ## Decision

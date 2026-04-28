@@ -20,6 +20,9 @@ import {
   pruneStale,
   resolvePathSafely,
 } from "./lib/read_hash_cache.ts";
+import { isHarnessEnabled } from "./lib/harness_config.ts";
+
+export { isHarnessEnabled };
 
 export interface HookData {
   tool_name?: string;
@@ -28,15 +31,11 @@ export interface HookData {
   toolInput?: Record<string, unknown>;
   cwd?: string;
   directory?: string;
-  session_id?: string;
-  sessionId?: string;
 }
 
 export type Decision =
   | { kind: "allow"; message?: string }
   | { kind: "deny"; reason: string };
-
-const HARNESS_ENV_VAR = "OVERMIND_EDIT_HARNESS";
 
 // CC's file-mutating tools as of 2026. `Update` was added after `Edit`/`Write`
 // — verified against a live CC session diff (Update(path) → Added/removed
@@ -49,11 +48,7 @@ export const FILE_MUTATING_TOOLS: ReadonlySet<string> = new Set([
   "MultiEdit",
 ]);
 
-export function isHarnessEnabled(env = Deno.env): boolean {
-  return env.get(HARNESS_ENV_VAR) === "1";
-}
-
-function emitAllow(additionalContext?: string): void {
+function outputAllow(additionalContext?: string): void {
   const result: Record<string, unknown> = { continue: true };
   if (additionalContext) {
     result.hookSpecificOutput = {
@@ -66,7 +61,7 @@ function emitAllow(additionalContext?: string): void {
   console.log(JSON.stringify(result));
 }
 
-function emitDeny(reason: string): void {
+function outputDeny(reason: string): void {
   console.log(JSON.stringify({ continue: false, stopReason: reason }));
 }
 
@@ -150,6 +145,16 @@ function splitTopLevelSegments(command: string): string[] {
       continue;
     }
     if (!inSingle && !inDouble) {
+      // Noclobber `>|` is a single redirect operator, not a pipe. Detect
+      // by looking at the most recent non-whitespace char; if it's `>`,
+      // keep the `|` attached to the buffer.
+      if (ch === "|") {
+        const prevNonSpace = buf.replace(/\s+$/, "");
+        if (prevNonSpace.endsWith(">")) {
+          buf += ch;
+          continue;
+        }
+      }
       if (ch === "|" || ch === "&" || ch === ";") {
         if (buf.trim()) segments.push(buf);
         buf = "";
@@ -165,9 +170,10 @@ function splitTopLevelSegments(command: string): string[] {
 }
 
 // Redirect operator + path. Reused by parser to capture redirect targets and
-// to strip redirects from segments before sed/awk file detection.
+// to strip redirects from segments before sed/awk file detection. The
+// optional `\|` after `>{1,2}` matches the `>|` noclobber-override form.
 const REDIRECT_RE =
-  /(?:^|\s)(?:1|2|&)?>{1,2}\s*("([^"]+)"|'([^']+)'|([^\s|;&<>()]+))/g;
+  /(?:^|\s)(?:1|2|&)?>{1,2}\|?\s*("([^"]+)"|'([^']+)'|([^\s|;&<>()]+))/g;
 
 function isSedExpressionLike(token: string): boolean {
   // Crude heuristic: sed substitution / transliteration / address forms.
@@ -296,6 +302,15 @@ export interface StalenessInputs {
   isTransient: boolean;
 }
 
+// Pure decision: given the tool name, current sha, and last-known cached
+// sha, decide whether to allow the edit or deny with a stale-read reason.
+//
+// Fail-open by design. Every "I don't know enough" path returns `allow` —
+// missing file, no cache entry yet, transient path, non-mutating tool. The
+// harness is a defense-in-depth layer above CC's own read-before-edit
+// enforcement; a corrupted/missing cache or unknown tool must NOT block
+// edits, or it would be worse than no harness at all. Only an
+// unambiguous mismatch between stored and current sha denies.
 export function decideStaleness(input: StalenessInputs): Decision {
   if (!FILE_MUTATING_TOOLS.has(input.toolName)) {
     return { kind: "allow" };
@@ -341,7 +356,7 @@ export async function evaluateHarness(
   const home = opts.home ?? Deno.env.get("HOME") ?? "/";
   const cachePath = getCachePath(cwd, home);
   const cacheDir = cachePath.substring(0, cachePath.lastIndexOf("/"));
-  const filePath = await resolvePathSafely(rawPath);
+  const filePath = await resolvePathSafely(rawPath, cwd);
   const cwdReal = await resolvePathSafely(cwd);
 
   if (isTransientPath(filePath, cacheDir, cwdReal)) return { kind: "allow" };
@@ -389,7 +404,7 @@ export async function evaluateBashCacheBypass(
 
   const hits: string[] = [];
   for (const raw of candidates) {
-    const resolved = await resolvePathSafely(raw);
+    const resolved = await resolvePathSafely(raw, cwd);
     if (getEntry(cache, resolved)) hits.push(raw);
   }
   if (hits.length === 0) return { kind: "allow" };
@@ -421,7 +436,7 @@ export async function handleBashTool(
 async function main(): Promise<void> {
   const input = await readStdin();
   if (!input.trim()) {
-    emitAllow();
+    outputAllow();
     return;
   }
 
@@ -429,13 +444,13 @@ async function main(): Promise<void> {
   try {
     data = JSON.parse(input);
   } catch {
-    emitAllow();
+    outputAllow();
     return;
   }
 
   const harnessDecision = await evaluateHarness(data);
   if (harnessDecision.kind === "deny") {
-    emitDeny(harnessDecision.reason);
+    outputDeny(harnessDecision.reason);
     return;
   }
 
@@ -464,7 +479,7 @@ async function main(): Promise<void> {
     }
   }
 
-  emitAllow(message);
+  outputAllow(message);
 }
 
 if (import.meta.main) main();

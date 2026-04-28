@@ -9,7 +9,7 @@
 // preserving the leading dash for absolute paths). Verified against
 // `~/.claude/projects/-Users-...-overmind/`.
 
-import { dirname, isAbsolute, join } from "@std/path";
+import { dirname, isAbsolute, join, resolve } from "@std/path";
 
 export interface CacheEntry {
   sha256: string;
@@ -181,12 +181,22 @@ export function enforceMaxBytes(
   return { entries: trimmed };
 }
 
-export async function resolvePathSafely(path: string): Promise<string> {
+// Canonicalize a path so cache keys agree across calls. With `cwd`,
+// relative paths are resolved against the project root first — otherwise
+// `Deno.realPath` would resolve against the hook process's cwd, which
+// happens to match today but isn't a contract. Falls back to the input
+// path on any error (missing file, permission denied) so the staleness
+// check stays fail-open.
+export async function resolvePathSafely(
+  path: string,
+  cwd?: string,
+): Promise<string> {
   if (!path) return path;
+  const absolute = isAbsolute(path) || !cwd ? path : resolve(cwd, path);
   try {
-    return await Deno.realPath(path);
+    return await Deno.realPath(absolute);
   } catch {
-    return isAbsolute(path) ? path : path;
+    return absolute;
   }
 }
 

@@ -1,9 +1,18 @@
 const DEFAULT_TIMEOUT_MS = 5000;
+// Hook payloads are tiny (tool_name + tool_input). Cap protects the Deno
+// hook process against an unbounded stdin pipe (defense-in-depth — CC
+// controls the pipe today, but a misconfigured wrapper or future change
+// shouldn't be able to OOM the hook).
+const MAX_STDIN_BYTES = 10 * 1024 * 1024;
 
-export async function readStdin(timeoutMs = DEFAULT_TIMEOUT_MS): Promise<string> {
+export async function readStdin(
+  timeoutMs = DEFAULT_TIMEOUT_MS,
+  maxBytes = MAX_STDIN_BYTES,
+): Promise<string> {
   const chunks: Uint8Array[] = [];
   const decoder = new TextDecoder();
   let timedOut = false;
+  let totalLen = 0;
 
   const timer = setTimeout(() => {
     timedOut = true;
@@ -20,6 +29,8 @@ export async function readStdin(timeoutMs = DEFAULT_TIMEOUT_MS): Promise<string>
       const read = await Deno.stdin.read(buffer);
       if (read === null) break;
       chunks.push(buffer.slice(0, read));
+      totalLen += read;
+      if (totalLen > maxBytes) break;
     }
   } catch {
     // stdin closed by timeout or externally
@@ -28,7 +39,6 @@ export async function readStdin(timeoutMs = DEFAULT_TIMEOUT_MS): Promise<string>
   }
 
   if (chunks.length === 0) return "";
-  const totalLen = chunks.reduce((acc, c) => acc + c.length, 0);
   const result = new Uint8Array(totalLen);
   let offset = 0;
   for (const chunk of chunks) {
