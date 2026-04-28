@@ -141,6 +141,16 @@ export class OvermindHttpServer {
     }
     const result = await this.options.registry.acquire(body);
     if (result.ok) return jsonResponse({ ok: true });
+    // Capacity exhaustion is a distinct operational state from a cross-agent
+    // conflict. Surface it as 503 so operators see "kernel saturated" rather
+    // than "kernel unreachable" (which is what the client would otherwise log
+    // when it parses a holderless 409).
+    if (result.reason === "capacity") {
+      return jsonResponse(
+        { ok: false, error: "lock_capacity_exceeded" },
+        503,
+      );
+    }
     return jsonResponse({ ok: false, holder: result.holder }, 409);
   }
 

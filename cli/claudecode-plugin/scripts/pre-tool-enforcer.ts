@@ -21,6 +21,7 @@ import {
   resolvePathSafely,
 } from "./lib/read_hash_cache.ts";
 import { isHarnessEnabled } from "./lib/harness_config.ts";
+import { tryAcquire, type TryAcquireResult } from "./lib/lock_client.ts";
 
 export { isHarnessEnabled };
 
@@ -31,7 +32,16 @@ export interface HookData {
   toolInput?: Record<string, unknown>;
   cwd?: string;
   directory?: string;
+  // CC's hook payload identity. Mirrors `post-tool-verifier.ts:35-37` and
+  // the M1 hash-cache identity tuple. `agentId` (subagents) and `agent_type`
+  // (some payload shapes) are equivalent — see `subagent-coordinator.ts`.
+  session_id?: string;
+  sessionId?: string;
+  agentId?: string;
+  agent_type?: string;
 }
+
+const DEFAULT_KERNEL_URL = "http://localhost:8080";
 
 export type Decision =
   | { kind: "allow"; message?: string }
@@ -381,6 +391,105 @@ export async function evaluateHarness(
   });
 }
 
+export interface LockClaimResult {
+  readonly decision: Decision;
+  // Surfaced when the kernel was unreachable / errored — main() prints it as
+  // an `additionalContext` warning alongside any other message. Distinct from
+  // `Decision.allow.message` so a deny path can still emit a nudge if needed.
+  readonly warn?: string;
+}
+
+// Cross-agent lock check. Runs after the harness hash check passes for an
+// Edit/Write/Update/MultiEdit. Posts to the kernel's /lock endpoint via the
+// shared client; conflicts deny, errors fail open with a one-line warn.
+// `OVERMIND_KERNEL_HTTP_URL` overrides the default; `OVERMIND_MODE` short-
+// circuits the network call for scout/relay (single-writer).
+export async function evaluateLockClaim(
+  data: HookData,
+  opts: EvaluateOptions & {
+    env?: { get(key: string): string | undefined };
+    fetcher?: typeof tryAcquire;
+    // Injection seam for the identity-fallback log so tests can capture the
+    // warn without spamming stderr. Defaults to `console.error` — stdout is
+    // reserved for the JSON hook response.
+    logger?: (message: string) => void;
+  } = {},
+): Promise<LockClaimResult> {
+  const harnessOn = opts.harnessOn ?? isHarnessEnabled();
+  if (!harnessOn) return { decision: { kind: "allow" } };
+
+  const toolName = data.tool_name ?? data.toolName ?? "";
+  if (!FILE_MUTATING_TOOLS.has(toolName)) {
+    return { decision: { kind: "allow" } };
+  }
+
+  const toolInput = data.tool_input ?? data.toolInput ?? {};
+  const rawPath = extractFilePath(toolInput);
+  if (!rawPath) return { decision: { kind: "allow" } };
+
+  const env = opts.env ?? Deno.env;
+  const cwd = data.cwd ?? data.directory ?? Deno.cwd();
+  const home = opts.home ?? env.get("HOME") ?? "/";
+  const cachePath = getCachePath(cwd, home);
+  const cacheDir = cachePath.substring(0, cachePath.lastIndexOf("/"));
+  const filePath = await resolvePathSafely(rawPath, cwd);
+  const cwdReal = await resolvePathSafely(cwd);
+
+  // Mirror `evaluateHarness`: transient files (`/tmp`, `/var/folders/`, the
+  // hash cache itself) are out of scope for the harness. Skipping them here
+  // avoids a wasted localhost RTT and prevents two agents touching the same
+  // /tmp scratch file from registering a spurious cross-agent conflict.
+  if (isTransientPath(filePath, cacheDir, cwdReal)) {
+    return { decision: { kind: "allow" } };
+  }
+
+  // Identity tuple: same fallbacks as the M1 hash cache so both layers fail
+  // in the same direction. The redesign plan flags the fallback path as a
+  // soft regression to "M1 only" — surface it on stderr so an operator can
+  // see when the cross-agent guarantee silently degrades.
+  const sessionIdRaw = data.session_id ?? data.sessionId;
+  const agentIdRaw = data.agentId ?? data.agent_type;
+  const sessionId = sessionIdRaw ?? "default";
+  const agentId = agentIdRaw ?? "unknown";
+  if (!sessionIdRaw || !agentIdRaw) {
+    const log = opts.logger ?? ((m) => console.error(m));
+    log(
+      `[OVERMIND] Hook identity fallback: sessionId=${sessionId}, agentId=${agentId}. Cross-agent lock protection degraded.`,
+    );
+  }
+  const url = env.get("OVERMIND_KERNEL_HTTP_URL") ?? DEFAULT_KERNEL_URL;
+  const mode = env.get("OVERMIND_MODE");
+
+  const acquire = opts.fetcher ?? tryAcquire;
+  const result: TryAcquireResult = await acquire({
+    url,
+    path: filePath,
+    sessionId,
+    agentId,
+    mode,
+  });
+
+  switch (result.status) {
+    case "ok":
+    case "skipped":
+      return { decision: { kind: "allow" } };
+    case "conflict":
+      return {
+        decision: {
+          kind: "deny",
+          reason:
+            `File locked by agent ${result.holder.agentId} in session ${result.holder.sessionId}. Pick another file or wait.`,
+        },
+      };
+    case "kernel_unavailable":
+      return {
+        decision: { kind: "allow" },
+        warn:
+          "[OVERMIND SAFETY] Lock check skipped: kernel unreachable. Cross-agent race protection is offline; the hash check still applies.",
+      };
+  }
+}
+
 // Warn (not block) when a Bash command appears to write to a path that's
 // in the read-hash cache. The harness's PreToolUse hash check only sees
 // Edit / Write; a `sed -i` or `>` redirect would silently bypass it. We
@@ -456,16 +565,29 @@ async function main(): Promise<void> {
     return;
   }
 
+  // Cross-agent lock check (M4). Only fires for file-mutating tools and only
+  // when the harness is on. Conflict denies; kernel-unavailable warns.
+  const lockResult = await evaluateLockClaim(data);
+  if (lockResult.decision.kind === "deny") {
+    outputDeny(lockResult.decision.reason);
+    return;
+  }
+
   const toolName = data.tool_name ?? data.toolName ?? "";
   const toolInput = data.tool_input ?? data.toolInput ?? {};
 
-  let message: string | undefined;
+  let message: string | undefined = lockResult.warn;
 
   switch (toolName) {
     case "Bash": {
       const command = typeof toolInput === "string"
         ? toolInput
         : (toolInput.command as string) ?? "";
+      // Safe to overwrite: `evaluateLockClaim` only emits a warn for tools
+      // in `FILE_MUTATING_TOOLS`, which excludes Bash. So `message` is
+      // always undefined on entry to this branch. If Bash ever joins the
+      // mutating set, switch to the newline-join pattern used by the
+      // Edit/Write/Update/MultiEdit branch below.
       message = await handleBashTool(command, data);
       break;
     }
@@ -476,7 +598,13 @@ async function main(): Promise<void> {
     case "MultiEdit": {
       const path = extractFilePath(toolInput);
       const envDecision = evaluateEnvWrite(path);
-      if (envDecision.kind === "allow") message = envDecision.message;
+      if (envDecision.kind === "allow" && envDecision.message) {
+        // Compose with any lock-check warn already in `message` so a
+        // kernel-unreachable + .env-write combo surfaces both nudges.
+        message = message
+          ? `${message}\n${envDecision.message}`
+          : envDecision.message;
+      }
       break;
     }
   }

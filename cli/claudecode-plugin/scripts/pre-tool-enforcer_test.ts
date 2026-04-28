@@ -5,11 +5,13 @@ import {
   evaluateBashCacheBypass,
   evaluateEnvWrite,
   evaluateHarness,
+  evaluateLockClaim,
   FILE_MUTATING_TOOLS,
   handleBashTool,
   isHarnessEnabled,
   parseBashWriteCandidates,
 } from "./pre-tool-enforcer.ts";
+import type { TryAcquireInput, TryAcquireResult } from "./lib/lock_client.ts";
 import {
   emptyCache,
   getCachePath,
@@ -630,3 +632,596 @@ Deno.test("evaluateHarness denies stale Update", async () => {
     assertEquals(d.kind, "deny");
   });
 });
+
+// --- M4: evaluateLockClaim (kernel /lock integration) ---
+
+interface MockEnv {
+  get(key: string): string | undefined;
+}
+
+function mockEnv(map: Record<string, string>): MockEnv {
+  return { get: (k) => map[k] };
+}
+
+// Capture each tryAcquire call's input so tests can assert wire-level
+// concerns (was the call made? with what mode? what identity tuple?).
+function recorder(
+  result: TryAcquireResult,
+): {
+  fn: (input: TryAcquireInput) => Promise<TryAcquireResult>;
+  calls: TryAcquireInput[];
+} {
+  const calls: TryAcquireInput[] = [];
+  const fn = (input: TryAcquireInput) => {
+    calls.push(input);
+    return Promise.resolve(result);
+  };
+  return { fn, calls };
+}
+
+Deno.test("evaluateLockClaim: harness off short-circuits without fetching", async () => {
+  const r = recorder({ status: "ok" });
+  const result = await evaluateLockClaim(
+    {
+      tool_name: "Edit",
+      tool_input: { file_path: "/repo/x.ts" },
+      session_id: "S1",
+      agentId: "A",
+    },
+    { harnessOn: false, fetcher: r.fn },
+  );
+  assertEquals(result.decision.kind, "allow");
+  assertEquals(result.warn, undefined);
+  assertEquals(r.calls.length, 0);
+});
+
+Deno.test("evaluateLockClaim: non-mutating tool short-circuits without fetching", async () => {
+  const r = recorder({ status: "ok" });
+  const result = await evaluateLockClaim(
+    {
+      tool_name: "Bash",
+      tool_input: { command: "ls" },
+      session_id: "S1",
+      agentId: "A",
+    },
+    { harnessOn: true, fetcher: r.fn },
+  );
+  assertEquals(result.decision.kind, "allow");
+  assertEquals(r.calls.length, 0);
+});
+
+Deno.test("evaluateLockClaim: missing path short-circuits", async () => {
+  const r = recorder({ status: "ok" });
+  const result = await evaluateLockClaim(
+    {
+      tool_name: "Edit",
+      tool_input: {},
+      session_id: "S1",
+      agentId: "A",
+    },
+    { harnessOn: true, fetcher: r.fn },
+  );
+  assertEquals(result.decision.kind, "allow");
+  assertEquals(r.calls.length, 0);
+});
+
+Deno.test("evaluateLockClaim: ok response allows silently", async () => {
+  const r = recorder({ status: "ok" });
+  const result = await evaluateLockClaim(
+    {
+      tool_name: "Edit",
+      tool_input: { file_path: "/repo/x.ts" },
+      session_id: "S1",
+      agentId: "A",
+    },
+    {
+      harnessOn: true,
+      fetcher: r.fn,
+      env: mockEnv({ OVERMIND_KERNEL_HTTP_URL: "http://localhost:9999" }),
+    },
+  );
+  assertEquals(result.decision.kind, "allow");
+  assertEquals(result.warn, undefined);
+  assertEquals(r.calls.length, 1);
+  assertEquals(r.calls[0].url, "http://localhost:9999");
+  assertEquals(r.calls[0].sessionId, "S1");
+  assertEquals(r.calls[0].agentId, "A");
+});
+
+Deno.test("evaluateLockClaim: conflict denies with structured stop reason", async () => {
+  const r = recorder({
+    status: "conflict",
+    holder: { sessionId: "S2", agentId: "B" },
+  });
+  const result = await evaluateLockClaim(
+    {
+      tool_name: "Edit",
+      tool_input: { file_path: "/repo/x.ts" },
+      session_id: "S1",
+      agentId: "A",
+    },
+    { harnessOn: true, fetcher: r.fn },
+  );
+  assertEquals(result.decision.kind, "deny");
+  if (result.decision.kind === "deny") {
+    assertEquals(
+      result.decision.reason.includes("File locked by agent B"),
+      true,
+    );
+    assertEquals(result.decision.reason.includes("session S2"), true);
+  }
+});
+
+Deno.test("evaluateLockClaim: kernel_unavailable allows with warn", async () => {
+  const r = recorder({ status: "kernel_unavailable" });
+  const result = await evaluateLockClaim(
+    {
+      tool_name: "Edit",
+      tool_input: { file_path: "/repo/x.ts" },
+      session_id: "S1",
+      agentId: "A",
+    },
+    { harnessOn: true, fetcher: r.fn },
+  );
+  assertEquals(result.decision.kind, "allow");
+  assertEquals(result.warn?.includes("[OVERMIND SAFETY]"), true);
+  assertEquals(result.warn?.includes("kernel unreachable"), true);
+});
+
+Deno.test("evaluateLockClaim: skipped (scout/relay) allows silently", async () => {
+  // The shouldSkip happens inside tryAcquire; the mock fetcher just returns
+  // skipped to simulate that path. evaluateLockClaim must treat it like ok.
+  const r = recorder({ status: "skipped" });
+  const result = await evaluateLockClaim(
+    {
+      tool_name: "Edit",
+      tool_input: { file_path: "/repo/x.ts" },
+      session_id: "S1",
+      agentId: "A",
+    },
+    {
+      harnessOn: true,
+      fetcher: r.fn,
+      env: mockEnv({ OVERMIND_MODE: "scout" }),
+    },
+  );
+  assertEquals(result.decision.kind, "allow");
+  assertEquals(result.warn, undefined);
+  // The mode is forwarded so tryAcquire's own short-circuit can fire.
+  assertEquals(r.calls[0].mode, "scout");
+});
+
+Deno.test("evaluateLockClaim: defaults sessionId to 'default' when missing", async () => {
+  const r = recorder({ status: "ok" });
+  await evaluateLockClaim(
+    {
+      tool_name: "Edit",
+      tool_input: { file_path: "/repo/x.ts" },
+    },
+    { harnessOn: true, fetcher: r.fn },
+  );
+  assertEquals(r.calls[0].sessionId, "default");
+  assertEquals(r.calls[0].agentId, "unknown");
+});
+
+Deno.test("evaluateLockClaim: prefers session_id over sessionId, agentId over agent_type", async () => {
+  // Snake-case vs camel-case parity test. CC payloads vary by build; the
+  // fallback chain mirrors the M1 hash-cache identity resolution.
+  const r = recorder({ status: "ok" });
+  await evaluateLockClaim(
+    {
+      tool_name: "Edit",
+      tool_input: { file_path: "/repo/x.ts" },
+      session_id: "snake",
+      sessionId: "camel",
+      agentId: "primary",
+      agent_type: "fallback",
+    },
+    { harnessOn: true, fetcher: r.fn },
+  );
+  assertEquals(r.calls[0].sessionId, "snake");
+  assertEquals(r.calls[0].agentId, "primary");
+});
+
+Deno.test("evaluateLockClaim: falls back to camelCase + agent_type when canonical fields absent", async () => {
+  const r = recorder({ status: "ok" });
+  await evaluateLockClaim(
+    {
+      tool_name: "Edit",
+      tool_input: { file_path: "/repo/x.ts" },
+      sessionId: "camel",
+      agent_type: "fallback",
+    },
+    { harnessOn: true, fetcher: r.fn },
+  );
+  assertEquals(r.calls[0].sessionId, "camel");
+  assertEquals(r.calls[0].agentId, "fallback");
+});
+
+Deno.test("evaluateLockClaim: defaults kernel URL when env unset", async () => {
+  const r = recorder({ status: "ok" });
+  await evaluateLockClaim(
+    {
+      tool_name: "Edit",
+      tool_input: { file_path: "/repo/x.ts" },
+      session_id: "S1",
+      agentId: "A",
+    },
+    { harnessOn: true, fetcher: r.fn, env: mockEnv({}) },
+  );
+  assertEquals(r.calls[0].url, "http://localhost:8080");
+});
+
+Deno.test("evaluateLockClaim: forwards OVERMIND_MODE", async () => {
+  const r = recorder({ status: "ok" });
+  await evaluateLockClaim(
+    {
+      tool_name: "Edit",
+      tool_input: { file_path: "/repo/x.ts" },
+      session_id: "S1",
+      agentId: "A",
+    },
+    {
+      harnessOn: true,
+      fetcher: r.fn,
+      env: mockEnv({ OVERMIND_MODE: "swarm" }),
+    },
+  );
+  assertEquals(r.calls[0].mode, "swarm");
+});
+
+// --- M4: end-to-end pre-tool-enforcer wiring ---
+//
+// Verify that main()'s decision pipeline composes harness + lock correctly.
+// We stand up a real OvermindHttpServer and exercise the script via a
+// subprocess so the test exercises the same code path CC will hit.
+
+import { OvermindHttpServer } from "../../../kernel/http.ts";
+import { LockRegistry } from "../../../kernel/locks.ts";
+
+async function withKernelServer(
+  fn: (
+    baseUrl: string,
+    registry: LockRegistry,
+  ) => Promise<void>,
+): Promise<void> {
+  const journalPath = await Deno.makeTempFile({ suffix: ".jsonl" });
+  const registry = new LockRegistry(journalPath);
+  await registry.load();
+  const server = new OvermindHttpServer({
+    registry,
+    port: 0,
+    harnessOn: () => true,
+  });
+  const { port } = server.start();
+  try {
+    await fn(`http://localhost:${port}`, registry);
+  } finally {
+    await server.shutdown();
+    try {
+      await Deno.remove(journalPath);
+    } catch {
+      // best-effort cleanup
+    }
+  }
+}
+
+Deno.test(
+  "evaluateLockClaim: integration with real kernel — 200 path",
+  async () => {
+    await withKernelServer(async (baseUrl) => {
+      // No prior holder; the lock acquire should succeed.
+      const result = await evaluateLockClaim(
+        {
+          tool_name: "Edit",
+          tool_input: { file_path: "/repo/integration-200.ts" },
+          session_id: "S1",
+          agentId: "A",
+        },
+        {
+          harnessOn: true,
+          env: mockEnv({ OVERMIND_KERNEL_HTTP_URL: baseUrl }),
+        },
+      );
+      assertEquals(result.decision.kind, "allow");
+      assertEquals(result.warn, undefined);
+    });
+  },
+);
+
+Deno.test(
+  "evaluateLockClaim: integration with real kernel — 409 path",
+  async () => {
+    await withKernelServer(async (baseUrl, registry) => {
+      // Pre-load a conflicting holder on the same resolved path the hook
+      // will compute. resolvePathSafely on a non-existent absolute path
+      // falls back to the path itself on macOS, so /repo/integration-409.ts
+      // round-trips verbatim and the registry key matches.
+      const path = "/repo/integration-409.ts";
+      await registry.acquire({
+        path,
+        sessionId: "S2",
+        agentId: "B",
+      });
+
+      const result = await evaluateLockClaim(
+        {
+          tool_name: "Edit",
+          tool_input: { file_path: path },
+          session_id: "S1",
+          agentId: "A",
+        },
+        {
+          harnessOn: true,
+          env: mockEnv({ OVERMIND_KERNEL_HTTP_URL: baseUrl }),
+        },
+      );
+      assertEquals(result.decision.kind, "deny");
+      if (result.decision.kind === "deny") {
+        assertEquals(
+          result.decision.reason.includes("File locked by agent B"),
+          true,
+        );
+        assertEquals(
+          result.decision.reason.includes("session S2"),
+          true,
+        );
+      }
+    });
+  },
+);
+
+Deno.test(
+  "evaluateLockClaim: integration — kernel unreachable fails open with warn",
+  async () => {
+    // Closed port: 1 is reserved and never bound on Darwin/Linux.
+    const result = await evaluateLockClaim(
+      {
+        tool_name: "Edit",
+        tool_input: { file_path: "/repo/integration-down.ts" },
+        session_id: "S1",
+        agentId: "A",
+      },
+      {
+        harnessOn: true,
+        env: mockEnv({ OVERMIND_KERNEL_HTTP_URL: "http://127.0.0.1:1" }),
+      },
+    );
+    assertEquals(result.decision.kind, "allow");
+    assertEquals(result.warn?.includes("kernel unreachable"), true);
+  },
+);
+
+Deno.test(
+  "evaluateLockClaim: integration — scout mode skips network call",
+  async () => {
+    // Even with kernel running, scout mode short-circuits in the client.
+    await withKernelServer(async (baseUrl) => {
+      const result = await evaluateLockClaim(
+        {
+          tool_name: "Edit",
+          tool_input: { file_path: "/repo/integration-scout.ts" },
+          session_id: "S1",
+          agentId: "A",
+        },
+        {
+          harnessOn: true,
+          env: mockEnv({
+            OVERMIND_KERNEL_HTTP_URL: baseUrl,
+            OVERMIND_MODE: "scout",
+          }),
+        },
+      );
+      assertEquals(result.decision.kind, "allow");
+      assertEquals(result.warn, undefined);
+    });
+  },
+);
+
+// --- F3: transient paths skip the lock check ---
+
+Deno.test("evaluateLockClaim: skips /tmp paths without fetching", async () => {
+  const r = recorder({ status: "ok" });
+  const result = await evaluateLockClaim(
+    {
+      tool_name: "Edit",
+      tool_input: { file_path: "/tmp/scratch.ts" },
+      session_id: "S1",
+      agentId: "A",
+    },
+    { harnessOn: true, fetcher: r.fn },
+  );
+  assertEquals(result.decision.kind, "allow");
+  // The hook never reaches out to the kernel for transient paths — the
+  // fetcher should not be called even once. This avoids both the wasted
+  // localhost RTT and the spurious cross-agent conflict on shared scratch
+  // files in /tmp / /var/folders.
+  assertEquals(r.calls.length, 0);
+});
+
+Deno.test("evaluateLockClaim: skips paths under the harness cache dir", async () => {
+  // The cache dir lives under HOME. evaluateHarness skips it via
+  // isTransientPath; evaluateLockClaim must mirror so the lock layer
+  // doesn't end up keying on the agent's own state files.
+  const home = await Deno.makeTempDir();
+  const cwd = await Deno.makeTempDir();
+  try {
+    const r = recorder({ status: "ok" });
+    // Compute the cache file path the same way evaluateHarness does.
+    const cachePath = `${home}/.overmind/edit-harness-cache.json`;
+    const result = await evaluateLockClaim(
+      {
+        tool_name: "Edit",
+        tool_input: { file_path: cachePath },
+        session_id: "S1",
+        agentId: "A",
+        cwd,
+      },
+      { harnessOn: true, fetcher: r.fn, home },
+    );
+    assertEquals(result.decision.kind, "allow");
+    assertEquals(r.calls.length, 0);
+  } finally {
+    await Deno.remove(home, { recursive: true });
+    await Deno.remove(cwd, { recursive: true });
+  }
+});
+
+// --- F2: identity-fallback warn fires on stderr (via injected logger) ---
+
+Deno.test("evaluateLockClaim: logs warn when sessionId falls back to default", async () => {
+  const messages: string[] = [];
+  const r = recorder({ status: "ok" });
+  const result = await evaluateLockClaim(
+    {
+      tool_name: "Edit",
+      tool_input: { file_path: "/repo/x.ts" },
+      // No sessionId / session_id — fallback fires.
+      agentId: "A",
+    },
+    {
+      harnessOn: true,
+      fetcher: r.fn,
+      logger: (m) => messages.push(m),
+    },
+  );
+  assertEquals(result.decision.kind, "allow");
+  assertEquals(messages.length, 1);
+  assertEquals(messages[0].includes("identity fallback"), true);
+  assertEquals(messages[0].includes("sessionId=default"), true);
+});
+
+Deno.test("evaluateLockClaim: logs warn when agentId falls back to unknown", async () => {
+  const messages: string[] = [];
+  const r = recorder({ status: "ok" });
+  await evaluateLockClaim(
+    {
+      tool_name: "Edit",
+      tool_input: { file_path: "/repo/x.ts" },
+      session_id: "S1",
+      // No agentId / agent_type — fallback fires.
+    },
+    {
+      harnessOn: true,
+      fetcher: r.fn,
+      logger: (m) => messages.push(m),
+    },
+  );
+  assertEquals(messages.length, 1);
+  assertEquals(messages[0].includes("agentId=unknown"), true);
+});
+
+Deno.test("evaluateLockClaim: no fallback warn when both fields present", async () => {
+  const messages: string[] = [];
+  const r = recorder({ status: "ok" });
+  await evaluateLockClaim(
+    {
+      tool_name: "Edit",
+      tool_input: { file_path: "/repo/x.ts" },
+      session_id: "S1",
+      agentId: "A",
+    },
+    {
+      harnessOn: true,
+      fetcher: r.fn,
+      logger: (m) => messages.push(m),
+    },
+  );
+  assertEquals(messages.length, 0);
+});
+
+// --- F4: end-to-end composition — kernel-unreachable warn + .env nudge ---
+//
+// The composition lives inline in main()'s switch (newline-join). Test it
+// by running the script as a subprocess so we exercise the same code path
+// CC will hit. This is the only way to verify the composition without
+// extracting the switch into a new function.
+
+Deno.test(
+  "main(): kernel-unreachable warn + .env-write nudge are both surfaced",
+  async () => {
+    const home = await Deno.makeTempDir();
+    const cwd = await Deno.makeTempDir();
+    try {
+      const filePath = `${cwd}/.env`;
+      await Deno.writeTextFile(filePath, "SECRET=x\n");
+      // Seed the M1 cache so the hash check passes (file content matches).
+      const data = await Deno.readFile(filePath);
+      const digest = await crypto.subtle.digest("SHA-256", data);
+      const sha = Array.from(new Uint8Array(digest))
+        .map((b) => b.toString(16).padStart(2, "0"))
+        .join("");
+      const cachePath = getCachePath(cwd, home);
+      const realPath = await Deno.realPath(filePath);
+      await saveCache(
+        cachePath,
+        upsertEntry(emptyCache(), realPath, sha, "S1"),
+      );
+
+      const stdinJson = JSON.stringify({
+        tool_name: "Edit",
+        tool_input: { file_path: filePath },
+        session_id: "S1",
+        agentId: "A",
+        cwd,
+      });
+
+      // Pass `--config` explicitly so the subprocess picks up the project's
+      // JSR import map (`deno.json` at the repo root). Otherwise it would
+      // walk up from the script's path and could miss the project config
+      // depending on how the test runner was invoked. Without `clearEnv`
+      // the subprocess also inherits HOME/DENO_DIR from the parent so
+      // `@std/...` resolution stays warm across runs.
+      const scriptUrl = new URL("./pre-tool-enforcer.ts", import.meta.url);
+      const projectRoot = new URL("../../../deno.json", import.meta.url);
+      const cmd = new Deno.Command(Deno.execPath(), {
+        args: [
+          "run",
+          "--allow-all",
+          "--quiet",
+          "--config",
+          projectRoot.pathname,
+          scriptUrl.pathname,
+        ],
+        env: {
+          HOME: home,
+          OVERMIND_EDIT_HARNESS: "1",
+          // Closed port — kernel "unreachable", forcing the warn path.
+          OVERMIND_KERNEL_HTTP_URL: "http://127.0.0.1:1",
+          // Drop any inherited mode override so the lock check actually runs.
+          OVERMIND_MODE: "",
+        },
+        stdin: "piped",
+        stdout: "piped",
+        stderr: "piped",
+      });
+      const child = cmd.spawn();
+      const writer = child.stdin.getWriter();
+      await writer.write(new TextEncoder().encode(stdinJson));
+      await writer.close();
+      const out = await child.output();
+      const stdout = new TextDecoder().decode(out.stdout).trim();
+      if (out.code !== 0) {
+        const stderr = new TextDecoder().decode(out.stderr).trim();
+        throw new Error(
+          `subprocess exited ${out.code}\nstdout: ${stdout}\nstderr: ${stderr}`,
+        );
+      }
+
+      const result = JSON.parse(stdout);
+      assertEquals(result.continue, true);
+      const ctx = result.hookSpecificOutput?.additionalContext as
+        | string
+        | undefined;
+      // Both nudges land in additionalContext, joined by newline. The lock
+      // warn precedes the .env nudge per main()'s ordering.
+      assertEquals(typeof ctx, "string");
+      assertEquals(ctx!.includes("kernel unreachable"), true);
+      assertEquals(ctx!.includes(".env"), true);
+      assertEquals(ctx!.split("\n").length >= 2, true);
+    } finally {
+      await Deno.remove(home, { recursive: true });
+      await Deno.remove(cwd, { recursive: true });
+    }
+  },
+);

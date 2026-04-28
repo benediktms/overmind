@@ -553,3 +553,31 @@ Deno.test("500 response does not leak error detail", async () => {
     await Deno.remove(dir, { recursive: true });
   }
 });
+
+Deno.test("POST /lock returns 503 with reason when registry is at capacity", async () => {
+  const h = await startTestServer();
+  try {
+    // Pre-load the registry to MAX_LOCKS so the next /lock POST trips the
+    // capacity guard. Done via the registry directly to keep the test fast
+    // (10k HTTP round-trips would dominate the suite).
+    const total = 10_000;
+    for (let i = 0; i < total; i++) {
+      await h.registry.acquire({
+        path: `/cap_${i}.ts`,
+        sessionId: `S${i}`,
+        agentId: "A",
+      });
+    }
+
+    const res = await postJson(`${h.url}/lock`, {
+      path: "/overflow.ts",
+      sessionId: "S-overflow",
+      agentId: "A",
+    });
+    assertEquals(res.status, 503);
+    const body = await res.json();
+    assertEquals(body, { ok: false, error: "lock_capacity_exceeded" });
+  } finally {
+    await h.shutdown();
+  }
+});

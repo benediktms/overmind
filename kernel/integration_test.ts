@@ -17,6 +17,7 @@ import { MockBrainAdapter, type MockCall } from "./test_helpers/mock_brain.ts";
 import { MockNeuralLinkAdapter } from "./test_helpers/mock_neural_link.ts";
 import { Mode, RunState } from "./types.ts";
 import type { WaitForMessage } from "./types.ts";
+import { tryAcquire } from "../cli/claudecode-plugin/scripts/lib/lock_client.ts";
 
 const MODE_EXECUTION_WAIT_MS = 100;
 
@@ -699,6 +700,87 @@ Deno.test("integration: HTTP /lock returns 409 with holder on cross-session cont
       sessionId: "session-A",
       agentId: "agent-1",
     });
+  } finally {
+    if (previousHarnessFlag === undefined) {
+      Deno.env.delete("OVERMIND_EDIT_HARNESS");
+    } else {
+      Deno.env.set("OVERMIND_EDIT_HARNESS", previousHarnessFlag);
+    }
+    await shutdownHarness(harness);
+  }
+});
+
+Deno.test("integration: swarm two-agent race via lock_client", async () => {
+  // M4 end-to-end: drives the hook-side `tryAcquire` against a real kernel
+  // HTTP listener. Proves the full plumbing — wire-format, conflict body
+  // shape, holder parsing, and SessionEnd-style release — is intact.
+  const harness = await createHarness();
+  const previousHarnessFlag = Deno.env.get("OVERMIND_EDIT_HARNESS");
+  Deno.env.set("OVERMIND_EDIT_HARNESS", "1");
+
+  try {
+    const baseUrl = `http://127.0.0.1:${harness.daemon.getHttpPort()}`;
+    const path = "/swarm-race.ts";
+
+    // Drone-A acquires the lock.
+    const first = await tryAcquire({
+      url: baseUrl,
+      path,
+      sessionId: "session-A",
+      agentId: "drone-A",
+      mode: "swarm",
+    });
+    assertEquals(first.status, "ok");
+
+    // Drone-B (different session, different agent) tries the same path and
+    // must observe the conflict with drone-A's identity surfaced.
+    const second = await tryAcquire({
+      url: baseUrl,
+      path,
+      sessionId: "session-B",
+      agentId: "drone-B",
+      mode: "swarm",
+    });
+    assertEquals(second.status, "conflict");
+    if (second.status === "conflict") {
+      assertEquals(second.holder.sessionId, "session-A");
+      assertEquals(second.holder.agentId, "drone-A");
+    }
+
+    // Drone-A's CC session ends — the SessionEnd hook posts to
+    // /release-session-locks. Simulate that POST directly.
+    const release = await fetch(`${baseUrl}/release-session-locks`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sessionId: "session-A" }),
+    });
+    assertEquals(release.status, 200);
+    await release.body?.cancel();
+
+    // Drone-B retries and now wins.
+    const retry = await tryAcquire({
+      url: baseUrl,
+      path,
+      sessionId: "session-B",
+      agentId: "drone-B",
+      mode: "swarm",
+    });
+    assertEquals(retry.status, "ok");
+
+    // Scout / relay short-circuit: a third agent in single-writer mode never
+    // even hits the kernel. Verified by reading the registry — no new lock.
+    const registry = harness.daemon.getLockRegistry();
+    assert(registry, "expected lock registry");
+    const beforeScout = registry.snapshot().length;
+    const scoutResult = await tryAcquire({
+      url: baseUrl,
+      path: "/scout-only.ts",
+      sessionId: "session-C",
+      agentId: "scout-1",
+      mode: "scout",
+    });
+    assertEquals(scoutResult.status, "skipped");
+    assertEquals(registry.snapshot().length, beforeScout);
   } finally {
     if (previousHarnessFlag === undefined) {
       Deno.env.delete("OVERMIND_EDIT_HARNESS");

@@ -23,7 +23,6 @@ Deno.test("acquire on empty path returns ok and records the entry", async () => 
       agentId: "A",
     });
     assertEquals(result.ok, true);
-    assertEquals(result.holder, undefined);
     const snapshot = registry.snapshot();
     assertEquals(snapshot.length, 1);
     assertEquals(snapshot[0].path, "/foo.ts");
@@ -70,7 +69,9 @@ Deno.test("acquire conflicts when sessionId differs", async () => {
       agentId: "A",
     });
     assertEquals(result.ok, false);
-    assertEquals(result.holder, { sessionId: "S1", agentId: "A" });
+    if (!result.ok) {
+      assertEquals(result.holder, { sessionId: "S1", agentId: "A" });
+    }
   });
 });
 
@@ -90,7 +91,9 @@ Deno.test("acquire conflicts when agentId differs (same session)", async () => {
       agentId: "B",
     });
     assertEquals(result.ok, false);
-    assertEquals(result.holder, { sessionId: "S1", agentId: "A" });
+    if (!result.ok) {
+      assertEquals(result.holder, { sessionId: "S1", agentId: "A" });
+    }
   });
 });
 
@@ -281,7 +284,13 @@ Deno.test("acquire refuses new entries past the 10k cap (OOM defense)", async ()
       agentId: "A",
     });
     assertEquals(overflow.ok, false);
-    assertEquals(overflow.holder, undefined);
+    // Capacity refusal carries a distinct reason so the HTTP layer can
+    // surface 503 instead of a holderless 409 (which the hook client would
+    // misread as "kernel unavailable").
+    if (!overflow.ok) {
+      assertEquals(overflow.holder, undefined);
+      assertEquals(overflow.reason, "capacity");
+    }
 
     // Re-entrant acquire on an existing path still succeeds even at the cap
     // (no new map entry created).

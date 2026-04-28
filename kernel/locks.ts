@@ -9,10 +9,23 @@ export interface LockEntry {
 
 export type LockHolder = Pick<LockEntry, "sessionId" | "agentId">;
 
-export interface AcquireResult {
-  readonly ok: boolean;
-  readonly holder?: LockHolder;
-}
+// Discriminated union so the HTTP layer can distinguish capacity exhaustion
+// (no holder, no contention — the registry is full) from a real cross-agent
+// conflict. The previous shape conflated both as `{ok: false}` which the
+// hook client could only treat as "kernel unavailable" — masking a real
+// operational signal behind the same fail-open status.
+export type AcquireResult =
+  | { readonly ok: true }
+  | {
+    readonly ok: false;
+    readonly holder: LockHolder;
+    readonly reason?: undefined;
+  }
+  | {
+    readonly ok: false;
+    readonly holder?: undefined;
+    readonly reason: "capacity";
+  };
 
 export type AcquireInput = Omit<LockEntry, "acquiredAt">;
 
@@ -97,7 +110,7 @@ export class LockRegistry {
       };
     }
     if (!existing && this.locks.size >= MAX_LOCKS) {
-      return { ok: false };
+      return { ok: false, reason: "capacity" };
     }
     const entry: LockEntry = {
       ...input,
