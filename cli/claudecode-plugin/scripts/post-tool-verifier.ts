@@ -5,13 +5,26 @@
  */
 
 import { readStdin } from "./lib/stdin.ts";
+import {
+  computeSha256,
+  enforceMaxBytes,
+  getCachePath,
+  isTransientPath,
+  loadCache,
+  pruneStale,
+  resolvePathSafely,
+  saveCache,
+  upsertEntry,
+} from "./lib/read_hash_cache.ts";
 
-const OVERMIND_KERNEL_HTTP_URL =
-  Deno.env.get("OVERMIND_KERNEL_HTTP_URL") ?? "http://localhost:8080";
+const OVERMIND_KERNEL_HTTP_URL = Deno.env.get("OVERMIND_KERNEL_HTTP_URL") ??
+  "http://localhost:8080";
 
 interface HookData {
   tool_name?: string;
   toolName?: string;
+  tool_input?: Record<string, unknown>;
+  toolInput?: Record<string, unknown>;
   tool_response?: unknown;
   toolResponse?: unknown;
   tool_output?: unknown;
@@ -20,6 +33,10 @@ interface HookData {
   directory?: string;
   session_id?: string;
   sessionId?: string;
+}
+
+function isHarnessEnabled(): boolean {
+  return Deno.env.get("OVERMIND_EDIT_HARNESS") === "1";
 }
 
 const BASH_ERROR_PATTERNS = [
@@ -53,16 +70,24 @@ export function detectWriteFailure(output: string): boolean {
 }
 
 function getToolOutputAsString(data: HookData): string {
-  const raw = data.tool_response ?? data.toolResponse ?? data.tool_output ?? data.toolOutput ?? "";
+  const raw = data.tool_response ?? data.toolResponse ?? data.tool_output ??
+    data.toolOutput ?? "";
   return typeof raw === "string" ? raw : JSON.stringify(raw);
 }
 
-async function notifyKernel(event: string, data: Record<string, unknown>): Promise<void> {
+async function notifyKernel(
+  event: string,
+  data: Record<string, unknown>,
+): Promise<void> {
   try {
     await fetch(`${OVERMIND_KERNEL_HTTP_URL}/event`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ event, data, timestamp: new Date().toISOString() }),
+      body: JSON.stringify({
+        event,
+        data,
+        timestamp: new Date().toISOString(),
+      }),
     });
   } catch {
     // Kernel may not be running - silent
@@ -91,7 +116,10 @@ export function processRememberTags(
   return { priority, regular };
 }
 
-export function generateMessage(toolName: string, toolOutput: string): string | undefined {
+export function generateMessage(
+  toolName: string,
+  toolOutput: string,
+): string | undefined {
   switch (toolName) {
     case "Bash":
       if (detectBashFailure(toolOutput)) {
@@ -161,6 +189,42 @@ function outputHookResult(message?: string): void {
   console.log(JSON.stringify(result));
 }
 
+export async function refreshCacheIfApplicable(
+  data: HookData,
+  toolOutput: string,
+): Promise<void> {
+  if (!isHarnessEnabled()) return;
+  const toolName = data.tool_name ?? data.toolName ?? "";
+  if (toolName !== "Read" && toolName !== "Edit" && toolName !== "Write") {
+    return;
+  }
+  if (detectWriteFailure(toolOutput)) return;
+
+  const toolInput = data.tool_input ?? data.toolInput ?? {};
+  const rawPath = (toolInput.file_path as string) ??
+    (toolInput.filePath as string) ?? "";
+  if (!rawPath) return;
+
+  const cwd = data.cwd ?? data.directory ?? Deno.cwd();
+  const home = Deno.env.get("HOME") ?? "/";
+  const sessionId = data.session_id ?? data.sessionId ?? "default";
+  const cachePath = getCachePath(cwd, home);
+  const cacheDir = cachePath.substring(0, cachePath.lastIndexOf("/"));
+  const filePath = await resolvePathSafely(rawPath);
+  const cwdReal = await resolvePathSafely(cwd);
+
+  if (isTransientPath(filePath, cacheDir, cwdReal)) return;
+
+  const sha = await computeSha256(filePath);
+  if (sha === null) return;
+
+  const existing = pruneStale(await loadCache(cachePath));
+  const updated = enforceMaxBytes(
+    upsertEntry(existing, filePath, sha, sessionId),
+  );
+  await saveCache(cachePath, updated);
+}
+
 async function main(): Promise<void> {
   const input = await readStdin();
   if (!input.trim()) {
@@ -180,6 +244,10 @@ async function main(): Promise<void> {
   const toolOutput = getToolOutputAsString(data);
   const directory = data.cwd ?? data.directory ?? Deno.cwd();
   const sessionId = data.session_id ?? data.sessionId ?? "unknown";
+
+  // Cache refresh runs before remember-tag handling so a slow kernel POST
+  // never blocks a hash-cache update.
+  await refreshCacheIfApplicable(data, toolOutput);
 
   // Process remember tags and sync to kernel
   const { priority, regular } = processRememberTags(toolOutput);

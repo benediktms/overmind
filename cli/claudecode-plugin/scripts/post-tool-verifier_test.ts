@@ -1,10 +1,12 @@
-import { assertEquals } from "@std/assert";
+import { assertEquals, assertNotEquals } from "@std/assert";
 import {
   detectBashFailure,
   detectWriteFailure,
   generateMessage,
   processRememberTags,
+  refreshCacheIfApplicable,
 } from "./post-tool-verifier.ts";
+import { getCachePath, getEntry, loadCache } from "./lib/read_hash_cache.ts";
 
 // --- detectBashFailure ---
 
@@ -126,7 +128,10 @@ Deno.test("generateMessage returns failure for failed Edit", () => {
 });
 
 Deno.test("generateMessage returns undefined for successful Edit", () => {
-  assertEquals(generateMessage("Edit", "Edit applied successfully."), undefined);
+  assertEquals(
+    generateMessage("Edit", "Edit applied successfully."),
+    undefined,
+  );
 });
 
 Deno.test("generateMessage returns failure for failed Write", () => {
@@ -145,4 +150,117 @@ Deno.test("generateMessage returns hint for empty Grep results", () => {
 
 Deno.test("generateMessage returns undefined for unknown tools", () => {
   assertEquals(generateMessage("SomeUnknownTool", "any output"), undefined);
+});
+
+// --- refreshCacheIfApplicable ---
+
+async function withTempEnv(
+  fn: (home: string, cwd: string, filePath: string) => Promise<void>,
+): Promise<void> {
+  const home = await Deno.makeTempDir();
+  const cwd = await Deno.makeTempDir();
+  const filePath = `${cwd}/file.ts`;
+  await Deno.writeTextFile(filePath, "export const x = 1;\n");
+  const prevHome = Deno.env.get("HOME");
+  const prevHarness = Deno.env.get("OVERMIND_EDIT_HARNESS");
+  Deno.env.set("HOME", home);
+  try {
+    await fn(home, cwd, filePath);
+  } finally {
+    if (prevHome === undefined) Deno.env.delete("HOME");
+    else Deno.env.set("HOME", prevHome);
+    if (prevHarness === undefined) Deno.env.delete("OVERMIND_EDIT_HARNESS");
+    else Deno.env.set("OVERMIND_EDIT_HARNESS", prevHarness);
+    await Deno.remove(home, { recursive: true });
+    await Deno.remove(cwd, { recursive: true });
+  }
+}
+
+Deno.test("refreshCacheIfApplicable does nothing when harness off", async () => {
+  await withTempEnv(async (home, cwd, filePath) => {
+    Deno.env.delete("OVERMIND_EDIT_HARNESS");
+    await refreshCacheIfApplicable(
+      { tool_name: "Read", tool_input: { file_path: filePath }, cwd },
+      "ok",
+    );
+    const cache = await loadCache(getCachePath(cwd, home));
+    assertEquals(cache.entries, {});
+  });
+});
+
+Deno.test("refreshCacheIfApplicable populates cache on Read success", async () => {
+  await withTempEnv(async (home, cwd, filePath) => {
+    Deno.env.set("OVERMIND_EDIT_HARNESS", "1");
+    await refreshCacheIfApplicable(
+      { tool_name: "Read", tool_input: { file_path: filePath }, cwd },
+      "file contents read successfully",
+    );
+    const real = await Deno.realPath(filePath);
+    const cache = await loadCache(getCachePath(cwd, home));
+    assertNotEquals(getEntry(cache, real), undefined);
+  });
+});
+
+Deno.test("refreshCacheIfApplicable refreshes on Edit success", async () => {
+  await withTempEnv(async (home, cwd, filePath) => {
+    Deno.env.set("OVERMIND_EDIT_HARNESS", "1");
+    await refreshCacheIfApplicable(
+      { tool_name: "Read", tool_input: { file_path: filePath }, cwd },
+      "ok",
+    );
+    const real = await Deno.realPath(filePath);
+    const before = getEntry(await loadCache(getCachePath(cwd, home)), real)!;
+
+    await Deno.writeTextFile(filePath, "export const x = 2;\n"); // mutate
+    await refreshCacheIfApplicable(
+      { tool_name: "Edit", tool_input: { file_path: filePath }, cwd },
+      "Edit applied successfully",
+    );
+
+    const after = getEntry(await loadCache(getCachePath(cwd, home)), real)!;
+    assertNotEquals(after.sha256, before.sha256);
+  });
+});
+
+Deno.test("refreshCacheIfApplicable refreshes on Write success", async () => {
+  await withTempEnv(async (home, cwd, filePath) => {
+    Deno.env.set("OVERMIND_EDIT_HARNESS", "1");
+    // No prior Read — Write success on a freshly-created file should still
+    // populate the cache so a subsequent Edit can validate.
+    await Deno.writeTextFile(filePath, "export const x = 7;\n");
+    await refreshCacheIfApplicable(
+      { tool_name: "Write", tool_input: { file_path: filePath }, cwd },
+      "Wrote file successfully.",
+    );
+    const real = await Deno.realPath(filePath);
+    const entry = getEntry(await loadCache(getCachePath(cwd, home)), real);
+    assertNotEquals(entry, undefined);
+  });
+});
+
+Deno.test("refreshCacheIfApplicable skips on detected write failure", async () => {
+  await withTempEnv(async (home, cwd, filePath) => {
+    Deno.env.set("OVERMIND_EDIT_HARNESS", "1");
+    await refreshCacheIfApplicable(
+      { tool_name: "Edit", tool_input: { file_path: filePath }, cwd },
+      "Permission denied", // matches WRITE_ERROR_PATTERNS
+    );
+    const cache = await loadCache(getCachePath(cwd, home));
+    assertEquals(cache.entries, {});
+  });
+});
+
+Deno.test("refreshCacheIfApplicable skips non-cache-relevant tools", async () => {
+  await withTempEnv(async (home, cwd, filePath) => {
+    Deno.env.set("OVERMIND_EDIT_HARNESS", "1");
+    await refreshCacheIfApplicable(
+      { tool_name: "Bash", tool_input: { command: "ls" }, cwd },
+      "ok",
+      // No file_path even available; ensures the early-return is by tool name.
+    );
+    // Spell out: even if filePath happened to match cwd, Bash is skipped.
+    void filePath;
+    const cache = await loadCache(getCachePath(cwd, home));
+    assertEquals(cache.entries, {});
+  });
 });
