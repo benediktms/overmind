@@ -1,4 +1,11 @@
-import type { PlanContext, Planner, TaskGraph, TaskNode, ValidationResult, ValidationIssue } from "./planner.ts";
+import type {
+  PlanContext,
+  Planner,
+  TaskGraph,
+  TaskNode,
+  ValidationIssue,
+  ValidationResult,
+} from "./planner.ts";
 
 export class ExplorationPlanner implements Planner {
   async plan(context: PlanContext): Promise<TaskGraph> {
@@ -10,7 +17,10 @@ export class ExplorationPlanner implements Planner {
         description: `Explore project structure relevant to: ${objective}`,
         agentRole: "archivist",
         dependencies: [],
-        acceptanceCriteria: ["Directory structure documented", "Key files identified"],
+        acceptanceCriteria: [
+          "Directory structure documented",
+          "Key files identified",
+        ],
       },
       {
         id: "explore-2",
@@ -18,7 +28,10 @@ export class ExplorationPlanner implements Planner {
         description: `Search for existing patterns related to: ${objective}`,
         agentRole: "probe",
         dependencies: [],
-        acceptanceCriteria: ["Similar implementations found", "Patterns documented"],
+        acceptanceCriteria: [
+          "Similar implementations found",
+          "Patterns documented",
+        ],
       },
       {
         id: "explore-3",
@@ -26,7 +39,10 @@ export class ExplorationPlanner implements Planner {
         description: `Map dependencies and relationships for: ${objective}`,
         agentRole: "cortex",
         dependencies: [],
-        acceptanceCriteria: ["Dependency graph created", "Integration points identified"],
+        acceptanceCriteria: [
+          "Dependency graph created",
+          "Integration points identified",
+        ],
       },
     ];
 
@@ -49,10 +65,16 @@ export class ExplorationPlanner implements Planner {
     );
 
     if (!hasExplorationTasks) {
-      issues.push({ severity: "warning", message: "No clear exploration tasks found" });
+      issues.push({
+        severity: "warning",
+        message: "No clear exploration tasks found",
+      });
     }
 
-    return { valid: issues.filter((i) => i.severity === "error").length === 0, issues };
+    return {
+      valid: issues.filter((i) => i.severity === "error").length === 0,
+      issues,
+    };
   }
 }
 
@@ -73,7 +95,7 @@ export class ImplementationPlanner implements Planner {
         id: "impl-1",
         title: "Implement core changes",
         description: `Write code for: ${objective}`,
-        agentRole: "executor",
+        agentRole: "drone",
         dependencies: ["plan-1"],
         acceptanceCriteria: ["Code compiles", "Basic functionality works"],
         estimatedEffort: "medium",
@@ -104,7 +126,10 @@ export class ImplementationPlanner implements Planner {
     );
 
     if (!hasDesignTask) {
-      issues.push({ severity: "warning", message: "No design/planning task found" });
+      issues.push({
+        severity: "warning",
+        message: "No design/planning task found",
+      });
     }
 
     const hasVerifyTask = graph.tasks.some((task) =>
@@ -112,7 +137,10 @@ export class ImplementationPlanner implements Planner {
     );
 
     if (!hasVerifyTask) {
-      issues.push({ severity: "warning", message: "No verification task found" });
+      issues.push({
+        severity: "warning",
+        message: "No verification task found",
+      });
     }
 
     return { valid: true, issues };
@@ -126,16 +154,20 @@ export class RefactoringPlanner implements Planner {
       {
         id: "analyze-1",
         title: "Analyze current code",
-        description: `Understand current implementation before refactoring: ${objective}`,
+        description:
+          `Understand current implementation before refactoring: ${objective}`,
         agentRole: "archivist",
         dependencies: [],
-        acceptanceCriteria: ["Current behavior documented", "Risk areas identified"],
+        acceptanceCriteria: [
+          "Current behavior documented",
+          "Risk areas identified",
+        ],
       },
       {
         id: "refactor-1",
         title: "Apply refactoring",
         description: `Execute refactoring: ${objective}`,
-        agentRole: "executor",
+        agentRole: "drone",
         dependencies: ["analyze-1"],
         acceptanceCriteria: ["Refactoring applied", "Code compiles"],
       },
@@ -164,7 +196,10 @@ export class RefactoringPlanner implements Planner {
     );
 
     if (!hasAnalysisTask) {
-      issues.push({ severity: "error", message: "Refactoring requires analysis task" });
+      issues.push({
+        severity: "error",
+        message: "Refactoring requires analysis task",
+      });
     }
 
     const hasRegressionCheck = graph.tasks.some((task) =>
@@ -172,17 +207,25 @@ export class RefactoringPlanner implements Planner {
     );
 
     if (!hasRegressionCheck) {
-      issues.push({ severity: "warning", message: "No regression check identified" });
+      issues.push({
+        severity: "warning",
+        message: "No regression check identified",
+      });
     }
 
-    return { valid: issues.filter((i) => i.severity === "error").length === 0, issues };
+    return {
+      valid: issues.filter((i) => i.severity === "error").length === 0,
+      issues,
+    };
   }
 }
 
 export function selectPlanner(objective: string): Planner {
   const lower = objective.toLowerCase();
 
-  if (/\b(explore|investigate|research|find|how\s+does|what\s+is)\b/.test(lower)) {
+  if (
+    /\b(explore|investigate|research|find|how\s+does|what\s+is)\b/.test(lower)
+  ) {
     return new ExplorationPlanner();
   }
 

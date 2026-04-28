@@ -86,7 +86,7 @@ const AGENT_DEFINITIONS: AgentDefinition[] = [
     ],
   },
   {
-    name: "executor",
+    name: "drone",
     tier: "worker",
     model: "sonnet",
     spawns: [],
@@ -194,7 +194,7 @@ const AGENT_DEFINITIONS: AgentDefinition[] = [
     ],
   },
   {
-    name: "security-reviewer",
+    name: "sentinel",
     tier: "worker",
     model: "opus",
     spawns: [],
@@ -212,7 +212,7 @@ const AGENT_DEFINITIONS: AgentDefinition[] = [
     ],
   },
   {
-    name: "test-engineer",
+    name: "guardian",
     tier: "worker",
     model: "sonnet",
     spawns: [],
@@ -248,7 +248,7 @@ const AGENT_DEFINITIONS: AgentDefinition[] = [
     ],
   },
   {
-    name: "performance-reviewer",
+    name: "gauge",
     tier: "worker",
     model: "sonnet",
     spawns: [],

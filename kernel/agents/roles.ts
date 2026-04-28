@@ -4,16 +4,16 @@ export type BaseAgentRole =
   | "archivist"
   | "probe"
   | "liaison"
-  | "executor"
+  | "drone"
   | "verifier"
   | "planner"
   | "architect"
   | "debugger"
   | "code-reviewer"
-  | "security-reviewer"
-  | "test-engineer"
+  | "sentinel"
+  | "guardian"
   | "style-reviewer"
-  | "performance-reviewer";
+  | "gauge";
 
 /** An agent role, optionally suffixed with a numeric instance index (e.g. "probe-2"). */
 export type AgentRole = BaseAgentRole | `${BaseAgentRole}-${number}`;

@@ -4,7 +4,13 @@ import {
   waitAndProcessInbox,
   withParticipation,
 } from "./coordination.ts";
-import type { NeuralLinkPort, InboxMessage, WaitForMessage, RoomOpenParams, MessageSendParams } from "./types.ts";
+import type {
+  InboxMessage,
+  MessageSendParams,
+  NeuralLinkPort,
+  RoomOpenParams,
+  WaitForMessage,
+} from "./types.ts";
 import { MessageKind } from "./types.ts";
 
 // ---------------------------------------------------------------------------
@@ -32,13 +38,23 @@ class MockCoordinationPort implements NeuralLinkPort {
     return this.connected;
   }
 
-  async inboxRead(roomId: string, participantId: string): Promise<InboxMessage[]> {
+  async inboxRead(
+    roomId: string,
+    participantId: string,
+  ): Promise<InboxMessage[]> {
     this.calls.push({ method: "inboxRead", args: [roomId, participantId] });
     return this.inboxMessages;
   }
 
-  async messageAck(roomId: string, participantId: string, messageIds: string[]): Promise<boolean> {
-    this.calls.push({ method: "messageAck", args: [roomId, participantId, messageIds] });
+  async messageAck(
+    roomId: string,
+    participantId: string,
+    messageIds: string[],
+  ): Promise<boolean> {
+    this.calls.push({
+      method: "messageAck",
+      args: [roomId, participantId, messageIds],
+    });
     return this.messageAckResult;
   }
 
@@ -54,20 +70,38 @@ class MockCoordinationPort implements NeuralLinkPort {
     kinds?: string[],
     from?: string[],
   ): Promise<WaitForMessage | null> {
-    this.calls.push({ method: "waitFor", args: [roomId, participantId, timeoutMs, kinds, from] });
+    this.calls.push({
+      method: "waitFor",
+      args: [roomId, participantId, timeoutMs, kinds, from],
+    });
     if (this.waitForQueue.length > 0) {
       return this.waitForQueue.shift()!;
     }
     return null;
   }
 
-  async roomJoin(roomId: string, participantId: string, displayName: string, role?: string): Promise<boolean> {
-    this.calls.push({ method: "roomJoin", args: [roomId, participantId, displayName, role] });
+  async roomJoin(
+    roomId: string,
+    participantId: string,
+    displayName: string,
+    role?: string,
+  ): Promise<boolean> {
+    this.calls.push({
+      method: "roomJoin",
+      args: [roomId, participantId, displayName, role],
+    });
     return this.roomJoinResult;
   }
 
-  async roomLeave(roomId: string, participantId: string, timeoutMs?: number): Promise<boolean> {
-    this.calls.push({ method: "roomLeave", args: [roomId, participantId, timeoutMs] });
+  async roomLeave(
+    roomId: string,
+    participantId: string,
+    timeoutMs?: number,
+  ): Promise<boolean> {
+    this.calls.push({
+      method: "roomLeave",
+      args: [roomId, participantId, timeoutMs],
+    });
     return this.roomLeaveResult;
   }
 
@@ -99,7 +133,9 @@ function makeMessage(overrides: Partial<InboxMessage> = {}): InboxMessage {
   };
 }
 
-function makeWaitForMessage(overrides: Partial<WaitForMessage> = {}): WaitForMessage {
+function makeWaitForMessage(
+  overrides: Partial<WaitForMessage> = {},
+): WaitForMessage {
   return {
     message_id: "msg-1",
     from: "agent-a",
@@ -118,7 +154,12 @@ Deno.test("drainInbox: empty inbox returns 0", async () => {
   const port = new MockCoordinationPort();
   port.inboxMessages = [];
 
-  const count = await drainInbox(port, "room-1", "participant-1", async () => {});
+  const count = await drainInbox(
+    port,
+    "room-1",
+    "participant-1",
+    async () => {},
+  );
 
   assertEquals(count, 0);
 });
@@ -132,9 +173,14 @@ Deno.test("drainInbox: 3 messages calls handler 3 times, acks all IDs in one bat
   ];
 
   const handledIds: string[] = [];
-  const count = await drainInbox(port, "room-1", "participant-1", async (msg) => {
-    handledIds.push(msg.message_id);
-  });
+  const count = await drainInbox(
+    port,
+    "room-1",
+    "participant-1",
+    async (msg) => {
+      handledIds.push(msg.message_id);
+    },
+  );
 
   assertEquals(count, 3);
   assertEquals(handledIds, ["msg-1", "msg-2", "msg-3"]);
@@ -181,22 +227,35 @@ Deno.test("drainInbox: handler error propagates", async () => {
 
 Deno.test("waitAndProcessInbox: direct match on first waitFor returns the message", async () => {
   const port = new MockCoordinationPort();
-  const expected = makeWaitForMessage({ kind: "handoff", message_id: "msg-handoff" });
+  const expected = makeWaitForMessage({
+    kind: "handoff",
+    message_id: "msg-handoff",
+  });
   port.waitForQueue = [expected];
 
-  const result = await waitAndProcessInbox(port, "room-1", "participant-1", ["handoff"]);
+  const result = await waitAndProcessInbox(port, "room-1", "participant-1", [
+    "handoff",
+  ]);
 
   assertEquals(result, expected);
 });
 
 Deno.test("waitAndProcessInbox: interleaved message calls onInterleaved, acks it, then returns expected message", async () => {
   const port = new MockCoordinationPort();
-  const interleaved = makeWaitForMessage({ kind: "blocker", message_id: "msg-blocker" });
-  const expected = makeWaitForMessage({ kind: "handoff", message_id: "msg-handoff" });
+  const interleaved = makeWaitForMessage({
+    kind: "blocker",
+    message_id: "msg-blocker",
+  });
+  const expected = makeWaitForMessage({
+    kind: "handoff",
+    message_id: "msg-handoff",
+  });
   port.waitForQueue = [interleaved, expected];
 
   const interleavedMessages: WaitForMessage[] = [];
-  const result = await waitAndProcessInbox(port, "room-1", "participant-1", ["handoff"], {
+  const result = await waitAndProcessInbox(port, "room-1", "participant-1", [
+    "handoff",
+  ], {
     onInterleaved: async (msg) => {
       interleavedMessages.push(msg);
     },
@@ -216,7 +275,9 @@ Deno.test("waitAndProcessInbox: timeout (waitFor returns null) returns null", as
   const port = new MockCoordinationPort();
   port.waitForQueue = [null];
 
-  const result = await waitAndProcessInbox(port, "room-1", "participant-1", ["handoff"]);
+  const result = await waitAndProcessInbox(port, "room-1", "participant-1", [
+    "handoff",
+  ]);
 
   assertEquals(result, null);
 });
@@ -224,11 +285,14 @@ Deno.test("waitAndProcessInbox: timeout (waitFor returns null) returns null", as
 Deno.test("waitAndProcessInbox: max iterations guard returns null after N interleaved messages", async () => {
   const port = new MockCoordinationPort();
   // Fill queue with interleaved messages beyond maxIterations
-  port.waitForQueue = Array.from({ length: 5 }, (_, i) =>
-    makeWaitForMessage({ kind: "blocker", message_id: `msg-${i}` })
+  port.waitForQueue = Array.from(
+    { length: 5 },
+    (_, i) => makeWaitForMessage({ kind: "blocker", message_id: `msg-${i}` }),
   );
 
-  const result = await waitAndProcessInbox(port, "room-1", "participant-1", ["handoff"], {
+  const result = await waitAndProcessInbox(port, "room-1", "participant-1", [
+    "handoff",
+  ], {
     maxIterations: 3,
   });
 
@@ -239,11 +303,19 @@ Deno.test("waitAndProcessInbox: max iterations guard returns null after N interl
 
 Deno.test("waitAndProcessInbox: no onInterleaved callback still acks interleaved messages and continues", async () => {
   const port = new MockCoordinationPort();
-  const interleaved = makeWaitForMessage({ kind: "blocker", message_id: "msg-blocker" });
-  const expected = makeWaitForMessage({ kind: "handoff", message_id: "msg-handoff" });
+  const interleaved = makeWaitForMessage({
+    kind: "blocker",
+    message_id: "msg-blocker",
+  });
+  const expected = makeWaitForMessage({
+    kind: "handoff",
+    message_id: "msg-handoff",
+  });
   port.waitForQueue = [interleaved, expected];
 
-  const result = await waitAndProcessInbox(port, "room-1", "participant-1", ["handoff"]);
+  const result = await waitAndProcessInbox(port, "room-1", "participant-1", [
+    "handoff",
+  ]);
 
   assertEquals(result, expected);
 
@@ -262,7 +334,7 @@ Deno.test("withParticipation: happy path joins, runs work, sends handoff with su
   const result = await withParticipation(
     port,
     "room-1",
-    { id: "agent-1", displayName: "Agent One", role: "executor" },
+    { id: "agent-1", displayName: "Agent One", role: "drone" },
     async (_ctx) => {
       return 42;
     },
@@ -275,7 +347,11 @@ Deno.test("withParticipation: happy path joins, runs work, sends handoff with su
   assertEquals(joinCall?.args[1], "agent-1");
 
   const sendCall = port.calls.find((c) => c.method === "messageSend");
-  const sendParams = sendCall?.args[0] as { kind: string; summary: string; from: string };
+  const sendParams = sendCall?.args[0] as {
+    kind: string;
+    summary: string;
+    from: string;
+  };
   assertEquals(sendParams.kind, MessageKind.Handoff);
   assertEquals(sendParams.summary, "Work completed successfully");
   assertEquals(sendParams.from, "agent-1");

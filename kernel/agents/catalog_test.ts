@@ -45,7 +45,7 @@ Deno.test("getAgentsByModel returns the opus subset", () => {
     "cortex",
     "planner",
     "architect",
-    "security-reviewer",
+    "sentinel",
   ]);
 });
 
