@@ -34,7 +34,9 @@ Deno.test("KeywordIntentGate classifies ambiguous objectives", async () => {
 Deno.test("KeywordIntentGate classifies explicit objectives", async () => {
   const gate = new KeywordIntentGate();
 
-  const result = await gate.classify("update line 42 in src/main.ts to use new API");
+  const result = await gate.classify(
+    "update line 42 in src/main.ts to use new API",
+  );
 
   assertEquals(result.type, "explicit");
   assertEquals(result.requiresInterview, false);
@@ -46,9 +48,9 @@ Deno.test("KeywordIntentGate generates questions for add/implement", async () =>
   const result = await gate.classify("implement user authentication");
 
   assertEquals(result.requiresInterview, true);
-  const hasCoreFunctionalityQuestion = result.interviewQuestions?.some((question) =>
-    question.includes("core functionality")
-  );
+  const hasCoreFunctionalityQuestion = result.interviewQuestions?.some((
+    question,
+  ) => question.includes("core functionality"));
   assertEquals(hasCoreFunctionalityQuestion, true);
 });
 
@@ -56,7 +58,10 @@ Deno.test("KeywordIntentGate conducts interview", async () => {
   const gate = new KeywordIntentGate();
   const classification = await gate.classify("refactor the codebase");
 
-  const responses = await gate.conductInterview("refactor the codebase", classification);
+  const responses = await gate.conductInterview(
+    "refactor the codebase",
+    classification,
+  );
 
   assertEquals(responses.length, classification.interviewQuestions?.length);
   assertEquals(responses[0].answer, "");
@@ -66,7 +71,10 @@ Deno.test("conductInterview without callback returns empty answers", async () =>
   const gate = new KeywordIntentGate();
   const classification = await gate.classify("refactor the codebase");
 
-  const responses = await gate.conductInterview("refactor the codebase", classification);
+  const responses = await gate.conductInterview(
+    "refactor the codebase",
+    classification,
+  );
 
   assertEquals(responses.length, classification.interviewQuestions?.length);
   for (const response of responses) {
@@ -79,7 +87,10 @@ Deno.test("conductInterview with callback collects answers", async () => {
   const gate = new KeywordIntentGate(callback);
   const classification = await gate.classify("refactor the codebase");
 
-  const responses = await gate.conductInterview("refactor the codebase", classification);
+  const responses = await gate.conductInterview(
+    "refactor the codebase",
+    classification,
+  );
 
   assertEquals(responses.length, classification.interviewQuestions?.length);
   for (const response of responses) {

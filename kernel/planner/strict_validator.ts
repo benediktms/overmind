@@ -1,4 +1,8 @@
-import type { TaskGraph, ValidationResult, ValidationIssue } from "./planner.ts";
+import type {
+  TaskGraph,
+  ValidationIssue,
+  ValidationResult,
+} from "./planner.ts";
 
 export interface StrictValidationResult extends ValidationResult {
   thresholds: {
@@ -41,13 +45,19 @@ export class StrictValidator {
       }
     }
 
-    const fileReferenceCoverage = graph.tasks.length > 0 ? fileRefCount / graph.tasks.length : 0;
-    const acceptanceCriteriaCoverage = graph.tasks.length > 0 ? criteriaCount / graph.tasks.length : 0;
+    const fileReferenceCoverage = graph.tasks.length > 0
+      ? fileRefCount / graph.tasks.length
+      : 0;
+    const acceptanceCriteriaCoverage = graph.tasks.length > 0
+      ? criteriaCount / graph.tasks.length
+      : 0;
 
     if (fileReferenceCoverage < this.FILE_REF_THRESHOLD) {
       issues.push({
         severity: "error",
-        message: `File reference coverage ${(fileReferenceCoverage * 100).toFixed(0)}% below 100% threshold`,
+        message: `File reference coverage ${
+          (fileReferenceCoverage * 100).toFixed(0)
+        }% below 100% threshold`,
       });
       hasCriticalRedFlags = true;
     }
@@ -55,7 +65,9 @@ export class StrictValidator {
     if (acceptanceCriteriaCoverage < this.CRITERIA_THRESHOLD) {
       issues.push({
         severity: "error",
-        message: `Acceptance criteria coverage ${(acceptanceCriteriaCoverage * 100).toFixed(0)}% below ${(this.CRITERIA_THRESHOLD * 100).toFixed(0)}% threshold`,
+        message: `Acceptance criteria coverage ${
+          (acceptanceCriteriaCoverage * 100).toFixed(0)
+        }% below ${(this.CRITERIA_THRESHOLD * 100).toFixed(0)}% threshold`,
       });
       hasCriticalRedFlags = true;
     }
@@ -82,14 +94,22 @@ export class StrictValidator {
     };
   }
 
-  private validateTask(task: { id: string; title: string; description: string; acceptanceCriteria: string[] }): ValidationIssue[] {
+  private validateTask(
+    task: {
+      id: string;
+      title: string;
+      description: string;
+      acceptanceCriteria: string[];
+    },
+  ): ValidationIssue[] {
     const issues: ValidationIssue[] = [];
 
     if (task.title.length < 5) {
       issues.push({
         severity: "error",
         taskId: task.id,
-        message: `Task title "${task.title}" is too short (minimum 5 characters)`,
+        message:
+          `Task title "${task.title}" is too short (minimum 5 characters)`,
       });
     }
 
@@ -113,7 +133,8 @@ export class StrictValidator {
           issues.push({
             severity: "warning",
             taskId: task.id,
-            message: `Task "${task.title}" has vague acceptance criteria: "${criteria}"`,
+            message:
+              `Task "${task.title}" has vague acceptance criteria: "${criteria}"`,
           });
         }
       }
@@ -130,13 +151,18 @@ export class StrictValidator {
     return issues;
   }
 
-  private hasFileReference(task: { description: string; acceptanceCriteria: string[] }): boolean {
+  private hasFileReference(
+    task: { description: string; acceptanceCriteria: string[] },
+  ): boolean {
     const text = task.description + " " + task.acceptanceCriteria.join(" ");
     return /\b(src\/|lib\/|test\/|\.ts$|\.js$|\.py$|file:\s*\w)/i.test(text);
   }
 
-  private hasBusinessLogicAssumption(task: { description: string; acceptanceCriteria: string[] }): boolean {
-    const text = (task.description + " " + task.acceptanceCriteria.join(" ")).toLowerCase();
+  private hasBusinessLogicAssumption(
+    task: { description: string; acceptanceCriteria: string[] },
+  ): boolean {
+    const text = (task.description + " " + task.acceptanceCriteria.join(" "))
+      .toLowerCase();
 
     const assumptionPatterns = [
       /\b(we\s+assume|it\s+is\s+assumed|presumably|likely|probably)\b/,

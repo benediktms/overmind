@@ -85,29 +85,42 @@ export function resolveRunStatePath(workspace: string, runId: string): string {
   return join(resolveRunsDir(workspace), `${runId}.json`);
 }
 
-export function resolveRunJournalPath(workspace: string, runId: string): string {
+export function resolveRunJournalPath(
+  workspace: string,
+  runId: string,
+): string {
   return join(resolveJournalsDir(workspace), `${runId}.jsonl`);
 }
 
-export async function readCapabilities(workspace: string): Promise<PersistedCapabilities | null> {
-  return await readJsonFile<PersistedCapabilities>(resolveCapabilitiesPath(workspace));
+export async function readCapabilities(
+  workspace: string,
+): Promise<PersistedCapabilities | null> {
+  return await readJsonFile<PersistedCapabilities>(
+    resolveCapabilitiesPath(workspace),
+  );
 }
 
 export async function readModeState(
   workspace: string,
   mode: Mode,
 ): Promise<PersistedRunState | null> {
-  return await readJsonFile<PersistedRunState>(resolveModeStatePath(workspace, mode));
+  return await readJsonFile<PersistedRunState>(
+    resolveModeStatePath(workspace, mode),
+  );
 }
 
-export async function readActiveModeState(workspace: string): Promise<PersistedRunState | null> {
+export async function readActiveModeState(
+  workspace: string,
+): Promise<PersistedRunState | null> {
   const states = await Promise.all([
     readModeState(workspace, Mode.Scout),
     readModeState(workspace, Mode.Relay),
     readModeState(workspace, Mode.Swarm),
   ]);
 
-  const active = states.filter((state): state is PersistedRunState => Boolean(state?.active));
+  const active = states.filter((state): state is PersistedRunState =>
+    Boolean(state?.active)
+  );
   if (active.length === 0) {
     return null;
   }
@@ -126,14 +139,21 @@ export class PersistenceCoordinator {
     await this.persist(ctx, { eventKind: "start" });
   }
 
-  async updateRun(ctx: RunContext, options: Omit<PersistOptions, "finished"> = {}): Promise<void> {
+  async updateRun(
+    ctx: RunContext,
+    options: Omit<PersistOptions, "finished"> = {},
+  ): Promise<void> {
     await this.persist(ctx, {
       ...options,
-      eventKind: options.eventKind ?? (options.checkpointSummary ? "checkpoint" : "update"),
+      eventKind: options.eventKind ??
+        (options.checkpointSummary ? "checkpoint" : "update"),
     });
   }
 
-  async completeRun(ctx: RunContext, checkpointSummary?: string): Promise<void> {
+  async completeRun(
+    ctx: RunContext,
+    checkpointSummary?: string,
+  ): Promise<void> {
     await this.persist(ctx, {
       checkpointSummary,
       finished: true,
@@ -150,7 +170,10 @@ export class PersistenceCoordinator {
     });
   }
 
-  async cancelRun(ctx: RunContext, reason = "Run cancelled by user"): Promise<void> {
+  async cancelRun(
+    ctx: RunContext,
+    reason = "Run cancelled by user",
+  ): Promise<void> {
     await this.persist(ctx, {
       checkpointSummary: reason,
       finished: true,
@@ -158,12 +181,18 @@ export class PersistenceCoordinator {
     });
   }
 
-  private async persist(ctx: RunContext, options: PersistOptions): Promise<void> {
+  private async persist(
+    ctx: RunContext,
+    options: PersistOptions,
+  ): Promise<void> {
     await this.ensureDirectories();
 
     const snapshot = this.createSnapshot(ctx, options);
     await Promise.all([
-      writeJsonFile(resolveCapabilitiesPath(this.workspace), snapshot.persistence),
+      writeJsonFile(
+        resolveCapabilitiesPath(this.workspace),
+        snapshot.persistence,
+      ),
       writeJsonFile(resolveModeStatePath(this.workspace, ctx.mode), snapshot),
       writeJsonFile(resolveRunStatePath(this.workspace, ctx.run_id), snapshot),
       appendJournal(resolveRunJournalPath(this.workspace, ctx.run_id), {
@@ -176,12 +205,17 @@ export class PersistenceCoordinator {
     if (options.checkpointSummary && snapshot.brain_task_id) {
       await this.brain.taskComment(
         snapshot.brain_task_id,
-        `[checkpoint:${options.eventKind ?? "update"}] ${options.checkpointSummary}`,
+        `[checkpoint:${
+          options.eventKind ?? "update"
+        }] ${options.checkpointSummary}`,
       );
     }
   }
 
-  private createSnapshot(ctx: RunContext, options: PersistOptions): PersistedRunState {
+  private createSnapshot(
+    ctx: RunContext,
+    options: PersistOptions,
+  ): PersistedRunState {
     const now = new Date().toISOString();
     return {
       schema_version: 1,
@@ -230,6 +264,12 @@ async function writeJsonFile(path: string, value: unknown): Promise<void> {
   await Deno.writeTextFile(path, `${JSON.stringify(value, null, 2)}\n`);
 }
 
-async function appendJournal(path: string, event: PersistedJournalEvent): Promise<void> {
-  await Deno.writeTextFile(path, `${JSON.stringify(event)}\n`, { append: true, create: true });
+async function appendJournal(
+  path: string,
+  event: PersistedJournalEvent,
+): Promise<void> {
+  await Deno.writeTextFile(path, `${JSON.stringify(event)}\n`, {
+    append: true,
+    create: true,
+  });
 }

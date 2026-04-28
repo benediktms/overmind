@@ -13,8 +13,10 @@ export function createRetryState(): RetryState {
 }
 
 export function computeDelayMs(state: RetryState, policy: RetryPolicy): number {
-  const exponentialDelay = policy.baseDelayMs * Math.pow(policy.exponentialBase, state.attempt);
-  const jitter = exponentialDelay * policy.jitterFactor * (Math.random() * 2 - 1);
+  const exponentialDelay = policy.baseDelayMs *
+    Math.pow(policy.exponentialBase, state.attempt);
+  const jitter = exponentialDelay * policy.jitterFactor *
+    (Math.random() * 2 - 1);
   const withJitter = Math.max(0, exponentialDelay + jitter);
   return Math.min(withJitter, policy.maxDelayMs);
 }
@@ -37,13 +39,19 @@ export function recordSuccess(state: RetryState): RetryState {
   };
 }
 
-export function recordFailure(state: RetryState, policy: RetryPolicy): RetryState {
+export function recordFailure(
+  state: RetryState,
+  policy: RetryPolicy,
+): RetryState {
   const newFailures = state.consecutiveFailures + 1;
   let newCircuitState: CircuitState = state.circuitState;
 
   if (state.circuitState === "half-open") {
     newCircuitState = "open";
-  } else if (policy.circuitBreaker && newFailures >= policy.circuitBreaker.failureThreshold) {
+  } else if (
+    policy.circuitBreaker &&
+    newFailures >= policy.circuitBreaker.failureThreshold
+  ) {
     newCircuitState = "open";
   }
 
@@ -54,7 +62,10 @@ export function recordFailure(state: RetryState, policy: RetryPolicy): RetryStat
   };
 }
 
-export function canAttemptFromHalfOpen(state: RetryState, policy: RetryPolicy): boolean {
+export function canAttemptFromHalfOpen(
+  state: RetryState,
+  policy: RetryPolicy,
+): boolean {
   if (state.circuitState !== "half-open") {
     return true;
   }
@@ -64,7 +75,11 @@ export function canAttemptFromHalfOpen(state: RetryState, policy: RetryPolicy): 
   return state.attempt < policy.circuitBreaker.halfOpenMaxAttempts;
 }
 
-export function shouldAttemptNow(state: RetryState, policy: RetryPolicy, lastAttemptTime: number): boolean {
+export function shouldAttemptNow(
+  state: RetryState,
+  policy: RetryPolicy,
+  lastAttemptTime: number,
+): boolean {
   if (state.circuitState === "open") {
     if (!policy.circuitBreaker) {
       return false;
@@ -104,7 +119,10 @@ export function normalizeFailure(details: string): string {
 }
 
 /** Check if the retry loop is stuck on the same failure repeated N times. */
-export function isStuckOnSameFailure(state: RetryState, policy: RetryPolicy): boolean {
+export function isStuckOnSameFailure(
+  state: RetryState,
+  policy: RetryPolicy,
+): boolean {
   const threshold = policy.sameFailureThreshold ?? 3;
   if (state.recentNormalizedFailures.length < threshold) return false;
   const recent = state.recentNormalizedFailures.slice(-threshold);
@@ -112,7 +130,10 @@ export function isStuckOnSameFailure(state: RetryState, policy: RetryPolicy): bo
 }
 
 /** Record a normalized failure into retry state for same-failure tracking. */
-export function recordNormalizedFailure(state: RetryState, details: string): RetryState {
+export function recordNormalizedFailure(
+  state: RetryState,
+  details: string,
+): RetryState {
   const normalized = normalizeFailure(details);
   return {
     ...state,
@@ -121,7 +142,10 @@ export function recordNormalizedFailure(state: RetryState, details: string): Ret
 }
 
 /** Check if verification evidence has exceeded its staleness TTL. */
-export function isEvidenceStale(evidenceTimestamp: string, maxAgeMs: number): boolean {
+export function isEvidenceStale(
+  evidenceTimestamp: string,
+  maxAgeMs: number,
+): boolean {
   const age = Date.now() - new Date(evidenceTimestamp).getTime();
   return age > maxAgeMs;
 }

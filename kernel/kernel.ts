@@ -1,7 +1,7 @@
 import { EventBus, EventType } from "./events.ts";
 import type { KernelEvent } from "./events.ts";
 import { ConfigLoader } from "./config.ts";
-import { TriggerEngine, DEFAULT_TRIGGERS } from "./triggers.ts";
+import { DEFAULT_TRIGGERS, TriggerEngine } from "./triggers.ts";
 import { AdapterRegistry } from "./adapters.ts";
 import type { KernelConfig, RunContext } from "./types.ts";
 import { Mode, RunState } from "./types.ts";
@@ -12,7 +12,12 @@ import { executeScout } from "./modes/scout.ts";
 import { executeRelay } from "./modes/relay.ts";
 import { executeSwarm } from "./modes/swarm.ts";
 import { PersistenceCoordinator } from "./persistence.ts";
-import { KeywordIntentGate, type IntentClassification, type InterviewCallback, type InterviewResponse } from "./planner/intent_gate.ts";
+import {
+  type IntentClassification,
+  type InterviewCallback,
+  type InterviewResponse,
+  KeywordIntentGate,
+} from "./planner/intent_gate.ts";
 import { selectPlanner } from "./planner/template_planners.ts";
 import { determineExecutionMode, type TaskGraph } from "./planner/planner.ts";
 import { GapAnalyzer } from "./planner/gap_analyzer.ts";
@@ -149,20 +154,48 @@ export class Kernel {
       // Resolve dispatcher from explicit option or, failing that, from the
       // adapter registry. This makes AdapterRegistry the single source of
       // truth when no override is supplied at construction time.
-      const dispatcher = this.dispatcher
-        ?? this.adapterRegistry?.getDispatcher()
-        ?? undefined;
+      const dispatcher = this.dispatcher ??
+        this.adapterRegistry?.getDispatcher() ??
+        undefined;
       switch (mode) {
         case Mode.Scout:
-          return await executeScout(ctxWithSignal, brain, neuralLink, persistence, graph, dispatcher);
+          return await executeScout(
+            ctxWithSignal,
+            brain,
+            neuralLink,
+            persistence,
+            graph,
+            dispatcher,
+          );
         case Mode.Relay:
-          return await executeRelay(ctxWithSignal, brain, neuralLink, persistence, graph, dispatcher);
+          return await executeRelay(
+            ctxWithSignal,
+            brain,
+            neuralLink,
+            persistence,
+            graph,
+            dispatcher,
+          );
         case Mode.Swarm:
-          return await executeSwarm(ctxWithSignal, brain, neuralLink, persistence, undefined, undefined, undefined, undefined, graph, dispatcher);
+          return await executeSwarm(
+            ctxWithSignal,
+            brain,
+            neuralLink,
+            persistence,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            graph,
+            dispatcher,
+          );
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      await persistence.failRun({ ...ctxWithSignal, state: RunState.Failed }, message);
+      await persistence.failRun(
+        { ...ctxWithSignal, state: RunState.Failed },
+        message,
+      );
       throw err;
     } finally {
       this.cancellationRegistry.unregister(resolvedRunId);
@@ -173,10 +206,14 @@ export class Kernel {
     objective: string,
     workspace = Deno.cwd(),
     runId?: string,
-  ): Promise<{ runContext: RunContext; intent: IntentClassification; plannedMode: Mode }> {
+  ): Promise<
+    { runContext: RunContext; intent: IntentClassification; plannedMode: Mode }
+  > {
     if (!this.adapterRegistry) throw new OvermindError("Kernel not started");
 
-    const intentGate = new KeywordIntentGate(this.interviewCallback ?? undefined);
+    const intentGate = new KeywordIntentGate(
+      this.interviewCallback ?? undefined,
+    );
     const intent = await intentGate.classify(objective);
 
     this.emit(EventType.ObjectiveReceived, { objective, intent: intent.type });
@@ -210,7 +247,9 @@ export class Kernel {
 
     if (!validation.valid) {
       console.log("Plan validation failed:");
-      for (const issue of validation.issues.filter((i) => i.severity === "error")) {
+      for (
+        const issue of validation.issues.filter((i) => i.severity === "error")
+      ) {
         console.log(`  - ${issue.message}`);
       }
     }

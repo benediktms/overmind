@@ -1,8 +1,14 @@
 import { assertEquals } from "@std/assert";
 
-import { NoopDispatcher, MockDispatcher, type AgentDispatchRequest } from "./agent_dispatcher.ts";
+import {
+  type AgentDispatchRequest,
+  MockDispatcher,
+  NoopDispatcher,
+} from "./agent_dispatcher.ts";
 
-function makeRequest(overrides: Partial<AgentDispatchRequest> = {}): AgentDispatchRequest {
+function makeRequest(
+  overrides: Partial<AgentDispatchRequest> = {},
+): AgentDispatchRequest {
   return {
     agentId: "agent-1",
     role: "probe",

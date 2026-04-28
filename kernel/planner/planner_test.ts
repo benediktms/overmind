@@ -1,6 +1,6 @@
 import { assertEquals } from "@std/assert";
 
-import { topologicalSort, type TaskGraph, type TaskNode } from "./planner.ts";
+import { type TaskGraph, type TaskNode, topologicalSort } from "./planner.ts";
 
 function makeNode(id: string, deps: string[] = []): TaskNode {
   return {

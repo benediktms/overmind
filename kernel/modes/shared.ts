@@ -26,7 +26,11 @@ const DEFAULT_MAX_ITERATIONS_BY_MODE: Record<Mode, number> = {
 };
 
 const VALID_TRANSITIONS: Record<RunState, ReadonlySet<RunState>> = {
-  [RunState.Pending]: new Set([RunState.Running, RunState.Failed, RunState.Cancelled]),
+  [RunState.Pending]: new Set([
+    RunState.Running,
+    RunState.Failed,
+    RunState.Cancelled,
+  ]),
   [RunState.Running]: new Set([
     RunState.Verifying,
     RunState.Fixing,
@@ -34,8 +38,18 @@ const VALID_TRANSITIONS: Record<RunState, ReadonlySet<RunState>> = {
     RunState.Failed,
     RunState.Cancelled,
   ]),
-  [RunState.Verifying]: new Set([RunState.Completed, RunState.Fixing, RunState.Failed, RunState.Cancelled]),
-  [RunState.Fixing]: new Set([RunState.Running, RunState.Verifying, RunState.Failed, RunState.Cancelled]),
+  [RunState.Verifying]: new Set([
+    RunState.Completed,
+    RunState.Fixing,
+    RunState.Failed,
+    RunState.Cancelled,
+  ]),
+  [RunState.Fixing]: new Set([
+    RunState.Running,
+    RunState.Verifying,
+    RunState.Failed,
+    RunState.Cancelled,
+  ]),
   [RunState.Completed]: new Set(),
   [RunState.Failed]: new Set(),
   [RunState.Cancelled]: new Set(),
@@ -51,13 +65,17 @@ export function createRunContext(params: CreateRunContextParams): RunContext {
     brain_task_id: params.brain_task_id,
     room_id: params.room_id,
     iteration: 0,
-    max_iterations: params.max_iterations ?? DEFAULT_MAX_ITERATIONS_BY_MODE[params.mode],
+    max_iterations: params.max_iterations ??
+      DEFAULT_MAX_ITERATIONS_BY_MODE[params.mode],
     created_at: params.created_at ?? new Date().toISOString(),
     isVerifying: false,
   };
 }
 
-export function transitionState(ctx: RunContext, newState: RunState): RunContext {
+export function transitionState(
+  ctx: RunContext,
+  newState: RunState,
+): RunContext {
   if (ctx.state === newState) {
     return { ...ctx };
   }
@@ -82,7 +100,10 @@ export async function recordStepCompletion(
   if (!ctx.brain_task_id) {
     return false;
   }
-  return await brain.taskComment(ctx.brain_task_id, `[step:${stepName}] completed - ${result}`);
+  return await brain.taskComment(
+    ctx.brain_task_id,
+    `[step:${stepName}] completed - ${result}`,
+  );
 }
 
 export async function recordVerifyResult(
@@ -94,7 +115,10 @@ export async function recordVerifyResult(
   if (!ctx.brain_task_id) {
     return false;
   }
-  return await brain.taskComment(ctx.brain_task_id, `[verify:${outcome}] ${details}`);
+  return await brain.taskComment(
+    ctx.brain_task_id,
+    `[verify:${outcome}] ${details}`,
+  );
 }
 
 export function summarizeObjective(objective: string): string {

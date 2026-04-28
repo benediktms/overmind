@@ -1,6 +1,11 @@
 import { OvermindError } from "./errors.ts";
 import { Mode } from "./types.ts";
-import type { CancelRequest, ModeRequest, SocketRequest, SocketResponse } from "./types.ts";
+import type {
+  CancelRequest,
+  ModeRequest,
+  SocketRequest,
+  SocketResponse,
+} from "./types.ts";
 import { fromFileUrl } from "@std/path";
 import type { Kernel } from "./kernel.ts";
 
@@ -63,7 +68,11 @@ export async function ensureDaemonRunning(baseDir?: string): Promise<void> {
     }
 
     startDaemonProcess(resolvedBaseDir);
-    await waitForSocketReady(socketPath, STARTUP_RETRY_ATTEMPTS, STARTUP_RETRY_INTERVAL_MS);
+    await waitForSocketReady(
+      socketPath,
+      STARTUP_RETRY_ATTEMPTS,
+      STARTUP_RETRY_INTERVAL_MS,
+    );
   } finally {
     lockHandle.close();
     await removeIfExists(lockPath);
@@ -102,7 +111,9 @@ export async function sendToSocket(
   }
 
   throw new OvermindError(
-    `Failed to communicate with daemon socket at ${socketPath}: ${String(lastError)}`,
+    `Failed to communicate with daemon socket at ${socketPath}: ${
+      String(lastError)
+    }`,
   );
 }
 
@@ -199,7 +210,10 @@ export class OvermindDaemon {
         conn = await this.listener.accept();
         void this.handleConnection(conn);
       } catch (err) {
-        if (err instanceof Deno.errors.BadResource || err instanceof Deno.errors.Interrupted) {
+        if (
+          err instanceof Deno.errors.BadResource ||
+          err instanceof Deno.errors.Interrupted
+        ) {
           break;
         }
         if (conn) conn.close();
@@ -222,20 +236,33 @@ export class OvermindDaemon {
               ? { status: "accepted", run_id: req.run_id, error: null }
               : { status: "error", run_id: req.run_id, error: "Run not found" };
           } else {
-            response = { status: "error", run_id: req.run_id, error: "No kernel available" };
+            response = {
+              status: "error",
+              run_id: req.run_id,
+              error: "No kernel available",
+            };
           }
         } else {
           const req = parsed.request as ModeRequest;
           response = { status: "accepted", run_id: req.run_id, error: null };
           // Fire-and-forget mode execution if kernel is available
           if (this.kernel) {
-            this.kernel.executeMode(req.mode, req.objective, req.workspace, req.run_id).catch((err) => {
+            this.kernel.executeMode(
+              req.mode,
+              req.objective,
+              req.workspace,
+              req.run_id,
+            ).catch((err) => {
               console.error(`Mode execution error for ${req.run_id}:`, err);
             });
           }
         }
       } else {
-        response = { status: "error", run_id: "", error: parsed.error ?? "Invalid request" };
+        response = {
+          status: "error",
+          run_id: "",
+          error: parsed.error ?? "Invalid request",
+        };
       }
 
       const responseBody = JSON.stringify(response) + "\n";
@@ -262,20 +289,23 @@ export class OvermindDaemon {
     }
 
     if (!this.isModeRequest(payload)) {
-      return { request: null, error: "Invalid request: expected mode_request contract" };
+      return {
+        request: null,
+        error: "Invalid request: expected mode_request contract",
+      };
     }
 
     return { request: payload, error: null };
   }
 
   private isCancelRequest(payload: unknown): payload is CancelRequest {
-    if (!payload || typeof payload !== 'object') {
+    if (!payload || typeof payload !== "object") {
       return false;
     }
 
     const value = payload as Record<string, unknown>;
-    return value.type === 'cancel_request' &&
-      typeof value.run_id === 'string' && value.run_id.length > 0;
+    return value.type === "cancel_request" &&
+      typeof value.run_id === "string" && value.run_id.length > 0;
   }
 
   private isModeRequest(payload: unknown): payload is ModeRequest {
@@ -321,7 +351,10 @@ export class OvermindDaemon {
 
     let connected = false;
     try {
-      const conn = await Deno.connect({ transport: "unix", path: this.socketPath });
+      const conn = await Deno.connect({
+        transport: "unix",
+        path: this.socketPath,
+      });
       connected = true;
       conn.close();
     } catch {
@@ -346,7 +379,8 @@ export class OvermindDaemon {
       if (!output.success) return false;
 
       const processCommand = new TextDecoder().decode(output.stdout).trim();
-      return processCommand.includes("kernel/daemon.ts") || processCommand.includes("overmind daemon");
+      return processCommand.includes("kernel/daemon.ts") ||
+        processCommand.includes("overmind daemon");
     } catch {
       return false;
     }
@@ -363,7 +397,6 @@ export class OvermindDaemon {
       throw err;
     }
   }
-
 }
 
 function resolveBaseDir(baseDir?: string): string {
@@ -386,7 +419,10 @@ function processExists(pid: number): boolean {
   }
 }
 
-async function isDaemonAvailable(pidPath: string, socketPath: string): Promise<boolean> {
+async function isDaemonAvailable(
+  pidPath: string,
+  socketPath: string,
+): Promise<boolean> {
   let pid: number | null = null;
   try {
     const pidRaw = (await Deno.readTextFile(pidPath)).trim();
@@ -451,11 +487,15 @@ async function waitForSocketReady(
         objective: "daemon readiness probe",
         workspace: resolveBaseDir(),
       };
-      await conn.write(new TextEncoder().encode(JSON.stringify(probeRequest) + "\n"));
+      await conn.write(
+        new TextEncoder().encode(JSON.stringify(probeRequest) + "\n"),
+      );
       const responseRaw = await readNdjsonPayload(conn);
       const payload = JSON.parse(responseRaw) as SocketResponse;
       if (!isSocketResponse(payload)) {
-        throw new OvermindError("Malformed daemon response during readiness check");
+        throw new OvermindError(
+          "Malformed daemon response during readiness check",
+        );
       }
       return;
     } catch (err) {
@@ -468,7 +508,9 @@ async function waitForSocketReady(
     }
   }
 
-  throw new OvermindError(`Daemon socket was not ready at ${socketPath}: ${String(lastError)}`);
+  throw new OvermindError(
+    `Daemon socket was not ready at ${socketPath}: ${String(lastError)}`,
+  );
 }
 
 const MAX_NDJSON_BUFFER_SIZE = 1024 * 1024; // 1 MB
@@ -534,7 +576,9 @@ function sleep(ms: number): Promise<void> {
 }
 
 if (import.meta.main) {
-  const daemon = new OvermindDaemon({ baseDir: Deno.env.get("OVERMIND_DAEMON_BASE_DIR") ?? undefined });
+  const daemon = new OvermindDaemon({
+    baseDir: Deno.env.get("OVERMIND_DAEMON_BASE_DIR") ?? undefined,
+  });
   await daemon.start();
   await new Promise<void>(() => {});
 }

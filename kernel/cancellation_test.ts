@@ -1,5 +1,9 @@
 import { assertEquals, assertThrows } from "@std/assert";
-import { CancellationError, CancellationRegistry, throwIfAborted } from "./cancellation.ts";
+import {
+  CancellationError,
+  CancellationRegistry,
+  throwIfAborted,
+} from "./cancellation.ts";
 
 Deno.test("CancellationRegistry.register returns an AbortSignal", () => {
   const registry = new CancellationRegistry();

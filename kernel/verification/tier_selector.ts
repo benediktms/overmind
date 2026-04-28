@@ -51,12 +51,21 @@ export function strategiesForTier(
   config: TierStrategyConfig,
 ): VerificationStrategy[] {
   const lsp: VerificationStrategy = { type: "lsp", files: config.lspFiles };
-  const build: VerificationStrategy = { type: "build", command: config.buildCommand, cwd: config.buildCwd };
-  const test: VerificationStrategy = { type: "test", command: config.testCommand, cwd: config.testCwd };
+  const build: VerificationStrategy = {
+    type: "build",
+    command: config.buildCommand,
+    cwd: config.buildCwd,
+  };
+  const test: VerificationStrategy = {
+    type: "test",
+    command: config.testCommand,
+    cwd: config.testCwd,
+  };
   const agent: VerificationStrategy = {
     type: "agent",
     agentRole: config.agentRole ?? "verifier",
-    prompt: config.agentPrompt ?? "Verify the implementation meets all acceptance criteria.",
+    prompt: config.agentPrompt ??
+      "Verify the implementation meets all acceptance criteria.",
   };
 
   switch (tier) {

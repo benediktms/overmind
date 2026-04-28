@@ -14,9 +14,15 @@ export interface Trigger {
 
 export class TriggerEngine {
   private triggers: Trigger[] = [];
-  private adapters: Map<string, (params: Record<string, unknown>) => Promise<void>> = new Map();
+  private adapters: Map<
+    string,
+    (params: Record<string, unknown>) => Promise<void>
+  > = new Map();
 
-  registerAdapter(name: string, fn: (params: Record<string, unknown>) => Promise<void>): void {
+  registerAdapter(
+    name: string,
+    fn: (params: Record<string, unknown>) => Promise<void>,
+  ): void {
     this.adapters.set(name, fn);
   }
 

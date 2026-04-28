@@ -28,14 +28,14 @@ import {
   transitionToHalfOpen,
 } from "./retry.ts";
 import {
+  type BashAdapter,
   executeAgentStrategy,
   executeBuildStrategy,
   executeCompositeStrategy,
   executeLspStrategy,
   executeTestStrategy,
-  mergeEvidenceResults,
-  type BashAdapter,
   type LspAdapter,
+  mergeEvidenceResults,
   type NeuralLinkAdapter,
   type VerificationContext,
 } from "./strategies.ts";
@@ -116,7 +116,9 @@ export class VerificationPipeline {
         // Evidence staleness check: warn if evidence is old
         const maxAge = this.config.maxEvidenceAgeMs ?? 300_000;
         if (isEvidenceStale(result.evidence.timestamp, maxAge)) {
-          result.recommendations.push("Evidence is stale — consider re-running verification");
+          result.recommendations.push(
+            "Evidence is stale — consider re-running verification",
+          );
         }
         retryState = recordSuccess(retryState);
         return result;
@@ -209,12 +211,20 @@ export class VerificationPipeline {
 
   private aggregateResults(results: VerificationResult[]): VerificationResult {
     const allPassed = results.every((r) => r.outcome === "passed");
-    const confidence = results.length === 0 ? 0 : Math.min(...results.map((r) => r.confidence));
+    const confidence = results.length === 0
+      ? 0
+      : Math.min(...results.map((r) => r.confidence));
     const details = allPassed
       ? `All ${results.length} strategies passed`
-      : `Failed strategies: ${results.filter((r) => r.outcome !== "passed").map((r) => r.details).join("; ")}`;
+      : `Failed strategies: ${
+        results.filter((r) => r.outcome !== "passed").map((r) => r.details)
+          .join("; ")
+      }`;
 
-    const evidence = mergeEvidenceResults(results, { type: "automated", source: "agent" });
+    const evidence = mergeEvidenceResults(results, {
+      type: "automated",
+      source: "agent",
+    });
     const failedTasks = results.flatMap((r) => r.failedTasks);
     const recommendations = results.flatMap((r) => r.recommendations);
 
@@ -228,7 +238,9 @@ export class VerificationPipeline {
     };
   }
 
-  private async executeSingleStrategy(strategy: VerificationStrategy): Promise<VerificationResult> {
+  private async executeSingleStrategy(
+    strategy: VerificationStrategy,
+  ): Promise<VerificationResult> {
     const startTime = Date.now();
 
     try {
@@ -244,13 +256,17 @@ export class VerificationPipeline {
         return await this.executeComposite(strategy);
       }
 
-      return this.createErrorResult(`Unknown strategy type: ${(strategy as { type: string }).type}`);
+      return this.createErrorResult(
+        `Unknown strategy type: ${(strategy as { type: string }).type}`,
+      );
     } catch (error) {
       const duration = Date.now() - startTime;
       return {
         outcome: "failed",
         confidence: 0,
-        details: `Strategy execution error: ${error instanceof Error ? error.message : String(error)}`,
+        details: `Strategy execution error: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
         evidence: {
           trigger: { type: "automated", source: "agent" },
           timestamp: new Date().toISOString(),
@@ -269,7 +285,11 @@ export class VerificationPipeline {
       return this.createErrorResult("LSP adapter not configured");
     }
 
-    const { diagnostics, evidence } = await executeLspStrategy(strategy, this.context, this.deps.lsp);
+    const { diagnostics, evidence } = await executeLspStrategy(
+      strategy,
+      this.context,
+      this.deps.lsp,
+    );
     const errors = diagnostics.filter((d) => d.severity === "error");
     const outcome = errors.length === 0 ? "passed" as const : "failed" as const;
 
@@ -293,12 +313,18 @@ export class VerificationPipeline {
     };
   }
 
-  private async executeBuild(strategy: BuildStrategy): Promise<VerificationResult> {
+  private async executeBuild(
+    strategy: BuildStrategy,
+  ): Promise<VerificationResult> {
     if (!this.deps.bash) {
       return this.createErrorResult("Bash adapter not configured");
     }
 
-    const { buildOutput, evidence } = await executeBuildStrategy(strategy, this.context, this.deps.bash);
+    const { buildOutput, evidence } = await executeBuildStrategy(
+      strategy,
+      this.context,
+      this.deps.bash,
+    );
 
     return {
       outcome: buildOutput.success ? "passed" : "failed",
@@ -314,20 +340,32 @@ export class VerificationPipeline {
         diagnostics: [],
         buildOutput,
       },
-      failedTasks: buildOutput.success
+      failedTasks: buildOutput.success ? [] : [{
+        taskId: "build",
+        reason: `Exit code ${buildOutput.exitCode}`,
+        evidence: [evidence],
+      }],
+      recommendations: buildOutput.success
         ? []
-        : [{ taskId: "build", reason: `Exit code ${buildOutput.exitCode}`, evidence: [evidence] }],
-      recommendations: buildOutput.success ? [] : ["Check build configuration and dependencies"],
+        : ["Check build configuration and dependencies"],
     };
   }
 
-  private async executeTest(strategy: TestStrategy): Promise<VerificationResult> {
+  private async executeTest(
+    strategy: TestStrategy,
+  ): Promise<VerificationResult> {
     if (!this.deps.bash) {
       return this.createErrorResult("Bash adapter not configured");
     }
 
-    const { testResults, evidence } = await executeTestStrategy(strategy, this.context, this.deps.bash);
-    const outcome = testResults.failed === 0 ? "passed" as const : "failed" as const;
+    const { testResults, evidence } = await executeTestStrategy(
+      strategy,
+      this.context,
+      this.deps.bash,
+    );
+    const outcome = testResults.failed === 0
+      ? "passed" as const
+      : "failed" as const;
 
     return {
       outcome,
@@ -343,26 +381,38 @@ export class VerificationPipeline {
         diagnostics: [],
         testResults,
       },
-      failedTasks: outcome === "passed"
+      failedTasks: outcome === "passed" ? [] : [{
+        taskId: "tests",
+        reason: `${testResults.failed} failed`,
+        evidence: [evidence],
+      }],
+      recommendations: outcome === "passed"
         ? []
-        : [{ taskId: "tests", reason: `${testResults.failed} failed`, evidence: [evidence] }],
-      recommendations: outcome === "passed" ? [] : ["Review failed tests and fix underlying issues"],
+        : ["Review failed tests and fix underlying issues"],
     };
   }
 
-  private async executeAgent(strategy: AgentStrategy): Promise<VerificationResult> {
-    if (!this.deps.neuralLink || !this.deps.roomId || !this.deps.participantId || !this.deps.timeoutMs) {
-      return this.createErrorResult("NeuralLink adapter not configured for agent verification");
+  private async executeAgent(
+    strategy: AgentStrategy,
+  ): Promise<VerificationResult> {
+    if (
+      !this.deps.neuralLink || !this.deps.roomId || !this.deps.participantId ||
+      !this.deps.timeoutMs
+    ) {
+      return this.createErrorResult(
+        "NeuralLink adapter not configured for agent verification",
+      );
     }
 
-    const { evidence, passed: agentPassed, details } = await executeAgentStrategy(
-      strategy,
-      this.context,
-      this.deps.neuralLink,
-      this.deps.roomId,
-      this.deps.participantId,
-      this.deps.timeoutMs,
-    );
+    const { evidence, passed: agentPassed, details } =
+      await executeAgentStrategy(
+        strategy,
+        this.context,
+        this.deps.neuralLink,
+        this.deps.roomId,
+        this.deps.participantId,
+        this.deps.timeoutMs,
+      );
 
     return {
       outcome: agentPassed ? "passed" : "failed",
@@ -375,13 +425,26 @@ export class VerificationPipeline {
         artifacts: [evidence],
         diagnostics: [],
       },
-      failedTasks: agentPassed ? [] : [{ taskId: strategy.agentRole, reason: details, evidence: [evidence] }],
-      recommendations: agentPassed ? [] : ["Review agent verification feedback and address issues"],
+      failedTasks: agentPassed ? [] : [{
+        taskId: strategy.agentRole,
+        reason: details,
+        evidence: [evidence],
+      }],
+      recommendations: agentPassed
+        ? []
+        : ["Review agent verification feedback and address issues"],
     };
   }
 
-  private async executeComposite(strategy: CompositeStrategy): Promise<VerificationResult> {
-    return executeCompositeStrategy(strategy, this.context, this.deps, async (s) => this.executeSingleStrategy(s));
+  private async executeComposite(
+    strategy: CompositeStrategy,
+  ): Promise<VerificationResult> {
+    return executeCompositeStrategy(
+      strategy,
+      this.context,
+      this.deps,
+      async (s) => this.executeSingleStrategy(s),
+    );
   }
 
   private createErrorResult(message: string): VerificationResult {
@@ -405,7 +468,8 @@ export class VerificationPipeline {
     return {
       outcome: "stuck",
       confidence: 0,
-      details: `Circuit breaker open: ${retryState.consecutiveFailures} consecutive failures`,
+      details:
+        `Circuit breaker open: ${retryState.consecutiveFailures} consecutive failures`,
       evidence: {
         trigger: { type: "manual", source: "agent" },
         timestamp: new Date().toISOString(),
@@ -413,17 +477,27 @@ export class VerificationPipeline {
         artifacts: [],
         diagnostics: [],
       },
-      failedTasks: [{ taskId: "circuit-breaker", reason: "Open circuit", evidence: [] }],
-      recommendations: ["Circuit breaker is open - manual intervention required"],
+      failedTasks: [{
+        taskId: "circuit-breaker",
+        reason: "Open circuit",
+        evidence: [],
+      }],
+      recommendations: [
+        "Circuit breaker is open - manual intervention required",
+      ],
     };
   }
 
-  private createStuckResult(lastResult: VerificationResult, retryState: RetryState): VerificationResult {
+  private createStuckResult(
+    lastResult: VerificationResult,
+    retryState: RetryState,
+  ): VerificationResult {
     const threshold = this.config.retry.sameFailureThreshold ?? 3;
     return {
       ...lastResult,
       outcome: "stuck",
-      details: `Stuck: same failure repeated ${threshold} times — ${lastResult.details}`,
+      details:
+        `Stuck: same failure repeated ${threshold} times — ${lastResult.details}`,
       recommendations: [
         ...lastResult.recommendations,
         "Same failure detected repeatedly — manual intervention or a different approach is needed",
@@ -431,11 +505,15 @@ export class VerificationPipeline {
     };
   }
 
-  private createTimeoutResult(retryState: RetryState, elapsedMs: number): VerificationResult {
+  private createTimeoutResult(
+    retryState: RetryState,
+    elapsedMs: number,
+  ): VerificationResult {
     return {
       outcome: "timeout",
       confidence: 0,
-      details: `Verification timed out after ${elapsedMs}ms (${retryState.attempt} attempts)`,
+      details:
+        `Verification timed out after ${elapsedMs}ms (${retryState.attempt} attempts)`,
       evidence: {
         trigger: { type: "manual", source: "agent" },
         timestamp: new Date().toISOString(),
@@ -443,15 +521,23 @@ export class VerificationPipeline {
         artifacts: [],
         diagnostics: [],
       },
-      failedTasks: [{ taskId: "timeout", reason: `Timed out after ${elapsedMs}ms`, evidence: [] }],
+      failedTasks: [{
+        taskId: "timeout",
+        reason: `Timed out after ${elapsedMs}ms`,
+        evidence: [],
+      }],
       recommendations: ["Increase maxTotalTimeMs or reduce retry policy"],
     };
   }
 
-  private enhanceResultWithRetryContext(result: VerificationResult, retryState: RetryState): VerificationResult {
+  private enhanceResultWithRetryContext(
+    result: VerificationResult,
+    retryState: RetryState,
+  ): VerificationResult {
     return {
       ...result,
-      details: `${result.details} (after ${retryState.attempt} attempts, ${retryState.totalDelayMs}ms total delay)`,
+      details:
+        `${result.details} (after ${retryState.attempt} attempts, ${retryState.totalDelayMs}ms total delay)`,
     };
   }
 }
@@ -471,7 +557,12 @@ export function createVerificationPipeline(
   options?: { failFast?: boolean },
 ): VerificationPipeline {
   return new VerificationPipeline(
-    { strategies, retry: retryPolicy, collectEvidence: true, failFast: options?.failFast },
+    {
+      strategies,
+      retry: retryPolicy,
+      collectEvidence: true,
+      failFast: options?.failFast,
+    },
     context,
     deps,
   );

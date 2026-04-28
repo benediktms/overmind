@@ -1,4 +1,4 @@
-import type { NeuralLinkPort, WaitForMessage, InboxMessage } from "./types.ts";
+import type { InboxMessage, NeuralLinkPort, WaitForMessage } from "./types.ts";
 import { MessageKind } from "./types.ts";
 
 export interface ParticipationContext {
@@ -65,7 +65,13 @@ export async function waitAndProcessInbox(
   } = opts;
 
   for (let i = 0; i < maxIterations; i++) {
-    const msg = await port.waitFor(roomId, participantId, timeoutMs, undefined, from);
+    const msg = await port.waitFor(
+      roomId,
+      participantId,
+      timeoutMs,
+      undefined,
+      from,
+    );
     if (msg === null) return null; // timeout or disconnect
 
     if (expectedKinds.includes(msg.kind)) {

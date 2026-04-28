@@ -35,8 +35,12 @@ Deno.test("computeDelayMs returns exponential backoff with jitter", () => {
 
 Deno.test("computeDelayMs respects maxDelayMs", () => {
   const state = createRetryState();
-  const delay = computeDelayMs({ ...state, attempt: 100 }, DEFAULT_RETRY_POLICY);
-  const jitterRange = DEFAULT_RETRY_POLICY.maxDelayMs * DEFAULT_RETRY_POLICY.jitterFactor;
+  const delay = computeDelayMs(
+    { ...state, attempt: 100 },
+    DEFAULT_RETRY_POLICY,
+  );
+  const jitterRange = DEFAULT_RETRY_POLICY.maxDelayMs *
+    DEFAULT_RETRY_POLICY.jitterFactor;
   assertEquals(delay >= DEFAULT_RETRY_POLICY.maxDelayMs - jitterRange, true);
   assertEquals(delay <= DEFAULT_RETRY_POLICY.maxDelayMs + jitterRange, true);
 });
@@ -57,7 +61,11 @@ Deno.test("shouldRetry returns true when within limits", () => {
 });
 
 Deno.test("recordSuccess resets consecutiveFailures and circuitState", () => {
-  const state = { ...createRetryState(), consecutiveFailures: 5, circuitState: "open" as const };
+  const state = {
+    ...createRetryState(),
+    consecutiveFailures: 5,
+    circuitState: "open" as const,
+  };
   const newState = recordSuccess(state);
   assertEquals(newState.consecutiveFailures, 0);
   assertEquals(newState.circuitState, "closed");
@@ -83,9 +91,13 @@ Deno.test("incrementAttempt increases attempt counter", () => {
 });
 
 Deno.test("normalizeFailure strips timestamps, line numbers, timing, whitespace", () => {
-  const raw = "Error at 2026-03-30T14:30:29Z in file.ts 42:10  took 123.5ms  extra   spaces";
+  const raw =
+    "Error at 2026-03-30T14:30:29Z in file.ts 42:10  took 123.5ms  extra   spaces";
   const normalized = normalizeFailure(raw);
-  assertEquals(normalized, "Error at <TS> in file.ts <LOC> took <DUR> extra spaces");
+  assertEquals(
+    normalized,
+    "Error at <TS> in file.ts <LOC> took <DUR> extra spaces",
+  );
 });
 
 Deno.test("normalizeFailure returns stable output for identical errors", () => {
@@ -106,7 +118,13 @@ Deno.test("isStuckOnSameFailure returns true at threshold", () => {
   state = recordNormalizedFailure(state, "error A");
   state = recordNormalizedFailure(state, "error A");
   state = recordNormalizedFailure(state, "error A");
-  assertEquals(isStuckOnSameFailure(state, { ...DEFAULT_RETRY_POLICY, sameFailureThreshold: 3 }), true);
+  assertEquals(
+    isStuckOnSameFailure(state, {
+      ...DEFAULT_RETRY_POLICY,
+      sameFailureThreshold: 3,
+    }),
+    true,
+  );
 });
 
 Deno.test("isStuckOnSameFailure returns false with different failures", () => {
@@ -114,7 +132,13 @@ Deno.test("isStuckOnSameFailure returns false with different failures", () => {
   state = recordNormalizedFailure(state, "error A");
   state = recordNormalizedFailure(state, "error B");
   state = recordNormalizedFailure(state, "error A");
-  assertEquals(isStuckOnSameFailure(state, { ...DEFAULT_RETRY_POLICY, sameFailureThreshold: 3 }), false);
+  assertEquals(
+    isStuckOnSameFailure(state, {
+      ...DEFAULT_RETRY_POLICY,
+      sameFailureThreshold: 3,
+    }),
+    false,
+  );
 });
 
 Deno.test("isEvidenceStale returns true for old evidence", () => {
@@ -135,7 +159,10 @@ Deno.test("recordNormalizedFailure appends to recentNormalizedFailures", () => {
   state = recordNormalizedFailure(state, "error at 2026-03-30T11:00:00Z");
   assertEquals(state.recentNormalizedFailures.length, 2);
   // Both should normalize to the same string
-  assertEquals(state.recentNormalizedFailures[0], state.recentNormalizedFailures[1]);
+  assertEquals(
+    state.recentNormalizedFailures[0],
+    state.recentNormalizedFailures[1],
+  );
 });
 
 Deno.test("createRetryState initializes recentNormalizedFailures", () => {

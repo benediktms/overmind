@@ -43,7 +43,9 @@ export interface Planner {
 }
 
 export function isScoutPattern(graph: TaskGraph): boolean {
-  const hasNoDependencies = graph.tasks.every((t) => t.dependencies.length === 0);
+  const hasNoDependencies = graph.tasks.every((t) =>
+    t.dependencies.length === 0
+  );
   const isExplorationFocused = graph.tasks.some((t) =>
     /\b(explore|investigate|research|find|map)\b/i.test(t.title)
   );
@@ -51,8 +53,7 @@ export function isScoutPattern(graph: TaskGraph): boolean {
 }
 
 export function isRelayPattern(graph: TaskGraph): boolean {
-  const hasSequentialDeps = graph.tasks.some((t) => t.dependencies.length > 0
-  );
+  const hasSequentialDeps = graph.tasks.some((t) => t.dependencies.length > 0);
   const hasVerification = graph.tasks.some((t) =>
     /\b(verify|validate|test|check)\b/i.test(t.title)
   );
@@ -83,7 +84,9 @@ export function topologicalSort(graph: TaskGraph): TaskNode[] {
     }
   }
 
-  const queue = graph.tasks.filter((t) => t.dependencies.length === 0).map((t) => t.id);
+  const queue = graph.tasks.filter((t) => t.dependencies.length === 0).map((
+    t,
+  ) => t.id);
   const sorted: TaskNode[] = [];
   const visited = new Set<string>();
 

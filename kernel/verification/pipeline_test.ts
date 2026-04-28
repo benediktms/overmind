@@ -1,6 +1,9 @@
 import { assertEquals } from "@std/assert";
-import { VerificationPipeline, createVerificationPipeline } from "./pipeline.ts";
-import type { LspAdapter, BashAdapter } from "./strategies.ts";
+import {
+  createVerificationPipeline,
+  VerificationPipeline,
+} from "./pipeline.ts";
+import type { BashAdapter, LspAdapter } from "./strategies.ts";
 import type { Diagnostic } from "./types.ts";
 
 const mockLsp: LspAdapter = {
@@ -84,7 +87,10 @@ Deno.test("VerificationPipeline uses agent strategy", async () => {
       messageSent = true;
       return true;
     },
-    waitFor: async () => ({ passed: true, details: "Agent verification passed" }),
+    waitFor: async () => ({
+      passed: true,
+      details: "Agent verification passed",
+    }),
   };
 
   const pipeline = createVerificationPipeline(
@@ -149,7 +155,11 @@ Deno.test("VerificationPipeline failFast skips agent when deterministic fails", 
   const result = await pipeline.verify();
 
   assertEquals(result.outcome !== "passed", true);
-  assertEquals(agentCalled, false, "Agent strategy should not run when deterministic gates fail with failFast");
+  assertEquals(
+    agentCalled,
+    false,
+    "Agent strategy should not run when deterministic gates fail with failFast",
+  );
 });
 
 Deno.test("VerificationPipeline failFast=false runs agent even when deterministic fails", async () => {
@@ -182,7 +192,11 @@ Deno.test("VerificationPipeline failFast=false runs agent even when deterministi
   const result = await pipeline.verify();
 
   assertEquals(result.outcome !== "passed", true);
-  assertEquals(agentCalled, true, "Agent strategy should run when failFast=false");
+  assertEquals(
+    agentCalled,
+    true,
+    "Agent strategy should run when failFast=false",
+  );
 });
 
 Deno.test("VerificationPipeline runs deterministic strategies in parallel", async () => {
@@ -243,7 +257,11 @@ Deno.test("VerificationPipeline failFast defaults to true", async () => {
   const result = await pipeline.verify();
 
   assertEquals(result.outcome !== "passed", true);
-  assertEquals(agentCalled, false, "Agent should be skipped by default failFast=true");
+  assertEquals(
+    agentCalled,
+    false,
+    "Agent should be skipped by default failFast=true",
+  );
 });
 
 Deno.test("VerificationPipeline in-flight guard rejects concurrent verification", async () => {
@@ -292,7 +310,11 @@ Deno.test("VerificationPipeline detects stuck on same failure", async () => {
   const result = await pipeline.verify();
 
   assertEquals(result.outcome !== "passed", true);
-  assertEquals(result.details.startsWith("Stuck:"), true, `Expected 'Stuck:' prefix, got: ${result.details}`);
+  assertEquals(
+    result.details.startsWith("Stuck:"),
+    true,
+    `Expected 'Stuck:' prefix, got: ${result.details}`,
+  );
 });
 
 // --- Outcome model tests ---
@@ -390,7 +412,13 @@ Deno.test("outcome is always a valid VerificationOutcome value", async () => {
     [{ type: "build", command: "exit 1" }],
     { workspace: "/tmp", objective: "test", runId: "run-1" },
     { bash: mockBashFail },
-    { maxAttempts: 1, baseDelayMs: 0, maxDelayMs: 0, exponentialBase: 1, jitterFactor: 0 },
+    {
+      maxAttempts: 1,
+      baseDelayMs: 0,
+      maxDelayMs: 0,
+      exponentialBase: 1,
+      jitterFactor: 0,
+    },
   );
   const failResult = await failPipeline.verify();
   assertEquals(validOutcomes.has(failResult.outcome), true);

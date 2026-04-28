@@ -1,6 +1,14 @@
 import { Kernel } from "./kernel.ts";
-import { BrainAdapter, TaskCreateParams, TaskUpdateParams, MemoryEpisodeParams } from "../adapters/brain/adapter.ts";
-import { NeuralLinkAdapter, MessageKind } from "../adapters/neural_link/adapter.ts";
+import {
+  BrainAdapter,
+  MemoryEpisodeParams,
+  TaskCreateParams,
+  TaskUpdateParams,
+} from "../adapters/brain/adapter.ts";
+import {
+  MessageKind,
+  NeuralLinkAdapter,
+} from "../adapters/neural_link/adapter.ts";
 import { EventType } from "./types.ts";
 import type { AgentDispatcher } from "./agent_dispatcher.ts";
 import { NoopDispatcher } from "./agent_dispatcher.ts";
@@ -12,7 +20,14 @@ export class AdapterRegistry {
   private currentRoomId: string | null = null;
   private dispatcher: AgentDispatcher;
 
-  constructor(kernel: Kernel, options?: { brain?: BrainAdapter; neuralLink?: NeuralLinkAdapter; dispatcher?: AgentDispatcher }) {
+  constructor(
+    kernel: Kernel,
+    options?: {
+      brain?: BrainAdapter;
+      neuralLink?: NeuralLinkAdapter;
+      dispatcher?: AgentDispatcher;
+    },
+  ) {
     this.kernel = kernel;
     this.brain = options?.brain ?? new BrainAdapter();
     this.neuralLink = options?.neuralLink ?? new NeuralLinkAdapter();
@@ -76,7 +91,12 @@ export class AdapterRegistry {
 
     engine.registerAdapter("neural_link_room_open", async (params) => {
       const config = this.kernel.getConfig();
-      const p = params as { roomId?: string; title?: string; participantId?: string; displayName?: string };
+      const p = params as {
+        roomId?: string;
+        title?: string;
+        participantId?: string;
+        displayName?: string;
+      };
       if (this.currentRoomId) return;
 
       const roomId = await this.neuralLink.roomOpen({
@@ -108,7 +128,14 @@ export class AdapterRegistry {
     });
 
     engine.registerAdapter("neural_link_message", async (params) => {
-      const p = params as { roomId?: string; from?: string; kind?: MessageKind; summary?: string; body?: string; to?: string };
+      const p = params as {
+        roomId?: string;
+        from?: string;
+        kind?: MessageKind;
+        summary?: string;
+        body?: string;
+        to?: string;
+      };
       if (!this.currentRoomId) return;
       await this.neuralLink.messageSend({
         roomId: p.roomId ?? this.currentRoomId,

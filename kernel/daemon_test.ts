@@ -6,14 +6,12 @@ import {
   assertStringIncludes,
 } from "@std/assert";
 
-import {
-  ensureDaemonRunning,
-  OvermindDaemon,
-  sendToSocket,
-} from "./daemon.ts";
+import { ensureDaemonRunning, OvermindDaemon, sendToSocket } from "./daemon.ts";
 import { Mode } from "./types.ts";
 
-function createTestPaths(tempDir: string): { baseDir: string; pidPath: string; socketPath: string } {
+function createTestPaths(
+  tempDir: string,
+): { baseDir: string; pidPath: string; socketPath: string } {
   const baseDir = `${tempDir}/.overmind`;
   return {
     baseDir,
@@ -22,7 +20,10 @@ function createTestPaths(tempDir: string): { baseDir: string; pidPath: string; s
   };
 }
 
-async function sendRawSocketRequest(socketPath: string, requestBody: string): Promise<string> {
+async function sendRawSocketRequest(
+  socketPath: string,
+  requestBody: string,
+): Promise<string> {
   const conn = await Deno.connect({ transport: "unix", path: socketPath });
   const encoder = new TextEncoder();
   const decoder = new TextDecoder();
@@ -90,7 +91,11 @@ Deno.test("OvermindDaemon accepts valid mode_request payloads", async () => {
         workspace: tempDir,
       }),
     );
-    const response = JSON.parse(responseText) as { status: string; run_id: string; error: string | null };
+    const response = JSON.parse(responseText) as {
+      status: string;
+      run_id: string;
+      error: string | null;
+    };
 
     assertEquals(response.status, "accepted");
     assertEquals(response.run_id, "run-test-1");
@@ -110,7 +115,11 @@ Deno.test("OvermindDaemon returns error for malformed JSON", async () => {
     await daemon.start();
 
     const responseText = await sendRawSocketRequest(socketPath, "{not-json");
-    const response = JSON.parse(responseText) as { status: string; run_id: string; error: string | null };
+    const response = JSON.parse(responseText) as {
+      status: string;
+      run_id: string;
+      error: string | null;
+    };
 
     assertEquals(response.status, "error");
     assertStringIncludes(response.error ?? "", "Malformed request");
@@ -136,7 +145,11 @@ Deno.test("OvermindDaemon returns error for invalid mode_request shape", async (
         objective: "missing run_id and workspace",
       }),
     );
-    const response = JSON.parse(responseText) as { status: string; run_id: string; error: string | null };
+    const response = JSON.parse(responseText) as {
+      status: string;
+      run_id: string;
+      error: string | null;
+    };
 
     assertEquals(response.status, "error");
     assertStringIncludes(response.error ?? "", "Invalid request");
@@ -244,7 +257,10 @@ Deno.test("ensureDaemonRunning is idempotent with concurrent calls", async () =>
   const { baseDir, pidPath, socketPath } = createTestPaths(tempDir);
 
   try {
-    await Promise.all([ensureDaemonRunning(baseDir), ensureDaemonRunning(baseDir)]);
+    await Promise.all([
+      ensureDaemonRunning(baseDir),
+      ensureDaemonRunning(baseDir),
+    ]);
 
     const pidText = await Deno.readTextFile(pidPath);
     const pid = Number(pidText.trim());
@@ -271,7 +287,10 @@ Deno.test("ensureDaemonRunning respects lockfile and waits for daemon readiness"
   const lockPath = `${baseDir}/daemon.lock`;
 
   await Deno.mkdir(baseDir, { recursive: true });
-  const lockHandle = await Deno.open(lockPath, { write: true, createNew: true });
+  const lockHandle = await Deno.open(lockPath, {
+    write: true,
+    createNew: true,
+  });
 
   try {
     const waitingEnsure = ensureDaemonRunning(baseDir);
@@ -309,7 +328,9 @@ Deno.test("sendToSocket retries until socket becomes available", async () => {
         run_id: req.run_id,
         error: null,
       };
-      await conn.write(new TextEncoder().encode(JSON.stringify(response) + "\n"));
+      await conn.write(
+        new TextEncoder().encode(JSON.stringify(response) + "\n"),
+      );
     } finally {
       conn.close();
       listener.close();
@@ -376,7 +397,10 @@ async function terminateDaemonFromPidFile(pidPath: string): Promise<void> {
   }
 }
 
-async function waitFor(check: () => boolean | Promise<boolean>, timeoutMs: number): Promise<void> {
+async function waitFor(
+  check: () => boolean | Promise<boolean>,
+  timeoutMs: number,
+): Promise<void> {
   const started = Date.now();
   while (Date.now() - started < timeoutMs) {
     if (await check()) {

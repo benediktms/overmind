@@ -1,6 +1,11 @@
 import { Mode } from "../types.ts";
 
-export type IntentType = "trivial" | "explicit" | "exploratory" | "open" | "ambiguous";
+export type IntentType =
+  | "trivial"
+  | "explicit"
+  | "exploratory"
+  | "open"
+  | "ambiguous";
 
 export type InterviewCallback = (question: string) => Promise<string>;
 

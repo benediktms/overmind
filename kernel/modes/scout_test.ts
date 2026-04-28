@@ -1,7 +1,7 @@
 import { assertEquals } from "@std/assert";
 
 import { MessageKind } from "../../adapters/neural_link/adapter.ts";
-import { RunState, type RunContext } from "../types.ts";
+import { type RunContext, RunState } from "../types.ts";
 import type { WaitForMessage } from "../types.ts";
 import { MockBrainAdapter, type MockCall } from "../test_helpers/mock_brain.ts";
 import { MockNeuralLinkAdapter } from "../test_helpers/mock_neural_link.ts";
@@ -24,7 +24,10 @@ function makeContext(overrides: Partial<RunContext> = {}): RunContext {
   };
 }
 
-function mockWaitForQueue(neuralLink: MockNeuralLinkAdapter, values: Array<unknown>): void {
+function mockWaitForQueue(
+  neuralLink: MockNeuralLinkAdapter,
+  values: Array<unknown>,
+): void {
   const queue = [...values];
   neuralLink.waitFor = async (
     roomId: string,
@@ -33,7 +36,10 @@ function mockWaitForQueue(neuralLink: MockNeuralLinkAdapter, values: Array<unkno
     kinds?: string[],
     from?: string[],
   ): Promise<WaitForMessage | null> => {
-    neuralLink.calls.push({ method: "waitFor", args: [roomId, participantId, timeoutMs, kinds, from] });
+    neuralLink.calls.push({
+      method: "waitFor",
+      args: [roomId, participantId, timeoutMs, kinds, from],
+    });
     return (queue.shift() ?? null) as WaitForMessage | null;
   };
 }
@@ -75,7 +81,11 @@ Deno.test("executeScout opens room with run ID in title", async () => {
   await executeScout(makeContext({ run_id: "run-room-9" }), brain, neuralLink);
 
   const roomOpen = callsByMethod(neuralLink.calls, "roomOpen")[0];
-  const params = roomOpen.args[0] as { title: string; participantId: string; displayName: string };
+  const params = roomOpen.args[0] as {
+    title: string;
+    participantId: string;
+    displayName: string;
+  };
   assertEquals(params.title.includes("run-room-9"), true);
   assertEquals(params.participantId, "overmind-scout-lead");
   assertEquals(params.displayName, "Overmind Scout Lead");
@@ -116,11 +126,19 @@ Deno.test("executeScout synthesizes available findings when only two of three ha
   const neuralLink = new MockNeuralLinkAdapter();
   mockWaitForQueue(neuralLink, [
     { from: "probe-1", summary: "deps mapped", body: "kernel/modes/shared.ts" },
-    { from: "probe-2", summary: "tests mapped", body: "kernel/modes/shared_test.ts" },
+    {
+      from: "probe-2",
+      summary: "tests mapped",
+      body: "kernel/modes/shared_test.ts",
+    },
     null,
   ]);
 
-  await executeScout(makeContext({ run_id: "run-partial-2of3" }), brain, neuralLink);
+  await executeScout(
+    makeContext({ run_id: "run-partial-2of3" }),
+    brain,
+    neuralLink,
+  );
 
   const memoryEpisode = callsByMethod(brain.calls, "memoryEpisode")[0];
   const payload = memoryEpisode.args[0] as {
@@ -240,11 +258,15 @@ Deno.test("executeScout uses graph tasks as explore angles when graph is provide
   const messages = callsByMethod(neuralLink.calls, "messageSend");
   assertEquals(messages.length, 2);
   assertEquals(
-    (messages[0].args[0] as { summary: string }).summary.includes("Explore API surface"),
+    (messages[0].args[0] as { summary: string }).summary.includes(
+      "Explore API surface",
+    ),
     true,
   );
   assertEquals(
-    (messages[1].args[0] as { summary: string }).summary.includes("Explore data model"),
+    (messages[1].args[0] as { summary: string }).summary.includes(
+      "Explore data model",
+    ),
     true,
   );
 });
@@ -254,7 +276,14 @@ Deno.test("executeScout dispatches agents via dispatcher for each probe", async 
   const neuralLink = new MockNeuralLinkAdapter();
   const dispatcher = new MockDispatcher();
 
-  await executeScout(makeContext(), brain, neuralLink, undefined, undefined, dispatcher);
+  await executeScout(
+    makeContext(),
+    brain,
+    neuralLink,
+    undefined,
+    undefined,
+    dispatcher,
+  );
 
   assertEquals(dispatcher.dispatched.length, 3);
   assertEquals(dispatcher.dispatched[0].participantId, "probe-1");

@@ -78,8 +78,14 @@ export class MockBrainAdapter {
     return this.taskCommentResult;
   }
 
-  async taskAddExternalId(taskId: string, externalId: string): Promise<boolean> {
-    this.calls.push({ method: "taskAddExternalId", args: [taskId, externalId] });
+  async taskAddExternalId(
+    taskId: string,
+    externalId: string,
+  ): Promise<boolean> {
+    this.calls.push({
+      method: "taskAddExternalId",
+      args: [taskId, externalId],
+    });
     return this.taskAddExternalIdResult;
   }
 
@@ -99,7 +105,10 @@ export class MockBrainAdapter {
     return this.memoryEpisodeResult;
   }
 
-  async memorySearch(_query: string, _options?: { k?: number; tags?: string[] }): Promise<Array<{ goal: string; actions: string; outcome: string }>> {
+  async memorySearch(
+    _query: string,
+    _options?: { k?: number; tags?: string[] },
+  ): Promise<Array<{ goal: string; actions: string; outcome: string }>> {
     this.calls.push({ method: "memorySearch", args: [_query, _options] });
     return [];
   }

@@ -1,11 +1,24 @@
 import { parse } from "@std/toml";
 import { join, resolve } from "@std/path";
 import { exists } from "@std/fs";
-import type { KernelConfig, OvermindConfig, ModesConfig, SkillsConfig } from "./types.ts";
+import type {
+  KernelConfig,
+  ModesConfig,
+  OvermindConfig,
+  SkillsConfig,
+} from "./types.ts";
 import { Mode } from "./types.ts";
 
-const USER_CONFIG_PATH = resolve(Deno.env.get("HOME") ?? "~", ".config", "overmind", "overmind.toml");
-const PROJECT_CONFIG_PATHS = [".overmind/config.toml", ".overmind/overmind.toml"];
+const USER_CONFIG_PATH = resolve(
+  Deno.env.get("HOME") ?? "~",
+  ".config",
+  "overmind",
+  "overmind.toml",
+);
+const PROJECT_CONFIG_PATHS = [
+  ".overmind/config.toml",
+  ".overmind/overmind.toml",
+];
 
 export class ConfigLoader {
   private loaded = false;
@@ -57,7 +70,11 @@ export class ConfigLoader {
       },
       agents: {},
       brain: { enabled: true, brainName: "overmind", taskPrefix: "OVR" },
-      neural_link: { enabled: true, httpUrl: "http://localhost:9961/mcp", roomTtlSeconds: 3600 },
+      neural_link: {
+        enabled: true,
+        httpUrl: "http://localhost:9961/mcp",
+        roomTtlSeconds: 3600,
+      },
       skills: { autoInject: true, projectOverrides: true },
     } as OvermindConfig;
 

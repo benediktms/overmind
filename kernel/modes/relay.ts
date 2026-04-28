@@ -1,5 +1,11 @@
 import { MessageKind, type NeuralLinkPort } from "../types.ts";
-import { Mode, RunState, type RelayStep, type RunContext, type WaitForMessage } from "../types.ts";
+import {
+  Mode,
+  type RelayStep,
+  type RunContext,
+  RunState,
+  type WaitForMessage,
+} from "../types.ts";
 import { drainInbox } from "../coordination.ts";
 import type { VerificationOutcome } from "../verification/types.ts";
 import {
@@ -13,8 +19,12 @@ import {
 } from "./shared.ts";
 import { isObject } from "../utils.ts";
 import type { PersistenceCoordinator } from "../persistence.ts";
-import { topologicalSort, type TaskGraph, type TaskNode } from "../planner/planner.ts";
-import { safeDispatch, type AgentDispatcher } from "../agent_dispatcher.ts";
+import {
+  type TaskGraph,
+  type TaskNode,
+  topologicalSort,
+} from "../planner/planner.ts";
+import { type AgentDispatcher, safeDispatch } from "../agent_dispatcher.ts";
 import { CancellationError, throwIfAborted } from "../cancellation.ts";
 
 const DEFAULT_WAIT_TIMEOUT_MS = 30_000;
@@ -34,9 +44,11 @@ interface BrainRelayAdapter {
     tags?: string[];
     importance?: number;
   }): Promise<boolean>;
-  memorySearch(query: string, options?: { k?: number; tags?: string[] }): Promise<Array<{ goal: string; actions: string; outcome: string }>>;
+  memorySearch(
+    query: string,
+    options?: { k?: number; tags?: string[] },
+  ): Promise<Array<{ goal: string; actions: string; outcome: string }>>;
 }
-
 
 interface VerifyResult {
   outcome: VerificationOutcome;
@@ -57,279 +69,322 @@ export async function executeRelay(
   ctx: RunContext,
   brain: BrainRelayAdapter,
   neuralLink: NeuralLinkPort,
-  persistence: Pick<PersistenceCoordinator, "updateRun" | "completeRun" | "failRun" | "cancelRun"> = NOOP_PERSISTENCE,
+  persistence: Pick<
+    PersistenceCoordinator,
+    "updateRun" | "completeRun" | "failRun" | "cancelRun"
+  > = NOOP_PERSISTENCE,
   graph?: TaskGraph,
   dispatcher?: AgentDispatcher,
 ): Promise<RunContext> {
   let roomIdForCleanup: string | null = null;
   let runCtxForCleanup: RunContext | null = null;
   try {
-  const objectiveSummary = summarizeObjective(ctx.objective);
+    const objectiveSummary = summarizeObjective(ctx.objective);
 
-  let runCtx = createRunContext({
-    run_id: ctx.run_id,
-    mode: Mode.Relay,
-    objective: ctx.objective,
-    workspace: ctx.workspace,
-    brain_task_id: "",
-    room_id: ctx.room_id,
-    max_iterations: ctx.max_iterations,
-    created_at: ctx.created_at,
-  });
-  runCtxForCleanup = runCtx;
-  throwIfAborted(ctx.signal);
+    let runCtx = createRunContext({
+      run_id: ctx.run_id,
+      mode: Mode.Relay,
+      objective: ctx.objective,
+      workspace: ctx.workspace,
+      brain_task_id: "",
+      room_id: ctx.room_id,
+      max_iterations: ctx.max_iterations,
+      created_at: ctx.created_at,
+    });
+    runCtxForCleanup = runCtx;
+    throwIfAborted(ctx.signal);
 
-  const taskId = await brain.taskCreate({
-    title: `[overmind:relay] ${objectiveSummary}`,
-  }) ?? "";
+    const taskId = await brain.taskCreate({
+      title: `[overmind:relay] ${objectiveSummary}`,
+    }) ?? "";
 
-  runCtx = { ...runCtx, brain_task_id: taskId };
-  runCtxForCleanup = runCtx;
+    runCtx = { ...runCtx, brain_task_id: taskId };
+    runCtxForCleanup = runCtx;
 
-  await persistence.updateRun(runCtx, {
-    checkpointSummary: taskId ? "Created relay brain task" : "Running relay without Brain task",
-  });
+    await persistence.updateRun(runCtx, {
+      checkpointSummary: taskId
+        ? "Created relay brain task"
+        : "Running relay without Brain task",
+    });
 
-  if (taskId) {
-    await brain.taskAddExternalId(taskId, `overmind_run_id:${ctx.run_id}`);
-  }
+    if (taskId) {
+      await brain.taskAddExternalId(taskId, `overmind_run_id:${ctx.run_id}`);
+    }
 
-  runCtx = transitionState(runCtx, RunState.Running);
-  await persistence.updateRun(runCtx, {
-    checkpointSummary: "Relay run entered running state",
-  });
+    runCtx = transitionState(runCtx, RunState.Running);
+    await persistence.updateRun(runCtx, {
+      checkpointSummary: "Relay run entered running state",
+    });
 
-  const roomId = await neuralLink.roomOpen({
-    title: `[overmind:relay:${ctx.run_id}] sequential pipeline`,
-    participantId: LEAD_PARTICIPANT_ID,
-    displayName: LEAD_DISPLAY_NAME,
-    purpose: ctx.objective,
-    externalRef: ctx.run_id,
-    interactionMode: "supervisory",
-  });
+    const roomId = await neuralLink.roomOpen({
+      title: `[overmind:relay:${ctx.run_id}] sequential pipeline`,
+      participantId: LEAD_PARTICIPANT_ID,
+      displayName: LEAD_DISPLAY_NAME,
+      purpose: ctx.objective,
+      externalRef: ctx.run_id,
+      interactionMode: "supervisory",
+    });
 
-  if (!roomId) {
-    await persistence.failRun({ ...runCtx, state: RunState.Failed }, "Failed to open relay coordination room");
-    throw new Error("Failed to open relay coordination room");
-  }
+    if (!roomId) {
+      await persistence.failRun(
+        { ...runCtx, state: RunState.Failed },
+        "Failed to open relay coordination room",
+      );
+      throw new Error("Failed to open relay coordination room");
+    }
 
-  runCtx = {
-    ...runCtx,
-    room_id: roomId,
-  };
-  roomIdForCleanup = roomId;
-  runCtxForCleanup = runCtx;
-  await persistence.updateRun(runCtx, {
-    checkpointSummary: `Opened relay coordination room ${roomId}`,
-  });
+    runCtx = {
+      ...runCtx,
+      room_id: roomId,
+    };
+    roomIdForCleanup = roomId;
+    runCtxForCleanup = runCtx;
+    await persistence.updateRun(runCtx, {
+      checkpointSummary: `Opened relay coordination room ${roomId}`,
+    });
 
-  const steps = graph
-    ? topologicalSort(graph).map((node): RelayStep => ({
+    const steps = graph
+      ? topologicalSort(graph).map((node): RelayStep => ({
         title: node.title,
         description: node.description,
         agentRole: node.agentRole,
       }))
-    : getRelaySteps(objectiveSummary);
+      : getRelaySteps(objectiveSummary);
 
-  for (let stepIndex = 0; stepIndex < steps.length; stepIndex += 1) {
-    throwIfAborted(ctx.signal);
-    runCtxForCleanup = runCtx;
-    const step = steps[stepIndex];
-    const stepParticipantId = `${step.agentRole}-step-${stepIndex}`;
-
-    await neuralLink.messageSend({
-      roomId,
-      from: LEAD_PARTICIPANT_ID,
-      kind: MessageKind.Finding,
-      summary: `Execute ${step.title}: ${step.description}`,
-      to: stepParticipantId,
-      body: `Objective: ${ctx.objective}`,
-      threadId: `step-${stepIndex}`,
-    });
-
-    if (dispatcher?.isAvailable()) {
-      await safeDispatch(dispatcher, {
-        agentId: `${ctx.run_id}-${step.agentRole}-step-${stepIndex}`,
-        role: step.agentRole,
-        prompt: `${step.title}: ${step.description}`,
-        roomId,
-        participantId: stepParticipantId,
-        workspace: ctx.workspace,
-      });
-    }
-
-    const handoff = await neuralLink.waitFor(
-      roomId,
-      LEAD_PARTICIPANT_ID,
-      DEFAULT_WAIT_TIMEOUT_MS,
-      [MessageKind.Handoff],
-    );
-    throwIfAborted(ctx.signal);
-
-    await drainInbox(neuralLink, roomId, LEAD_PARTICIPANT_ID, async (_msg) => {
-      // Log interleaved messages; no action needed in supervisory mode
-    });
-
-    await recordStepCompletion(
-      brain,
-      runCtx,
-      `relay_${stepIndex + 1}`,
-      summarizeHandoff(handoff, `${step.title} handoff received`),
-    );
-
-    let verifyPassed = false;
-
-    while (!verifyPassed) {
+    for (let stepIndex = 0; stepIndex < steps.length; stepIndex += 1) {
       throwIfAborted(ctx.signal);
       runCtxForCleanup = runCtx;
-      runCtx = transitionState(runCtx, RunState.Verifying);
-      await persistence.updateRun(runCtx, {
-        checkpointSummary: `Verifying ${step.title}`,
-      });
+      const step = steps[stepIndex];
+      const stepParticipantId = `${step.agentRole}-step-${stepIndex}`;
 
-      const verifierParticipantId = `verifier-step-${stepIndex}-iter-${runCtx.iteration}`;
-      await neuralLink.messageSend({
-        roomId,
-        from: LEAD_PARTICIPANT_ID,
-        kind: MessageKind.ReviewRequest,
-        summary: `Verify ${step.title}`,
-        to: verifierParticipantId,
-        body: `Validate output for ${step.title} in objective: ${ctx.objective}`,
-        threadId: `step-${stepIndex}`,
-      });
-
-      if (dispatcher?.isAvailable()) {
-        await safeDispatch(dispatcher, {
-          agentId: `${ctx.run_id}-verifier-step-${stepIndex}-iter-${runCtx.iteration}`,
-          role: "verifier",
-          prompt: `Verify ${step.title}`,
-          roomId,
-          participantId: verifierParticipantId,
-          workspace: ctx.workspace,
-        });
-      }
-
-      const verifyMessage = await neuralLink.waitFor(
-        roomId,
-        LEAD_PARTICIPANT_ID,
-        DEFAULT_WAIT_TIMEOUT_MS,
-        [MessageKind.ReviewResult],
-      );
-
-      const verifyResult = parseVerifyResult(verifyMessage, step.title);
-      await recordVerifyResult(brain, runCtx, verifyResult.outcome, verifyResult.details);
-
-      if (verifyResult.outcome === "passed") {
-        verifyPassed = true;
-        continue;
-      }
-
-      // Skip fix-loop on stuck/timeout — retrying won't help
-      if (verifyResult.outcome === "stuck" || verifyResult.outcome === "timeout") {
-        runCtx = transitionState(runCtx, RunState.Failed);
-        const reason = `Relay verification ${verifyResult.outcome} for ${step.title}: ${verifyResult.details}`;
-        await recordFailure(brain, runCtx, reason);
-        await neuralLink.roomClose(roomId, "failed");
-
-        const actions = steps.slice(0, stepIndex + 1).map((s) => s.title).join("; ");
-        await brain.memoryEpisode({
-          goal: `Relay objective (${ctx.run_id}): ${objectiveSummary}`,
-          actions,
-          outcome: `${verifyResult.outcome} at ${step.title}: ${verifyResult.details}`,
-          tags: ["overmind", "relay", verifyResult.outcome],
-          importance: 3,
-        });
-
-        await persistence.failRun(runCtx, reason);
-        return runCtx;
-      }
-
-      if (!shouldRetry(runCtx)) {
-        runCtx = transitionState(runCtx, RunState.Failed);
-        await recordFailure(brain, runCtx, `Verification failed for ${step.title}: ${verifyResult.details}`);
-        await neuralLink.roomClose(roomId, "failed");
-
-        const actions = steps.slice(0, stepIndex + 1).map((s) => s.title).join("; ");
-        await brain.memoryEpisode({
-          goal: `Relay objective (${ctx.run_id}): ${objectiveSummary}`,
-          actions,
-          outcome: `Failed at ${step.title}: ${verifyResult.details}`,
-          tags: ["overmind", "relay", "failure"],
-          importance: 3,
-        });
-
-        await persistence.failRun(runCtx, `Verification failed for ${step.title}: ${verifyResult.details}`);
-        return runCtx;
-      }
-
-      runCtx = {
-        ...transitionState(runCtx, RunState.Fixing),
-        iteration: runCtx.iteration + 1,
-      };
-      await persistence.updateRun(runCtx, {
-        checkpointSummary: `Fixing ${step.title} after verification failure`,
-      });
-
-      const fixParticipantId = `${step.agentRole}-step-${stepIndex}-fix-${runCtx.iteration}`;
       await neuralLink.messageSend({
         roomId,
         from: LEAD_PARTICIPANT_ID,
         kind: MessageKind.Finding,
-        summary: `Fix ${step.title} (attempt ${runCtx.iteration})`,
-        to: fixParticipantId,
-        body: `Address verify failure: ${verifyResult.details}`,
+        summary: `Execute ${step.title}: ${step.description}`,
+        to: stepParticipantId,
+        body: `Objective: ${ctx.objective}`,
         threadId: `step-${stepIndex}`,
       });
 
       if (dispatcher?.isAvailable()) {
         await safeDispatch(dispatcher, {
-          agentId: `${ctx.run_id}-${step.agentRole}-step-${stepIndex}-fix-${runCtx.iteration}`,
+          agentId: `${ctx.run_id}-${step.agentRole}-step-${stepIndex}`,
           role: step.agentRole,
-          prompt: `Fix ${step.title}: ${verifyResult.details}`,
+          prompt: `${step.title}: ${step.description}`,
           roomId,
-          participantId: fixParticipantId,
+          participantId: stepParticipantId,
           workspace: ctx.workspace,
         });
       }
 
-      const fixHandoff = await neuralLink.waitFor(
+      const handoff = await neuralLink.waitFor(
         roomId,
         LEAD_PARTICIPANT_ID,
         DEFAULT_WAIT_TIMEOUT_MS,
         [MessageKind.Handoff],
       );
+      throwIfAborted(ctx.signal);
+
+      await drainInbox(
+        neuralLink,
+        roomId,
+        LEAD_PARTICIPANT_ID,
+        async (_msg) => {
+          // Log interleaved messages; no action needed in supervisory mode
+        },
+      );
 
       await recordStepCompletion(
         brain,
         runCtx,
-        `relay_${stepIndex + 1}_fix_${runCtx.iteration}`,
-        summarizeHandoff(fixHandoff, `${step.title} fix handoff received`),
+        `relay_${stepIndex + 1}`,
+        summarizeHandoff(handoff, `${step.title} handoff received`),
       );
+
+      let verifyPassed = false;
+
+      while (!verifyPassed) {
+        throwIfAborted(ctx.signal);
+        runCtxForCleanup = runCtx;
+        runCtx = transitionState(runCtx, RunState.Verifying);
+        await persistence.updateRun(runCtx, {
+          checkpointSummary: `Verifying ${step.title}`,
+        });
+
+        const verifierParticipantId =
+          `verifier-step-${stepIndex}-iter-${runCtx.iteration}`;
+        await neuralLink.messageSend({
+          roomId,
+          from: LEAD_PARTICIPANT_ID,
+          kind: MessageKind.ReviewRequest,
+          summary: `Verify ${step.title}`,
+          to: verifierParticipantId,
+          body:
+            `Validate output for ${step.title} in objective: ${ctx.objective}`,
+          threadId: `step-${stepIndex}`,
+        });
+
+        if (dispatcher?.isAvailable()) {
+          await safeDispatch(dispatcher, {
+            agentId:
+              `${ctx.run_id}-verifier-step-${stepIndex}-iter-${runCtx.iteration}`,
+            role: "verifier",
+            prompt: `Verify ${step.title}`,
+            roomId,
+            participantId: verifierParticipantId,
+            workspace: ctx.workspace,
+          });
+        }
+
+        const verifyMessage = await neuralLink.waitFor(
+          roomId,
+          LEAD_PARTICIPANT_ID,
+          DEFAULT_WAIT_TIMEOUT_MS,
+          [MessageKind.ReviewResult],
+        );
+
+        const verifyResult = parseVerifyResult(verifyMessage, step.title);
+        await recordVerifyResult(
+          brain,
+          runCtx,
+          verifyResult.outcome,
+          verifyResult.details,
+        );
+
+        if (verifyResult.outcome === "passed") {
+          verifyPassed = true;
+          continue;
+        }
+
+        // Skip fix-loop on stuck/timeout — retrying won't help
+        if (
+          verifyResult.outcome === "stuck" || verifyResult.outcome === "timeout"
+        ) {
+          runCtx = transitionState(runCtx, RunState.Failed);
+          const reason =
+            `Relay verification ${verifyResult.outcome} for ${step.title}: ${verifyResult.details}`;
+          await recordFailure(brain, runCtx, reason);
+          await neuralLink.roomClose(roomId, "failed");
+
+          const actions = steps.slice(0, stepIndex + 1).map((s) => s.title)
+            .join("; ");
+          await brain.memoryEpisode({
+            goal: `Relay objective (${ctx.run_id}): ${objectiveSummary}`,
+            actions,
+            outcome:
+              `${verifyResult.outcome} at ${step.title}: ${verifyResult.details}`,
+            tags: ["overmind", "relay", verifyResult.outcome],
+            importance: 3,
+          });
+
+          await persistence.failRun(runCtx, reason);
+          return runCtx;
+        }
+
+        if (!shouldRetry(runCtx)) {
+          runCtx = transitionState(runCtx, RunState.Failed);
+          await recordFailure(
+            brain,
+            runCtx,
+            `Verification failed for ${step.title}: ${verifyResult.details}`,
+          );
+          await neuralLink.roomClose(roomId, "failed");
+
+          const actions = steps.slice(0, stepIndex + 1).map((s) => s.title)
+            .join("; ");
+          await brain.memoryEpisode({
+            goal: `Relay objective (${ctx.run_id}): ${objectiveSummary}`,
+            actions,
+            outcome: `Failed at ${step.title}: ${verifyResult.details}`,
+            tags: ["overmind", "relay", "failure"],
+            importance: 3,
+          });
+
+          await persistence.failRun(
+            runCtx,
+            `Verification failed for ${step.title}: ${verifyResult.details}`,
+          );
+          return runCtx;
+        }
+
+        runCtx = {
+          ...transitionState(runCtx, RunState.Fixing),
+          iteration: runCtx.iteration + 1,
+        };
+        await persistence.updateRun(runCtx, {
+          checkpointSummary: `Fixing ${step.title} after verification failure`,
+        });
+
+        const fixParticipantId =
+          `${step.agentRole}-step-${stepIndex}-fix-${runCtx.iteration}`;
+        await neuralLink.messageSend({
+          roomId,
+          from: LEAD_PARTICIPANT_ID,
+          kind: MessageKind.Finding,
+          summary: `Fix ${step.title} (attempt ${runCtx.iteration})`,
+          to: fixParticipantId,
+          body: `Address verify failure: ${verifyResult.details}`,
+          threadId: `step-${stepIndex}`,
+        });
+
+        if (dispatcher?.isAvailable()) {
+          await safeDispatch(dispatcher, {
+            agentId:
+              `${ctx.run_id}-${step.agentRole}-step-${stepIndex}-fix-${runCtx.iteration}`,
+            role: step.agentRole,
+            prompt: `Fix ${step.title}: ${verifyResult.details}`,
+            roomId,
+            participantId: fixParticipantId,
+            workspace: ctx.workspace,
+          });
+        }
+
+        const fixHandoff = await neuralLink.waitFor(
+          roomId,
+          LEAD_PARTICIPANT_ID,
+          DEFAULT_WAIT_TIMEOUT_MS,
+          [MessageKind.Handoff],
+        );
+
+        await recordStepCompletion(
+          brain,
+          runCtx,
+          `relay_${stepIndex + 1}_fix_${runCtx.iteration}`,
+          summarizeHandoff(fixHandoff, `${step.title} fix handoff received`),
+        );
+      }
     }
-  }
 
-  await neuralLink.roomClose(roomId, "completed");
+    await neuralLink.roomClose(roomId, "completed");
 
-  const actions = steps.map((s, i) => `${s.title}: ${s.agentRole}`).join("; ");
-  const outcome = `Relay completed all ${steps.length} steps successfully`;
+    const actions = steps.map((s, i) => `${s.title}: ${s.agentRole}`).join(
+      "; ",
+    );
+    const outcome = `Relay completed all ${steps.length} steps successfully`;
 
-  await brain.memoryEpisode({
-    goal: `Relay objective (${ctx.run_id}): ${objectiveSummary}`,
-    actions,
-    outcome,
-    tags: ["overmind", "relay", "orchestration"],
-    importance: 2,
-  });
+    await brain.memoryEpisode({
+      goal: `Relay objective (${ctx.run_id}): ${objectiveSummary}`,
+      actions,
+      outcome,
+      tags: ["overmind", "relay", "orchestration"],
+      importance: 2,
+    });
 
-  if (taskId) {
-    await brain.taskComplete(taskId);
-  }
-  runCtx = transitionState(runCtx, RunState.Completed);
-  await persistence.completeRun(runCtx, outcome);
-  return runCtx;
+    if (taskId) {
+      await brain.taskComplete(taskId);
+    }
+    runCtx = transitionState(runCtx, RunState.Completed);
+    await persistence.completeRun(runCtx, outcome);
+    return runCtx;
   } catch (err) {
     if (!(err instanceof CancellationError)) throw err;
-    return await finalizeCancelledRelay(runCtxForCleanup, roomIdForCleanup, neuralLink, persistence);
+    return await finalizeCancelledRelay(
+      runCtxForCleanup,
+      roomIdForCleanup,
+      neuralLink,
+      persistence,
+    );
   }
 }
 
@@ -344,7 +399,9 @@ async function finalizeCancelledRelay(
   }
   const cancelledCtx = transitionState(runCtx, RunState.Cancelled);
   if (roomId) {
-    try { await neuralLink.roomClose(roomId, "cancelled"); } catch { /* best-effort */ }
+    try {
+      await neuralLink.roomClose(roomId, "cancelled");
+    } catch { /* best-effort */ }
   }
   await persistence.cancelRun(cancelledCtx);
   return cancelledCtx;
@@ -392,9 +449,10 @@ function parseVerifyResult(value: unknown, stepTitle: string): VerifyResult {
   }
 
   const passed = value.passed === true;
-  const details = typeof value.details === "string" && value.details.trim().length > 0
-    ? value.details
-    : `${stepTitle} verification ${passed ? "passed" : "failed"}`;
+  const details =
+    typeof value.details === "string" && value.details.trim().length > 0
+      ? value.details
+      : `${stepTitle} verification ${passed ? "passed" : "failed"}`;
 
   return { outcome: passed ? "passed" : "failed", details };
 }

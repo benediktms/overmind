@@ -1,6 +1,6 @@
 import { assertEquals, assertThrows } from "@std/assert";
 
-import { Mode, RunState, type RunContext } from "../types.ts";
+import { Mode, type RunContext, RunState } from "../types.ts";
 import { MockBrainAdapter } from "../test_helpers/mock_brain.ts";
 import {
   createRunContext,
@@ -75,7 +75,12 @@ Deno.test("transitionState rejects invalid transitions", () => {
 });
 
 Deno.test("transitionState allows Cancelled from Pending, Running, Verifying, Fixing", () => {
-  const states = [RunState.Pending, RunState.Running, RunState.Verifying, RunState.Fixing];
+  const states = [
+    RunState.Pending,
+    RunState.Running,
+    RunState.Verifying,
+    RunState.Fixing,
+  ];
 
   for (const state of states) {
     const ctx = makeContext({ state });
@@ -104,7 +109,12 @@ Deno.test("recordStepCompletion writes formatted comment to brain task", async (
   const brain = new MockBrainAdapter();
   const ctx = makeContext({ brain_task_id: "BRN-STEP-1" });
 
-  await recordStepCompletion(brain, ctx, "analyze", "Found all required symbols");
+  await recordStepCompletion(
+    brain,
+    ctx,
+    "analyze",
+    "Found all required symbols",
+  );
 
   assertEquals(brain.calls.length, 1);
   assertEquals(brain.calls[0].method, "taskComment");
@@ -119,7 +129,12 @@ Deno.test("recordVerifyResult writes outcome with details", async () => {
   const brain = new MockBrainAdapter();
   const ctx = makeContext({ brain_task_id: "BRN-VERIFY-1" });
 
-  await recordVerifyResult(brain, ctx, "passed", "deno test --allow-all passed");
+  await recordVerifyResult(
+    brain,
+    ctx,
+    "passed",
+    "deno test --allow-all passed",
+  );
 
   assertEquals(brain.calls.length, 1);
   assertEquals(brain.calls[0].method, "taskComment");

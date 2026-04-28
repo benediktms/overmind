@@ -27,13 +27,22 @@ Deno.test("MockBrainAdapter records core methods too", async () => {
 
   assertEquals(taskId, "BRN-MOCK-1");
   assertEquals(connected, true);
-  assertEquals(brain.calls.map((call) => call.method), ["connect", "taskCreate", "isConnected", "disconnect"]);
+  assertEquals(brain.calls.map((call) => call.method), [
+    "connect",
+    "taskCreate",
+    "isConnected",
+    "disconnect",
+  ]);
 });
 
 Deno.test("MockNeuralLinkAdapter records room and wait calls", async () => {
   const neuralLink = new MockNeuralLinkAdapter();
 
-  await neuralLink.connect({ enabled: true, httpUrl: "http://localhost", roomTtlSeconds: 60 });
+  await neuralLink.connect({
+    enabled: true,
+    httpUrl: "http://localhost",
+    roomTtlSeconds: 60,
+  });
   const roomId = await neuralLink.roomOpen({
     title: "coordination",
     participantId: "agent-1",
@@ -45,9 +54,20 @@ Deno.test("MockNeuralLinkAdapter records room and wait calls", async () => {
     kind: MessageKind.Finding,
     summary: "found something",
   });
-  const message = await neuralLink.waitFor(roomId ?? "room-mock-1", "agent-1", 1000, ["finding"], ["lead"]);
+  const message = await neuralLink.waitFor(
+    roomId ?? "room-mock-1",
+    "agent-1",
+    1000,
+    ["finding"],
+    ["lead"],
+  );
 
   assertEquals(roomId, "room-mock-1");
   assertEquals(message, null);
-  assertEquals(neuralLink.calls.map((call) => call.method), ["connect", "roomOpen", "messageSend", "waitFor"]);
+  assertEquals(neuralLink.calls.map((call) => call.method), [
+    "connect",
+    "roomOpen",
+    "messageSend",
+    "waitFor",
+  ]);
 });

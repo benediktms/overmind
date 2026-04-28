@@ -1,7 +1,11 @@
 import { assert, assertEquals } from "@std/assert";
 
-import { PersistenceCoordinator, readActiveModeState, readCapabilities } from "./persistence.ts";
-import { Mode, RunState, type RunContext } from "./types.ts";
+import {
+  PersistenceCoordinator,
+  readActiveModeState,
+  readCapabilities,
+} from "./persistence.ts";
+import { Mode, type RunContext, RunState } from "./types.ts";
 import { MockBrainAdapter } from "./test_helpers/mock_brain.ts";
 
 function buildRunContext(overrides: Partial<RunContext> = {}): RunContext {
@@ -56,7 +60,10 @@ Deno.test("PersistenceCoordinator marks run inactive on completion", async () =>
   try {
     const ctx = buildRunContext({ workspace: tempDir, brain_task_id: "" });
     await coordinator.startRun(ctx);
-    await coordinator.completeRun({ ...ctx, state: RunState.Completed }, "done");
+    await coordinator.completeRun(
+      { ...ctx, state: RunState.Completed },
+      "done",
+    );
 
     const state = await readActiveModeState(tempDir);
     assertEquals(state, null);

@@ -1,7 +1,7 @@
 import { assertEquals } from "@std/assert";
 
 import { MessageKind } from "../../adapters/neural_link/adapter.ts";
-import { RunState, type RunContext } from "../types.ts";
+import { type RunContext, RunState } from "../types.ts";
 import type { WaitForMessage } from "../types.ts";
 import { MockBrainAdapter, type MockCall } from "../test_helpers/mock_brain.ts";
 import { MockNeuralLinkAdapter } from "../test_helpers/mock_neural_link.ts";
@@ -24,7 +24,10 @@ function makeContext(overrides: Partial<RunContext> = {}): RunContext {
   };
 }
 
-function mockWaitForQueue(neuralLink: MockNeuralLinkAdapter, values: Array<unknown>): void {
+function mockWaitForQueue(
+  neuralLink: MockNeuralLinkAdapter,
+  values: Array<unknown>,
+): void {
   const queue = [...values];
   neuralLink.waitFor = async (
     roomId: string,
@@ -33,7 +36,10 @@ function mockWaitForQueue(neuralLink: MockNeuralLinkAdapter, values: Array<unkno
     kinds?: string[],
     from?: string[],
   ): Promise<WaitForMessage | null> => {
-    neuralLink.calls.push({ method: "waitFor", args: [roomId, participantId, timeoutMs, kinds, from] });
+    neuralLink.calls.push({
+      method: "waitFor",
+      args: [roomId, participantId, timeoutMs, kinds, from],
+    });
     return (queue.shift() ?? null) as WaitForMessage | null;
   };
 }
@@ -64,7 +70,8 @@ Deno.test("executeRelay creates brain task with relay-prefixed title", async () 
   assertEquals(
     taskCreate.args[0],
     {
-      title: "[overmind:relay] Implement relay mode orchestration for a sample objective",
+      title:
+        "[overmind:relay] Implement relay mode orchestration for a sample objective",
     },
   );
 });
@@ -74,7 +81,11 @@ Deno.test("executeRelay adds external run ID to created task", async () => {
   const neuralLink = new MockNeuralLinkAdapter();
   mockWaitForQueue(neuralLink, makeAllPassWaitQueue());
 
-  await executeRelay(makeContext({ run_id: "run-relay-ext-9" }), brain, neuralLink);
+  await executeRelay(
+    makeContext({ run_id: "run-relay-ext-9" }),
+    brain,
+    neuralLink,
+  );
 
   const externalCall = callsByMethod(brain.calls, "taskAddExternalId")[0];
   assertEquals(externalCall.args[0], "BRN-MOCK-1");
@@ -86,10 +97,18 @@ Deno.test("executeRelay opens room with relay lead identity", async () => {
   const neuralLink = new MockNeuralLinkAdapter();
   mockWaitForQueue(neuralLink, makeAllPassWaitQueue());
 
-  await executeRelay(makeContext({ run_id: "run-relay-room-3" }), brain, neuralLink);
+  await executeRelay(
+    makeContext({ run_id: "run-relay-room-3" }),
+    brain,
+    neuralLink,
+  );
 
   const roomOpen = callsByMethod(neuralLink.calls, "roomOpen")[0];
-  const params = roomOpen.args[0] as { title: string; participantId: string; displayName: string };
+  const params = roomOpen.args[0] as {
+    title: string;
+    participantId: string;
+    displayName: string;
+  };
   assertEquals(params.title.includes("run-relay-room-3"), true);
   assertEquals(params.participantId, "overmind-relay-lead");
   assertEquals(params.displayName, "Overmind Relay Lead");
@@ -116,8 +135,18 @@ Deno.test("executeRelay dispatches execute and verify messages for each of three
 
   assertEquals(executeMessages.length, 3);
   assertEquals(verifyMessages.length, 3);
-  assertEquals((executeMessages[0].args[0] as { summary: string }).summary.includes("Step 1"), true);
-  assertEquals((verifyMessages[2].args[0] as { summary: string }).summary.includes("Step 3"), true);
+  assertEquals(
+    (executeMessages[0].args[0] as { summary: string }).summary.includes(
+      "Step 1",
+    ),
+    true,
+  );
+  assertEquals(
+    (verifyMessages[2].args[0] as { summary: string }).summary.includes(
+      "Step 3",
+    ),
+    true,
+  );
 });
 
 Deno.test("executeRelay waits for handoff then review result for each successful step", async () => {
@@ -142,10 +171,12 @@ Deno.test("executeRelay happy path records verify pass comments and returns comp
 
   const finalCtx = await executeRelay(makeContext(), brain, neuralLink);
 
-  const verifyPassComments = callsByMethod(brain.calls, "taskComment").filter((call) => {
-    const comment = call.args[1] as string;
-    return comment.startsWith("[verify:passed]");
-  });
+  const verifyPassComments = callsByMethod(brain.calls, "taskComment").filter(
+    (call) => {
+      const comment = call.args[1] as string;
+      return comment.startsWith("[verify:passed]");
+    },
+  );
   assertEquals(verifyPassComments.length, 3);
   assertEquals(finalCtx.state, RunState.Completed);
   assertEquals(finalCtx.iteration, 0);
@@ -167,10 +198,12 @@ Deno.test("executeRelay fix loop can recover from one verify failure and finish"
 
   const finalCtx = await executeRelay(makeContext(), brain, neuralLink);
 
-  const fixMessages = callsByMethod(neuralLink.calls, "messageSend").filter((call) => {
-    const params = call.args[0] as { summary: string };
-    return params.summary.toLowerCase().includes("fix");
-  });
+  const fixMessages = callsByMethod(neuralLink.calls, "messageSend").filter(
+    (call) => {
+      const params = call.args[0] as { summary: string };
+      return params.summary.toLowerCase().includes("fix");
+    },
+  );
 
   assertEquals(fixMessages.length, 1);
   assertEquals(finalCtx.iteration, 1);
@@ -189,17 +222,23 @@ Deno.test("executeRelay fix loop exhaustion records failure and returns failed c
     { passed: false, details: "verify fail 3" },
   ]);
 
-  const finalCtx = await executeRelay(makeContext({ max_iterations: 2 }), brain, neuralLink);
+  const finalCtx = await executeRelay(
+    makeContext({ max_iterations: 2 }),
+    brain,
+    neuralLink,
+  );
 
   const priorityCalls = callsByMethod(brain.calls, "taskSetPriority");
   assertEquals(priorityCalls.length, 1);
   assertEquals(priorityCalls[0].args[0], "BRN-MOCK-1");
   assertEquals(priorityCalls[0].args[1], 1);
 
-  const failureComments = callsByMethod(brain.calls, "taskComment").filter((call) => {
-    const comment = call.args[1] as string;
-    return comment.startsWith("[failure]");
-  });
+  const failureComments = callsByMethod(brain.calls, "taskComment").filter(
+    (call) => {
+      const comment = call.args[1] as string;
+      return comment.startsWith("[failure]");
+    },
+  );
   assertEquals(failureComments.length, 1);
   assertEquals(finalCtx.state, RunState.Failed);
   assertEquals(finalCtx.iteration, 2);
@@ -245,10 +284,12 @@ Deno.test("executeRelay does not continue to downstream steps after terminal ver
 
   await executeRelay(makeContext({ max_iterations: 2 }), brain, neuralLink);
 
-  const stepComments = callsByMethod(brain.calls, "taskComment").filter((call) => {
-    const comment = call.args[1] as string;
-    return comment.startsWith("[step:");
-  });
+  const stepComments = callsByMethod(brain.calls, "taskComment").filter(
+    (call) => {
+      const comment = call.args[1] as string;
+      return comment.startsWith("[step:");
+    },
+  );
   assertEquals(stepComments.length, 3);
 });
 
@@ -286,22 +327,34 @@ Deno.test("executeRelay uses graph tasks as relay steps in topological order whe
     { passed: true, details: "Impl verified" },
   ]);
 
-  const finalCtx = await executeRelay(makeContext(), brain, neuralLink, undefined, graph);
+  const finalCtx = await executeRelay(
+    makeContext(),
+    brain,
+    neuralLink,
+    undefined,
+    graph,
+  );
 
   assertEquals(finalCtx.state, RunState.Completed);
 
-  const executeMessages = callsByMethod(neuralLink.calls, "messageSend").filter((call) => {
-    const params = call.args[0] as { kind: MessageKind; summary: string };
-    return params.kind === MessageKind.Finding;
-  });
+  const executeMessages = callsByMethod(neuralLink.calls, "messageSend").filter(
+    (call) => {
+      const params = call.args[0] as { kind: MessageKind; summary: string };
+      return params.kind === MessageKind.Finding;
+    },
+  );
 
   assertEquals(executeMessages.length, 2);
   assertEquals(
-    (executeMessages[0].args[0] as { summary: string }).summary.includes("Plan changes"),
+    (executeMessages[0].args[0] as { summary: string }).summary.includes(
+      "Plan changes",
+    ),
     true,
   );
   assertEquals(
-    (executeMessages[1].args[0] as { summary: string }).summary.includes("Implement changes"),
+    (executeMessages[1].args[0] as { summary: string }).summary.includes(
+      "Implement changes",
+    ),
     true,
   );
 });
@@ -312,13 +365,24 @@ Deno.test("executeRelay dispatches agents via dispatcher for each step and verif
   const dispatcher = new MockDispatcher();
   mockWaitForQueue(neuralLink, makeAllPassWaitQueue());
 
-  await executeRelay(makeContext(), brain, neuralLink, undefined, undefined, dispatcher);
+  await executeRelay(
+    makeContext(),
+    brain,
+    neuralLink,
+    undefined,
+    undefined,
+    dispatcher,
+  );
 
   // 3 steps + 3 verifier dispatches = 6 total
   assertEquals(dispatcher.dispatched.length, 6);
 
-  const stepDispatches = dispatcher.dispatched.filter((d) => d.role !== "verifier");
-  const verifierDispatches = dispatcher.dispatched.filter((d) => d.role === "verifier");
+  const stepDispatches = dispatcher.dispatched.filter((d) =>
+    d.role !== "verifier"
+  );
+  const verifierDispatches = dispatcher.dispatched.filter((d) =>
+    d.role === "verifier"
+  );
 
   assertEquals(stepDispatches.length, 3);
   assertEquals(verifierDispatches.length, 3);

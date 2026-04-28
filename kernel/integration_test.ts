@@ -6,7 +6,10 @@ import {
 } from "@std/assert";
 
 import { type BrainAdapter } from "../adapters/brain/adapter.ts";
-import { MessageKind, type NeuralLinkAdapter } from "../adapters/neural_link/adapter.ts";
+import {
+  MessageKind,
+  type NeuralLinkAdapter,
+} from "../adapters/neural_link/adapter.ts";
 import { AdapterRegistry } from "./adapters.ts";
 import { OvermindDaemon } from "./daemon.ts";
 import { Kernel } from "./kernel.ts";
@@ -41,7 +44,10 @@ function createTestPaths(tempDir: string): TestPaths {
   };
 }
 
-async function sendRawSocketRequest(socketPath: string, requestBody: string): Promise<string> {
+async function sendRawSocketRequest(
+  socketPath: string,
+  requestBody: string,
+): Promise<string> {
   const conn = await Deno.connect({ transport: "unix", path: socketPath });
   const encoder = new TextEncoder();
   const decoder = new TextDecoder();
@@ -81,7 +87,10 @@ function callsByMethod(calls: MockCall[], method: string): MockCall[] {
   return calls.filter((call) => call.method === method);
 }
 
-function mockWaitForQueue(neuralLink: MockNeuralLinkAdapter, values: Array<unknown>): void {
+function mockWaitForQueue(
+  neuralLink: MockNeuralLinkAdapter,
+  values: Array<unknown>,
+): void {
   const queue = [...values];
   neuralLink.waitFor = async (
     roomId: string,
@@ -90,7 +99,10 @@ function mockWaitForQueue(neuralLink: MockNeuralLinkAdapter, values: Array<unkno
     kinds?: string[],
     from?: string[],
   ): Promise<WaitForMessage | null> => {
-    neuralLink.calls.push({ method: "waitFor", args: [roomId, participantId, timeoutMs, kinds, from] });
+    neuralLink.calls.push({
+      method: "waitFor",
+      args: [roomId, participantId, timeoutMs, kinds, from],
+    });
     return (queue.shift() ?? null) as WaitForMessage | null;
   };
 }
@@ -103,13 +115,22 @@ function mockWaitForAlwaysPassing(neuralLink: MockNeuralLinkAdapter): void {
     kinds?: string[],
     from?: string[],
   ): Promise<WaitForMessage | null> => {
-    neuralLink.calls.push({ method: "waitFor", args: [roomId, participantId, timeoutMs, kinds, from] });
+    neuralLink.calls.push({
+      method: "waitFor",
+      args: [roomId, participantId, timeoutMs, kinds, from],
+    });
 
     if (kinds?.includes(MessageKind.ReviewResult)) {
-      return { passed: true, details: "verify passed" } as unknown as WaitForMessage;
+      return {
+        passed: true,
+        details: "verify passed",
+      } as unknown as WaitForMessage;
     }
 
-    return { from: "mock-agent", summary: "handoff complete" } as unknown as WaitForMessage;
+    return {
+      from: "mock-agent",
+      summary: "handoff complete",
+    } as unknown as WaitForMessage;
   };
 }
 
@@ -192,21 +213,33 @@ Deno.test("integration: scout lifecycle via daemon completes brain and neural_li
         workspace: harness.tempDir,
       }),
     );
-    const response = JSON.parse(responseText) as { status: string; run_id: string; error: string | null };
+    const response = JSON.parse(responseText) as {
+      status: string;
+      run_id: string;
+      error: string | null;
+    };
 
     assertEquals(response.status, "accepted");
     assertEquals(response.run_id, "run-integration-scout");
     assertEquals(response.error, null);
 
     await delay(MODE_EXECUTION_WAIT_MS);
-    await waitFor(() => callsByMethod(harness.brain.calls, "taskComplete").length === 1);
+    await waitFor(() =>
+      callsByMethod(harness.brain.calls, "taskComplete").length === 1
+    );
 
     assertEquals(callsByMethod(harness.brain.calls, "taskCreate").length, 1);
-    assertEquals(callsByMethod(harness.brain.calls, "taskAddExternalId").length, 1);
+    assertEquals(
+      callsByMethod(harness.brain.calls, "taskAddExternalId").length,
+      1,
+    );
     assertEquals(callsByMethod(harness.brain.calls, "memoryEpisode").length, 1);
     assertEquals(callsByMethod(harness.brain.calls, "taskComplete").length, 1);
     assertEquals(callsByMethod(harness.neuralLink.calls, "roomOpen").length, 1);
-    assertEquals(callsByMethod(harness.neuralLink.calls, "roomClose").length, 1);
+    assertEquals(
+      callsByMethod(harness.neuralLink.calls, "roomClose").length,
+      1,
+    );
   } finally {
     await shutdownHarness(harness);
   }
@@ -234,14 +267,20 @@ Deno.test("integration: relay lifecycle via daemon enforces sequential execute a
         workspace: harness.tempDir,
       }),
     );
-    const response = JSON.parse(responseText) as { status: string; run_id: string; error: string | null };
+    const response = JSON.parse(responseText) as {
+      status: string;
+      run_id: string;
+      error: string | null;
+    };
 
     assertEquals(response.status, "accepted");
     assertEquals(response.run_id, "run-integration-relay");
     assertEquals(response.error, null);
 
     await delay(MODE_EXECUTION_WAIT_MS);
-    await waitFor(() => callsByMethod(harness.brain.calls, "taskComplete").length === 1);
+    await waitFor(() =>
+      callsByMethod(harness.brain.calls, "taskComplete").length === 1
+    );
 
     const relevantCalls = harness.neuralLink.calls.filter((call) => {
       if (call.method === "waitFor") {
@@ -251,13 +290,16 @@ Deno.test("integration: relay lifecycle via daemon enforces sequential execute a
         return false;
       }
       const params = call.args[0] as { summary: string };
-      return params.summary.startsWith("Execute") || params.summary.startsWith("Verify");
+      return params.summary.startsWith("Execute") ||
+        params.summary.startsWith("Verify");
     });
 
     const lifecycle = relevantCalls.map((call) => {
       if (call.method === "waitFor") {
         const kinds = call.args[3] as string[] | undefined;
-        return kinds?.[0] === MessageKind.Handoff ? "wait_handoff" : "wait_review";
+        return kinds?.[0] === MessageKind.Handoff
+          ? "wait_handoff"
+          : "wait_review";
       }
 
       const params = call.args[0] as { summary: string };
@@ -280,7 +322,10 @@ Deno.test("integration: relay lifecycle via daemon enforces sequential execute a
     ]);
 
     assertEquals(callsByMethod(harness.brain.calls, "taskComplete").length, 1);
-    assertEquals(callsByMethod(harness.neuralLink.calls, "roomClose").length, 1);
+    assertEquals(
+      callsByMethod(harness.neuralLink.calls, "roomClose").length,
+      1,
+    );
   } finally {
     await shutdownHarness(harness);
   }
@@ -308,24 +353,36 @@ Deno.test("integration: swarm lifecycle via daemon dispatches parallel wave and 
         workspace: harness.tempDir,
       }),
     );
-    const response = JSON.parse(responseText) as { status: string; run_id: string; error: string | null };
+    const response = JSON.parse(responseText) as {
+      status: string;
+      run_id: string;
+      error: string | null;
+    };
 
     assertEquals(response.status, "accepted");
     assertEquals(response.run_id, "run-integration-swarm");
     assertEquals(response.error, null);
 
     await delay(MODE_EXECUTION_WAIT_MS);
-    await waitFor(() => callsByMethod(harness.brain.calls, "taskComplete").length === 1);
+    await waitFor(() =>
+      callsByMethod(harness.brain.calls, "taskComplete").length === 1
+    );
 
-    const executeDispatches = callsByMethod(harness.neuralLink.calls, "messageSend").filter((call) => {
+    const executeDispatches = callsByMethod(
+      harness.neuralLink.calls,
+      "messageSend",
+    ).filter((call) => {
       const params = call.args[0] as { summary: string; kind: MessageKind };
-      return params.kind === MessageKind.Finding && params.summary.startsWith("Execute");
+      return params.kind === MessageKind.Finding &&
+        params.summary.startsWith("Execute");
     });
     assertEquals(executeDispatches.length, 5);
 
     // Wave 0 (Task 1, no deps) is dispatched before the first waitFor.
     // Subsequent waves are dispatched after their preceding wave's handoffs are collected.
-    const firstWaitIndex = harness.neuralLink.calls.findIndex((call) => call.method === "waitFor");
+    const firstWaitIndex = harness.neuralLink.calls.findIndex((call) =>
+      call.method === "waitFor"
+    );
     const wave0ExecuteIndexes = harness.neuralLink.calls
       .map((call, index) => ({ call, index }))
       .filter(({ call, index }) => {
@@ -339,7 +396,10 @@ Deno.test("integration: swarm lifecycle via daemon dispatches parallel wave and 
 
     // Wave 0 contains exactly 1 task (Task 1 has no dependencies)
     assertEquals(wave0ExecuteIndexes.length, 1);
-    assertEquals(callsByMethod(harness.neuralLink.calls, "roomClose").length, 1);
+    assertEquals(
+      callsByMethod(harness.neuralLink.calls, "roomClose").length,
+      1,
+    );
     assertEquals(callsByMethod(harness.brain.calls, "taskComplete").length, 1);
   } finally {
     await shutdownHarness(harness);
@@ -350,8 +410,15 @@ Deno.test("integration: malformed daemon request returns error response", async 
   const harness = await createHarness();
 
   try {
-    const responseText = await sendRawSocketRequest(harness.paths.socketPath, "{bad-json");
-    const response = JSON.parse(responseText) as { status: string; run_id: string; error: string | null };
+    const responseText = await sendRawSocketRequest(
+      harness.paths.socketPath,
+      "{bad-json",
+    );
+    const response = JSON.parse(responseText) as {
+      status: string;
+      run_id: string;
+      error: string | null;
+    };
 
     assertEquals(response.status, "error");
     assertEquals(response.run_id, "");
@@ -389,8 +456,16 @@ Deno.test("integration: concurrent scout and swarm requests are accepted with di
       ),
     ]);
 
-    const scoutResponse = JSON.parse(scoutResponseText) as { status: string; run_id: string; error: string | null };
-    const swarmResponse = JSON.parse(swarmResponseText) as { status: string; run_id: string; error: string | null };
+    const scoutResponse = JSON.parse(scoutResponseText) as {
+      status: string;
+      run_id: string;
+      error: string | null;
+    };
+    const swarmResponse = JSON.parse(swarmResponseText) as {
+      status: string;
+      run_id: string;
+      error: string | null;
+    };
 
     assertEquals(scoutResponse.status, "accepted");
     assertEquals(swarmResponse.status, "accepted");
@@ -399,7 +474,9 @@ Deno.test("integration: concurrent scout and swarm requests are accepted with di
     assertEquals(swarmResponse.error, null);
 
     await delay(MODE_EXECUTION_WAIT_MS);
-    await waitFor(() => callsByMethod(harness.brain.calls, "taskComplete").length >= 2);
+    await waitFor(() =>
+      callsByMethod(harness.brain.calls, "taskComplete").length >= 2
+    );
 
     assertEquals(callsByMethod(harness.brain.calls, "taskCreate").length, 2);
     assertEquals(callsByMethod(harness.neuralLink.calls, "roomOpen").length, 2);
@@ -439,7 +516,11 @@ Deno.test("integration: valid JSON with invalid mode returns error response", as
         workspace: harness.tempDir,
       }),
     );
-    const response = JSON.parse(responseText) as { status: string; run_id: string; error: string | null };
+    const response = JSON.parse(responseText) as {
+      status: string;
+      run_id: string;
+      error: string | null;
+    };
 
     assertEquals(response.status, "error");
     assertEquals(response.run_id, "");
@@ -469,7 +550,11 @@ Deno.test("integration: scout continues with local persistence when brain task c
         workspace: harness.tempDir,
       }),
     );
-    const response = JSON.parse(responseText) as { status: string; run_id: string; error: string | null };
+    const response = JSON.parse(responseText) as {
+      status: string;
+      run_id: string;
+      error: string | null;
+    };
 
     assertEquals(response.status, "accepted");
 
@@ -479,7 +564,9 @@ Deno.test("integration: scout continues with local persistence when brain task c
     const deadline = Date.now() + 2000;
     while (Date.now() < deadline) {
       try {
-        const content = await Deno.readTextFile(`${harness.tempDir}/.overmind/state/scout-state.json`);
+        const content = await Deno.readTextFile(
+          `${harness.tempDir}/.overmind/state/scout-state.json`,
+        );
         const state = JSON.parse(content) as { active: boolean; state: string };
         if (state.active === false && state.state === RunState.Completed) {
           persistedState = state;

@@ -9,7 +9,8 @@ export interface KernelEvent {
 }
 
 export class EventBus {
-  private listeners: Map<EventType, Array<(event: KernelEvent) => void>> = new Map();
+  private listeners: Map<EventType, Array<(event: KernelEvent) => void>> =
+    new Map();
   private history: KernelEvent[] = [];
   private maxHistory = 100;
 

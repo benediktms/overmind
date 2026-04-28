@@ -2,8 +2,14 @@ export type { AgentRole, BaseAgentRole } from "./agents/roles.ts";
 import type { AgentRole } from "./agents/roles.ts";
 
 export { MessageKind } from "../adapters/neural_link/adapter.ts";
-export type { RoomOpenParams, MessageSendParams } from "../adapters/neural_link/adapter.ts";
-import type { RoomOpenParams, MessageSendParams } from "../adapters/neural_link/adapter.ts";
+export type {
+  MessageSendParams,
+  RoomOpenParams,
+} from "../adapters/neural_link/adapter.ts";
+import type {
+  MessageSendParams,
+  RoomOpenParams,
+} from "../adapters/neural_link/adapter.ts";
 
 export enum Mode {
   Scout = "scout",
@@ -187,18 +193,40 @@ export interface OvermindConfig {
 export interface NeuralLinkPort {
   // Room lifecycle
   roomOpen(params: RoomOpenParams): Promise<string | null>;
-  roomJoin(roomId: string, participantId: string, displayName: string, role?: string): Promise<boolean>;
-  roomLeave(roomId: string, participantId: string, timeoutMs?: number): Promise<boolean>;
+  roomJoin(
+    roomId: string,
+    participantId: string,
+    displayName: string,
+    role?: string,
+  ): Promise<boolean>;
+  roomLeave(
+    roomId: string,
+    participantId: string,
+    timeoutMs?: number,
+  ): Promise<boolean>;
   roomClose(roomId: string, resolution: string): Promise<boolean>;
 
   // Messaging
   messageSend(params: MessageSendParams): Promise<boolean>;
   inboxRead(roomId: string, participantId: string): Promise<InboxMessage[]>;
-  messageAck(roomId: string, participantId: string, messageIds: string[]): Promise<boolean>;
-  waitFor(roomId: string, participantId: string, timeoutMs: number, kinds?: string[], from?: string[]): Promise<WaitForMessage | null>;
+  messageAck(
+    roomId: string,
+    participantId: string,
+    messageIds: string[],
+  ): Promise<boolean>;
+  waitFor(
+    roomId: string,
+    participantId: string,
+    timeoutMs: number,
+    kinds?: string[],
+    from?: string[],
+  ): Promise<WaitForMessage | null>;
 
   // Introspection
-  threadSummarize(roomId: string, threadId?: string): Promise<RoomSummary | null>;
+  threadSummarize(
+    roomId: string,
+    threadId?: string,
+  ): Promise<RoomSummary | null>;
 
   // Connection
   isConnected(): boolean;
