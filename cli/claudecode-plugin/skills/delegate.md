@@ -1,6 +1,6 @@
 ---
 name: delegate
-description: Delegation skill for Overmind orchestration. Use when work should be handed off to scout, relay, or swarm instead of being done directly.
+description: Hands off an objective to the Overmind kernel for coordinated execution in scout, relay, or swarm mode. Use when the task spans multiple files, needs parallel investigation, or needs a verify/fix loop — and direct single-pass work would be insufficient.
 triggers:
   - delegate to overmind
   - hand off work
@@ -9,57 +9,47 @@ triggers:
   - multi-file implementation
 ---
 
-# Delegate
+<when_to_use> Delegate when the objective is too broad, too coupled, or too
+risky for a single direct pass. Signals: spans multiple files, needs parallel
+investigation, or needs a verify/fix loop.
 
-## When to delegate (vs direct work)
+Work directly when the change is trivial, local, and obvious: a one-line fix, a
+small clarification, or a single command. If you can finish confidently without
+coordination overhead, do not delegate. </when_to_use>
 
-Delegate when the objective is too broad, too coupled, or too risky for a single direct pass.
-Use Overmind when the task spans multiple files, needs parallel investigation, or needs a verify/fix loop.
+<protocol>
+Call `mcp__overmind__overmind_delegate` with the objective and mode:
 
-Work directly when the change is trivial, local, and obvious: a one-line fix, a small clarification, or a single command.
-If you can finish confidently without coordination overhead, do not delegate.
-
-## How to delegate (MCP tool usage)
-
-Use the Overmind MCP tool to hand off the objective:
-
-```text
+```
 mcp__overmind__overmind_delegate(objective: string, mode?: "scout"|"relay"|"swarm", priority?: 0-4)
 ```
 
-State the outcome you want, not just the file names.
-Include the success criteria, any known constraints, and the priority so the orchestration layer can schedule appropriately.
+State the outcome you want, not just the file names. Include success criteria,
+known constraints, and priority.
 
-If you need status or need to stop the work, use the companion MCP endpoints:
-- `mcp__overmind__overmind_status`
-- `mcp__overmind__overmind_cancel`
+Mode selection:
 
-## Mode selection guide
+- **scout** — unknown territory; shape of the work is still unclear.
+- **relay** — clear requirements; solution path is known and should move through
+  ordered plan/execute/verify steps.
+- **swarm** — large scope with independent subtasks; work can be split and
+  verified after parallel execution.
 
-- Unknown territory → Scout
-- Clear requirements → Relay
-- Large scope, independent subtasks → Swarm
+Companion endpoints:
 
-Scout gathers context first, so use it when the shape of the work is still uncertain.
-Relay is best when the solution path is known and should move through ordered plan/execute/verify steps.
-Swarm is best when the work can be split cleanly and verified after parallel execution.
+- `mcp__overmind__overmind_status` — inspect current orchestration state.
+- `mcp__overmind__overmind_cancel(objective_id)` — stop an active run.
+  </protocol>
 
-## Priority scale
+<examples>
+- "Update the API, client, and tests in parallel" → swarm, priority 1.
+- "Investigate why this import chain fails" → scout, priority 2.
+- "Implement the approved fix and verify it step by step" → relay, priority 1.
+</examples>
 
-- 0 — critical
-- 1 — high
-- 2 — medium
-- 3 — low
-- 4 — backlog
+<constraints>
+Priority scale: 0 critical, 1 high, 2 medium, 3 low, 4 backlog. Reserve 0 for work that should interrupt everything else.
 
-Use the smallest priority that still reflects urgency.
-Reserve 0 for work that should interrupt everything else.
-
-## Examples
-
-- "Delegate to Overmind to update the API, client, and tests in parallel" → Swarm, priority 1.
-- "Hand off work to investigate why this import chain fails" → Scout, priority 2.
-- "Orchestrate task: implement the approved fix and verify it step by step" → Relay, priority 1.
-
-Good delegation is specific, bounded, and testable.
-If the objective cannot be described clearly enough to verify, gather more context first.
+Good delegation is specific, bounded, and testable. If the objective cannot be
+described clearly enough to verify, gather more context with scout first.
+</constraints>

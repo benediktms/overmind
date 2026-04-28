@@ -1,6 +1,6 @@
 ---
 name: setup
-description: Setup skill for Overmind. Use for first-run configuration, project initialization, and connection checks before active work begins.
+description: First-run configuration and connection validation for an Overmind workspace. Use when initializing Overmind in a fresh repository, reconfiguring an existing one, or verifying that the environment is ready before delegating work.
 triggers:
   - setup overmind
   - configure overmind
@@ -9,62 +9,35 @@ triggers:
   - overmind setup
 ---
 
-# Overmind Setup
+## Setup sequence
 
-## What it does
+1. Check whether `.overmind/` exists; create the directory structure if missing.
+2. Write or refresh local configuration values (brain endpoint, neural_link URL,
+   workspace identifiers, environment variables).
+3. Validate brain services are reachable via `mcp__brain__status`.
+4. Validate neural_link can accept room and message traffic via
+   `mcp__neural_link__room_open` + immediate `mcp__neural_link__room_close`.
+5. Confirm the workspace is ready for the selected execution mode.
 
-Setup is the first-run skill for preparing an Overmind workspace.
-It covers project-level configuration, local state, and connection validation before any mode starts.
+When project-level and user-level config values conflict, prefer the
+project-specific settings in `.overmind/`. If a required value is missing, stop
+with a clear explanation of what must be provided before proceeding.
 
-The goal is to leave the repository ready for normal Overmind execution.
-That includes creating the `.overmind/` directory structure and confirming brain and neural_link access.
-## Usage
+## Required configuration
 
-Use this skill when you are setting up Overmind in a fresh repository or reconfiguring an existing one.
-It is the right entry point when the user asks to initialize, configure, or bootstrap Overmind.
-Typical situations include:
-
-- first time running Overmind in a project
-- moving Overmind into a new workspace
-- repairing a broken local configuration
-- verifying that the environment is ready before delegate work starts
-## First-run steps
-
-The expected setup sequence is:
-
-1. Detect whether `.overmind/` already exists.
-2. Create the project directory structure if it is missing.
-3. Write or refresh the local configuration values.
-4. Validate that brain services are reachable.
-5. Validate that neural_link can accept room and message traffic.
-6. Confirm the workspace is ready for the selected execution mode.
-
-This skill is descriptive only.
-Actual setup actions are implemented elsewhere and should follow this order.
-## Configuration
-
-Overmind setup usually combines project-local and user-level configuration.
-The project layer belongs in `.overmind/`, while shared defaults live in the user's Overmind config.
-
-Common settings to confirm:
-
-- brain endpoint or project binding
-- neural_link URL or room settings
-- workspace identifiers used by the active mode
-- any required environment variables for CLI integration
-
-When values conflict, prefer the project-specific settings for this repository.
-If a required value is missing, stop with a clear explanation of what needs to be provided.
+- Brain endpoint or project binding.
+- `OVERMIND_NEURAL_LINK_URL` — neural_link MCP URL.
+- `OVERMIND_KERNEL_HTTP_URL` — kernel HTTP endpoint (if using HTTP transport).
+- Workspace identifiers used by the active mode.
 
 ## Troubleshooting
 
-If setup fails, check the basics first:
+| Symptom                            | Check                                           |
+| ---------------------------------- | ----------------------------------------------- |
+| `.overmind/` missing or unwritable | File permissions or wrong working directory     |
+| Brain unreachable                  | Authentication, endpoint URL, network access    |
+| neural_link offline                | `OVERMIND_NEURAL_LINK_URL` value, MCP server    |
+| Config mismatch                    | Project vs. user layer conflict; prefer project |
+| Partial state from previous run    | Inspect existing files before overwriting       |
 
-- `.overmind/` was not created or is not writable
-- brain is unavailable or not authenticated
-- neural_link is offline or pointing at the wrong URL
-- config values do not match the current workspace
-- a previous setup left partial state behind
-
-The best recovery path is usually to fix the configuration, then rerun setup from the beginning.
-If partial files already exist, inspect them before overwriting anything important.
+If any check fails, fix the configuration and re-run setup from the beginning.
