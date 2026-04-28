@@ -76,5 +76,5 @@ room and marks the run `cancelled`.
 - Every agent handoff must include concrete artifacts (file paths, diagnostics, test outputs).
 - Track wave number and verification result so progress is observable across iterations.
 - Verification gates the integrated system, not isolated subtask success.
-- Escalate when subtasks cannot be kept independent and repeated overlap causes churn, or when verification fails repeatedly without narrowing root cause.
+- Escalate when subtasks cannot be kept independent and repeated overlap causes churn, when verification fails repeatedly without narrowing root cause, or when security, compliance, or data-integrity risk is discovered during a wave.
 </constraints>

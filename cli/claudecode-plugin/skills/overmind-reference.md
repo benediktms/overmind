@@ -63,7 +63,7 @@ Full catalog in `kernel/agents/catalog.ts` (`BaseAgentRole`). Most-used roles:
 
 | Setting                    | Meaning                              |
 | -------------------------- | ------------------------------------ |
-| `NEURAL_LINK_URL`          | MCP URL for neural_link coordination |
+| `OVERMIND_NEURAL_LINK_URL` | MCP URL for neural_link coordination |
 | `OVERMIND_ROOM_ID`         | Preconfigured room identifier        |
 | `OVERMIND_KERNEL_HTTP_URL` | Direct kernel HTTP endpoint          |
 | `OVERMIND_PARTICIPANT_ID`  | Swarm participant identity           |

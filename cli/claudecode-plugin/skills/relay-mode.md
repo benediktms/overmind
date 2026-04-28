@@ -42,7 +42,8 @@ a planner-supplied TaskGraph in topological order. For each step:
 7. If outcome is `stuck` or `timeout`: marks the run `failed` immediately
    (retrying won't help).
 
-Room interaction mode: `supervisory`. Brain task tagged `[overmind:relay]`.
+Room interaction mode: `supervisory`. Brain task title prefix:
+`[overmind:relay]`.
 
 Cancellation: signal via `mcp__overmind__overmind_cancel`; the kernel closes the
 room and marks the run `cancelled`.
@@ -64,6 +65,6 @@ room and marks the run `cancelled`.
 <constraints>
 - Keep one active pipeline step at a time to preserve order.
 - Require concrete evidence for pass/fail (tests, diagnostics, build output, or artifact).
-- Escalate when the same step fails verification repeatedly without narrowing root cause, or when a required dependency for the next step is blocked.
+- Escalate when the same step fails verification repeatedly without narrowing root cause, when a required dependency for the next step is blocked, or when security, compliance, or data-integrity risk is discovered during execution.
 - Resume only after gate criteria are clarified and the failed step is re-verified successfully.
 </constraints>

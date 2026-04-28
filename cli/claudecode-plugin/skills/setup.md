@@ -1,43 +1,37 @@
 ---
 name: setup
-description: First-run configuration and connection validation for an Overmind workspace. Use when initializing Overmind in a fresh repository, reconfiguring an existing one, or verifying that the environment is ready before delegating work.
+description: Validates that an Overmind workspace is wired up correctly before delegating work. There is no first-run bootstrap — configuration lives in environment variables read by the bridge. Use to surface missing env vars, confirm brain reachability, and confirm the neural_link MCP is responsive.
 triggers:
   - setup overmind
   - configure overmind
   - initialize overmind
-  - first run
+  - verify overmind
   - overmind setup
 ---
 
-## Setup sequence
+## Required environment variables
 
-1. Check whether `.overmind/` exists; create the directory structure if missing.
-2. Write or refresh local configuration values (brain endpoint, neural_link URL,
-   workspace identifiers, environment variables).
-3. Validate brain services are reachable via `mcp__brain__status`.
-4. Validate neural_link can accept room and message traffic via
-   `mcp__neural_link__room_open` + immediate `mcp__neural_link__room_close`.
-5. Confirm the workspace is ready for the selected execution mode.
+The bridge reads these from the environment. None has a default; missing values
+fail at the first MCP call.
 
-When project-level and user-level config values conflict, prefer the
-project-specific settings in `.overmind/`. If a required value is missing, stop
-with a clear explanation of what must be provided before proceeding.
-
-## Required configuration
-
-- Brain endpoint or project binding.
 - `OVERMIND_NEURAL_LINK_URL` — neural_link MCP URL.
-- `OVERMIND_KERNEL_HTTP_URL` — kernel HTTP endpoint (if using HTTP transport).
-- Workspace identifiers used by the active mode.
+- `OVERMIND_KERNEL_HTTP_URL` — kernel HTTP endpoint.
+- `OVERMIND_PARTICIPANT_ID` — identity used when joining rooms.
+- `OVERMIND_ROOM_ID` — preconfigured room identifier (optional, only when
+  reusing an existing room).
 
-## Troubleshooting
+## Validation sequence
 
-| Symptom                            | Check                                           |
-| ---------------------------------- | ----------------------------------------------- |
-| `.overmind/` missing or unwritable | File permissions or wrong working directory     |
-| Brain unreachable                  | Authentication, endpoint URL, network access    |
-| neural_link offline                | `OVERMIND_NEURAL_LINK_URL` value, MCP server    |
-| Config mismatch                    | Project vs. user layer conflict; prefer project |
-| Partial state from previous run    | Inspect existing files before overwriting       |
+1. Confirm each required env var is set in the current shell.
+2. Probe brain via `mcp__brain__status`. A non-error response means the brain
+   MCP is reachable.
+3. Probe neural_link by opening then immediately closing a throwaway room:
+   `mcp__neural_link__room_open` followed by `mcp__neural_link__room_close` with
+   `resolution: "completed"`.
+4. Report any failure with the specific env var, MCP tool, and observed error.
 
-If any check fails, fix the configuration and re-run setup from the beginning.
+## Out of scope
+
+There is no `.overmind/` directory or first-run bootstrap. The plugin reads env
+vars and writes only what the active mode requires (e.g., brain task IDs,
+neural_link room IDs). Do not invent setup steps not listed above.
