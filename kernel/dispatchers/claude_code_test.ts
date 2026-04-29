@@ -130,9 +130,12 @@ Deno.test("ClaudeCodeDispatcher.dispatch creates per-run log directory", async (
       workspace: tempDir,
     });
 
-    const expectedLog = join(logsDir, RUN_ID, `${agentId}.log`);
-    const stat = await Deno.stat(expectedLog);
-    assertEquals(stat.isFile, true);
+    const stdoutLog = join(logsDir, RUN_ID, `${agentId}.stdout.log`);
+    const stderrLog = join(logsDir, RUN_ID, `${agentId}.stderr.log`);
+    const stdoutStat = await Deno.stat(stdoutLog);
+    const stderrStat = await Deno.stat(stderrLog);
+    assertEquals(stdoutStat.isFile, true);
+    assertEquals(stderrStat.isFile, true);
   } finally {
     await Deno.remove(tempDir, { recursive: true }).catch(() => {});
     await Deno.remove(logsDir, { recursive: true }).catch(() => {});

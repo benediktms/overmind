@@ -95,22 +95,31 @@ export class ClaudeCodeDispatcher implements AgentDispatcher {
     }
 
     const runId = extractRunId(request.agentId);
-    const logPath = await this.openLogFile(request, runId);
+    const logBase = await this.openLogBase(request, runId);
     const env = buildEnv(request, runId);
     const args = buildArgs(request);
 
-    let logFile: Deno.FsFile | null = null;
+    let stdoutFile: Deno.FsFile | null = null;
+    let stderrFile: Deno.FsFile | null = null;
     try {
-      logFile = await Deno.open(logPath, {
+      stdoutFile = await Deno.open(`${logBase}.stdout.log`, {
+        write: true,
+        create: true,
+        truncate: true,
+      });
+      stderrFile = await Deno.open(`${logBase}.stderr.log`, {
         write: true,
         create: true,
         truncate: true,
       });
     } catch (err) {
+      try {
+        stdoutFile?.close();
+      } catch { /* ignore */ }
       const error = err instanceof Error ? err.message : String(err);
       return {
         launched: false,
-        error: `failed to open log file ${logPath}: ${error}`,
+        error: `failed to open log file at ${logBase}.{stdout,stderr}.log: ${error}`,
       };
     }
 
@@ -126,7 +135,10 @@ export class ClaudeCodeDispatcher implements AgentDispatcher {
       });
     } catch (err) {
       try {
-        logFile.close();
+        stdoutFile.close();
+      } catch { /* ignore */ }
+      try {
+        stderrFile.close();
       } catch { /* ignore */ }
       const error = err instanceof Error ? err.message : String(err);
       return { launched: false, error: `spawn failed: ${error}` };
@@ -134,8 +146,9 @@ export class ClaudeCodeDispatcher implements AgentDispatcher {
 
     this.inflight.set(request.agentId, { runId, child });
 
-    const finalLogFile = logFile;
-    pipeToFile(child, finalLogFile, () => {
+    const stdoutCapture = stdoutFile;
+    const stderrCapture = stderrFile;
+    pipeToFiles(child, stdoutCapture, stderrCapture, () => {
       this.inflight.delete(request.agentId);
     });
 
@@ -169,7 +182,7 @@ export class ClaudeCodeDispatcher implements AgentDispatcher {
     return Array.from(this.inflight.keys());
   }
 
-  private async openLogFile(
+  private async openLogBase(
     request: AgentDispatchRequest,
     runId: string,
   ): Promise<string> {
@@ -178,7 +191,7 @@ export class ClaudeCodeDispatcher implements AgentDispatcher {
       : join(request.workspace, this.logsDir);
     const runDir = join(baseDir, runId);
     await Deno.mkdir(runDir, { recursive: true });
-    return join(runDir, `${request.agentId}.log`);
+    return join(runDir, request.agentId);
   }
 }
 
@@ -267,18 +280,26 @@ If any step fails, post a handoff with kind=handoff, summary="error: <reason>",
 body=<details> before exiting. Never silently exit.`;
 }
 
-async function pipeToFile(
+async function pipeToFiles(
   child: Deno.ChildProcess,
-  file: Deno.FsFile,
+  stdoutFile: Deno.FsFile,
+  stderrFile: Deno.FsFile,
   onExit: () => void,
 ): Promise<void> {
-  const stdoutCopy = copyStream(child.stdout, file.writable, true);
-  const stderrCopy = copyStream(child.stderr, file.writable, true);
+  // Two files because a WritableStream can only have one acquired writer at
+  // a time — interleaving stdout+stderr into one file would require a
+  // TransformStream merge, which is more code than it's worth here. Keep
+  // them separate; readers can `cat` them in either order.
+  const stdoutCopy = copyStream(child.stdout, stdoutFile.writable);
+  const stderrCopy = copyStream(child.stderr, stderrFile.writable);
   try {
     await Promise.allSettled([stdoutCopy, stderrCopy, child.status]);
   } finally {
     try {
-      file.close();
+      stdoutFile.close();
+    } catch { /* already closed */ }
+    try {
+      stderrFile.close();
     } catch { /* already closed */ }
     onExit();
   }
@@ -287,12 +308,11 @@ async function pipeToFile(
 async function copyStream(
   source: ReadableStream<Uint8Array>,
   sink: WritableStream<Uint8Array>,
-  preventClose: boolean,
 ): Promise<void> {
   try {
-    await source.pipeTo(sink, { preventClose });
+    await source.pipeTo(sink);
   } catch {
-    // Ignore — child may have closed early; we still want the other stream
-    // to finish flushing into the file before we close it.
+    // Ignore — child may have closed early. The file will still close in
+    // the caller's `finally`.
   }
 }
