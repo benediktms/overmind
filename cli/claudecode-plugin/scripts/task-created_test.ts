@@ -74,11 +74,9 @@ Deno.test("handler exits 0 with flag on and valid payload", async () => {
   assertEquals(out.continue, true);
 });
 
-// --- no-op when flag off ---
+// --- current behavior: exits 0 when flag is unset (no gate logic yet) ---
 
-Deno.test("handler exits 0 without reading stdin when flag is off", async () => {
-  // TODO(ovr-396.23.13.2): when real gate logic lands, this test should assert
-  // that invalid tasks cause exit 1. For now the no-op path exits 0.
+Deno.test("exits 0 when CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS is unset", async () => {
   const cmd = new Deno.Command(Deno.execPath(), {
     args: [
       "run",
@@ -96,3 +94,15 @@ Deno.test("handler exits 0 without reading stdin when flag is off", async () => 
   const out = JSON.parse(new TextDecoder().decode(stdout));
   assertEquals(out.continue, true);
 });
+
+// --- placeholder: gate logic not yet implemented ---
+
+Deno.test.ignore(
+  "TODO(ovr-396.23.13.3): asserts exit 2 when task violates swimlane overlap or acceptance criteria",
+  () => {
+    // Implement once TaskCreated gate logic lands (ovr-396.23.13.3:
+    // TaskCreated swimlane overlap + acceptance criteria check). Expect handler
+    // to emit { continue: false } and exit non-zero when a created task has
+    // missing required fields or violates swimlane constraints.
+  },
+);

@@ -88,11 +88,9 @@ Deno.test("handler exits 0 with flag on and valid payload", async () => {
   assertEquals(out.continue, true);
 });
 
-// --- no-op when flag off ---
+// --- current behavior: exits 0 when flag is unset (no gate logic yet) ---
 
-Deno.test("handler exits 0 without reading stdin when flag is off", async () => {
-  // TODO(ovr-396.23.13.3): when real gate logic lands, this test should assert
-  // that incomplete tasks cause exit 1. For now the no-op path exits 0.
+Deno.test("exits 0 when CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS is unset", async () => {
   const cmd = new Deno.Command(Deno.execPath(), {
     args: [
       "run",
@@ -110,3 +108,15 @@ Deno.test("handler exits 0 without reading stdin when flag is off", async () => 
   const out = JSON.parse(new TextDecoder().decode(stdout));
   assertEquals(out.continue, true);
 });
+
+// --- placeholder: gate logic not yet implemented ---
+
+Deno.test.ignore(
+  "TODO(ovr-396.23.13.1): asserts exit 2 when lock journal is inconsistent at task completion",
+  () => {
+    // Implement once TaskCompleted gate logic lands (ovr-396.23.13.1:
+    // TaskCompleted lock journal consistency check). Expect handler to emit
+    // { continue: false } and exit non-zero when the completed task has
+    // unresolved lock-journal entries or missing deliverables.
+  },
+);

@@ -51,7 +51,7 @@ Deno.test("buildSummary falls back to camelCase teammateId", () => {
   assertEquals(s.includes("weaver-2"), true);
 });
 
-// --- no-op when flag off (positive path: flag on, exit 0) ---
+// --- positive path: flag on, valid payload, exit 0 ---
 
 Deno.test("handler exits 0 with flag on and valid payload", async () => {
   const payload = JSON.stringify({ teammate_id: "drone-1", reason: "idle" });
@@ -77,11 +77,9 @@ Deno.test("handler exits 0 with flag on and valid payload", async () => {
   assertEquals(out.continue, true);
 });
 
-// --- no-op when flag off ---
+// --- current behavior: exits 0 when flag is unset (no gate logic yet) ---
 
-Deno.test("handler exits 0 without reading stdin when flag is off", async () => {
-  // TODO(ovr-396.23.13.1): when real gate logic lands, this test should assert
-  // that blocked payloads cause exit 1. For now the no-op path exits 0.
+Deno.test("exits 0 when CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS is unset", async () => {
   const cmd = new Deno.Command(Deno.execPath(), {
     args: [
       "run",
@@ -99,3 +97,15 @@ Deno.test("handler exits 0 without reading stdin when flag is off", async () => 
   const out = JSON.parse(new TextDecoder().decode(stdout));
   assertEquals(out.continue, true);
 });
+
+// --- placeholder: gate logic not yet implemented ---
+
+Deno.test.ignore(
+  "TODO(ovr-396.23.13.2): asserts exit 2 when teammate holds locks at idle time",
+  () => {
+    // Implement once TeammateIdle gate logic lands (ovr-396.23.13.2:
+    // TeammateIdle <remember> persistence nudge). Expect handler to emit
+    // { continue: false } and exit non-zero when the teammate has open
+    // lock-journal entries at idle time.
+  },
+);
