@@ -70,18 +70,58 @@ function outputDeny(reason: string): void {
   console.log(JSON.stringify({ continue: false, stopReason: reason }));
 }
 
-export function evaluateBash(command: string, _depth = 0): Decision {
-  // Guard against infinite recursion in adversarial inputs.
-  if (_depth > 5) return { kind: "allow" };
+// Normalize a command string before danger-pattern matching (B1):
+// 1. Remove backslash-newline continuations (\ at end of line).
+// 2. Outside single-quoted regions, unescape \<char> → <char>
+//    (catches "rm -rf \/").
+// 3. Collapse runs of whitespace to a single space (catches "rm  -rf /").
+// Single-quoted regions are passed through verbatim per POSIX quoting rules.
+function normalizeDangerInput(s: string): string {
+  // Step 1: strip backslash-newline continuations.
+  let r = s.replace(/\\\n/g, " ");
 
-  // Direct danger patterns (applied to the full command string before
-  // segment splitting so they fire even inside wrappers passed as a single
-  // unquoted string).
+  // Step 2: unescape backslash sequences outside single-quoted regions.
+  let out = "";
+  let inSingle = false;
+  for (let i = 0; i < r.length; i++) {
+    const ch = r[i];
+    if (ch === "'" && !inSingle) {
+      inSingle = true;
+      out += ch;
+      continue;
+    }
+    if (ch === "'" && inSingle) {
+      inSingle = false;
+      out += ch;
+      continue;
+    }
+    if (!inSingle && ch === "\\" && i + 1 < r.length) {
+      // Skip the backslash, keep the next character as-is.
+      out += r[++i];
+      continue;
+    }
+    out += ch;
+  }
+  r = out;
+
+  // Step 3: collapse whitespace runs.
+  return r.replace(/\s+/g, " ");
+}
+
+export function evaluateBash(command: string, _depth = 0): Decision {
+  // Normalize before matching so whitespace mutations and escape tricks don't
+  // evade the literal-substring scan (B1).
+  const normalized = normalizeDangerInput(command);
+
+  // Direct danger patterns run FIRST at every depth — the depth guard below
+  // only gates the more-expensive recursive descent, not this check (N6).
+  // Applied to the normalized command string so whitespace/escape mutations
+  // are caught (B1, N6).
   if (
-    command.includes("rm -rf /") ||
-    command.includes("rm -f /") ||
-    command.includes(":(){ :|:& };:") ||
-    command.includes("> /dev/sda")
+    normalized.includes("rm -rf /") ||
+    normalized.includes("rm -f /") ||
+    normalized.includes(":(){ :|:& };:") ||
+    normalized.includes("> /dev/sda")
   ) {
     return {
       kind: "allow",
@@ -90,31 +130,71 @@ export function evaluateBash(command: string, _depth = 0): Decision {
     };
   }
 
+  // Guard against infinite recursion in adversarial inputs. Only the recursive
+  // descent is gated — the literal scan above already ran (N6).
+  if (_depth > 5) return { kind: "allow" };
+
   // Recursive check: detect `bash -c '...'`, `sh -c '...'`, `eval '...'`, and
   // backtick-wrapped commands. These wrappers allow an agent to embed a
   // dangerous inner command that the top-level scan would otherwise miss.
   // We extract the inner body and re-run evaluateBash on it.
-  for (const segment of splitTopLevelSegments(command)) {
+  for (const segment of splitTopLevelSegments(normalized)) {
     const tokens = tokenizeQuoteAware(segment.trim());
     if (tokens.length === 0) continue;
 
     // bash -c <body> / sh -c <body>
+    // Handles:
+    //   bash -c 'cmd'           (position +1)
+    //   bash -ic 'cmd'          (clustered flags — B2)
+    //   bash --norc -c 'cmd'    (long flags before -c — B2)
+    //   bash -c -- 'cmd'        (-- separator — B2)
     const shellIdx = tokens.findIndex(
       (t) =>
         t === "bash" || t === "sh" || t.endsWith("/bash") || t.endsWith("/sh"),
     );
-    if (shellIdx > -1 && tokens[shellIdx + 1] === "-c") {
-      const body = tokens[shellIdx + 2];
-      if (body) {
-        const inner = evaluateBash(stripQuotes(body), _depth + 1);
-        if (inner.kind === "allow" && inner.message) return inner;
+    if (shellIdx > -1) {
+      // Walk all tokens after the shell binary looking for -c anywhere in the
+      // flag walk (not only position +1). Clustered flags like `-ic` also
+      // count. Stop scanning once we hit a non-flag or `--`.
+      let cIdx = -1;
+      for (let i = shellIdx + 1; i < tokens.length; i++) {
+        const t = tokens[i];
+        if (t === "--") {
+          // `--` ends flag processing; body is the next token.
+          cIdx = i; // treat `--` position so body = tokens[cIdx+1]
+          break;
+        }
+        if (t.startsWith("-") && t.includes("c")) {
+          cIdx = i;
+          break;
+        }
+        if (!t.startsWith("-")) break; // non-flag positional ends the flag walk
+      }
+      if (cIdx > -1) {
+        const bodyTok = tokens[cIdx + 1];
+        if (bodyTok) {
+          const inner = evaluateBash(stripQuotes(bodyTok), _depth + 1);
+          if (inner.kind === "allow" && inner.message) return inner;
+        }
       }
     }
 
-    // eval <body>
-    if (tokens[0] === "eval" && tokens.length > 1) {
-      const body = tokens.slice(1).join(" ");
-      const inner = evaluateBash(stripQuotes(body), _depth + 1);
+    // eval <body> — accept `eval` anywhere in the token list, not only at
+    // index 0. Also handles `command eval`, `\eval`, `builtin eval` (B2).
+    const evalIdx = tokens.findIndex((t) => {
+      // Strip a leading backslash (e.g. `\eval`) before comparing so `\eval`
+      // also matches.
+      const bare = t.replace(/^\\/, "").split("/").pop()!;
+      return bare === "eval";
+    });
+    if (evalIdx > -1 && tokens.length > evalIdx + 1) {
+      // De-quote each arg individually then join with a space so multi-arg
+      // forms like `eval 'rm' '-rf' '/'` produce `rm -rf /` (B2).
+      const body = tokens
+        .slice(evalIdx + 1)
+        .map(stripQuotes)
+        .join(" ");
+      const inner = evaluateBash(body, _depth + 1);
       if (inner.kind === "allow" && inner.message) return inner;
     }
 
@@ -177,6 +257,11 @@ function stripQuotes(s: string): string {
 // `sed -i ... file && other` doesn't pull tokens past the `&&`. Quote-aware
 // and $() / backtick nesting-aware: separators inside command substitutions
 // are never treated as top-level splits.
+//
+// N5: also tracks `[[ ... ]]` test-bracket context. Bare `(` inside a `[[`
+// block (e.g. in a regex like `[[ x =~ (foo|bar) ]]`) must NOT increment
+// subshellDepth — otherwise the `]]` that closes the test-bracket would leave
+// a phantom open depth and subsequent `&&` would be swallowed.
 function splitTopLevelSegments(command: string): string[] {
   const segments: string[] = [];
   let buf = "";
@@ -187,6 +272,10 @@ function splitTopLevelSegments(command: string): string[] {
   // because they don't nest (a second backtick always closes the first).
   let subshellDepth = 0;
   let inBacktick = false;
+  // Tracks whether we are inside a [[ ... ]] test-bracket context (N5).
+  // Only the outermost `[[` opens the context; nested `[[` is unusual but
+  // we track depth to handle it correctly.
+  let testBracketDepth = 0;
   for (let i = 0; i < command.length; i++) {
     const ch = command[i];
     if (!inDouble && !inBacktick && ch === "'") {
@@ -206,6 +295,20 @@ function splitTopLevelSegments(command: string): string[] {
       continue;
     }
     if (!inSingle && !inDouble && !inBacktick) {
+      // Detect `[[` (opening test-bracket) and `]]` (closing test-bracket).
+      if (ch === "[" && command[i + 1] === "[") {
+        testBracketDepth++;
+        buf += "[[";
+        i++; // consume second `[`
+        continue;
+      }
+      if (ch === "]" && command[i + 1] === "]") {
+        if (testBracketDepth > 0) testBracketDepth--;
+        buf += "]]";
+        i++; // consume second `]`
+        continue;
+      }
+
       // $( opens a subshell — track depth so inner `&&`/`|`/`;` are not splits.
       if (ch === "$" && command[i + 1] === "(") {
         subshellDepth++;
@@ -213,23 +316,25 @@ function splitTopLevelSegments(command: string): string[] {
         continue;
       }
       if (ch === "(") {
-        // A bare `(` also opens a subshell context (subshell grouping).
-        subshellDepth++;
+        // A bare `(` also opens a subshell context (subshell grouping), but
+        // NOT when we are inside a [[ ... ]] test-bracket — there `(` is part
+        // of a regex alternation pattern and must not affect split depth (N5).
+        if (testBracketDepth === 0) subshellDepth++;
         buf += ch;
         continue;
       }
       if (ch === ")") {
-        if (subshellDepth > 0) {
+        if (subshellDepth > 0 && testBracketDepth === 0) {
           subshellDepth--;
           buf += ch;
           continue;
         }
-        // Unmatched `)` — pass through (e.g. trailing paren in test).
+        // Unmatched `)` or `)` inside [[ ]] — pass through.
         buf += ch;
         continue;
       }
       // Only split on separators at depth 0 (not inside a $() or backtick).
-      if (subshellDepth === 0) {
+      if (subshellDepth === 0 && testBracketDepth === 0) {
         // Noclobber `>|` is a single redirect operator, not a pipe. Detect
         // by looking at the most recent non-whitespace char; if it's `>`,
         // keep the `|` attached to the buffer.
@@ -266,8 +371,12 @@ const REDIRECT_RE =
 // Input redirect: `< file` or `0< file`. Strip these so that `patch -p1
 // src/main.ts < changes.patch` doesn't count `changes.patch` as a positional
 // argument to patch. Capture group 1 holds the path (unused — we only strip).
+//
+// N4: the lookbehind `(?<!<)` prevents matching `<<` (heredoc) and `<<<`
+// (here-string) forms, which should be left intact in the segment so that
+// parsers downstream don't accidentally treat heredoc tag names as file paths.
 const INPUT_REDIRECT_RE =
-  /(?:^|\s)(?:0)?<\s*("([^"]+)"|'([^']+)'|([^\s|;&<>()]+))/g;
+  /(?:^|\s)(?:0)?(?<!<)<(?!<)\s*("([^"]+)"|'([^']+)'|([^\s|;&<>()]+))/g;
 
 function isSedExpressionLike(token: string): boolean {
   // Crude heuristic: sed substitution / transliteration / address forms.
@@ -424,11 +533,17 @@ export function parseBashWriteCandidates(command: string): string[] {
 
     // perl -i ... <file> / perl -i.bak ... <file>
     // The `-i` flag (with or without an extension suffix) marks in-place editing.
+    // Also detects clustered forms like `-pi` (N1).
     // The file is the last non-flag, non-program token.
     const perlIdx = tokens.findIndex(tokenIsPerlCommand);
     if (perlIdx > -1) {
       const hasInPlace = tokens.some(
-        (t, i) => i > perlIdx && /^-i/.test(t),
+        (t, i) =>
+          i > perlIdx &&
+          // anchored: -i or -i.bak (extension suffix)
+          (/^-i/.test(t) ||
+            // clustered: -pi, -pie, etc. — contains `i` in the short flag cluster
+            (t.startsWith("-") && !t.startsWith("--") && t.includes("i"))),
       );
       if (hasInPlace) {
         // Walk backward: skip flags and -e program strings; first plain token is the file.
@@ -452,10 +567,14 @@ export function parseBashWriteCandidates(command: string): string[] {
     }
 
     // ruby -i ... <file> — same shape as perl -i.
+    // Also detects clustered forms like `-pi` (N1).
     const rubyIdx = tokens.findIndex(tokenIsRubyCommand);
     if (rubyIdx > -1) {
       const hasInPlace = tokens.some(
-        (t, i) => i > rubyIdx && /^-i/.test(t),
+        (t, i) =>
+          i > rubyIdx &&
+          (/^-i/.test(t) ||
+            (t.startsWith("-") && !t.startsWith("--") && t.includes("i"))),
       );
       if (hasInPlace) {
         let skipNext = false;
