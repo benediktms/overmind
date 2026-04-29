@@ -1,4 +1,4 @@
-set dotenv-load = true
+set dotenv-load := true
 
 OVERMIND_DIR := env("HOME") / ".config" / "overmind"
 CLAUDE_CONFIG_DIR := env("HOME") / ".claude"
@@ -7,6 +7,9 @@ OPENCODE_CONFIG_DIR := env("HOME") / ".config" / "opencode"
 OPENCODE_PLUGIN_DIR := OPENCODE_CONFIG_DIR / "plugins" / "overmind"
 
 repo_url := "https://github.com/fresha/overmind"
+
+default:
+    @just --list
 
 # ── Install ──────────────────────────────────────────────────────────────────
 
