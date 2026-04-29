@@ -219,6 +219,15 @@ export function enforceMaxBytes(
   return { entries: trimmed };
 }
 
+// Best-effort wrapper around Deno.realPath that never throws.
+async function safeRealPath(p: string): Promise<string | null> {
+  try {
+    return await Deno.realPath(p);
+  } catch {
+    return null;
+  }
+}
+
 // Canonicalize a path so cache keys agree across calls. With `cwd`,
 // relative paths are resolved against the project root first — otherwise
 // `Deno.realPath` would resolve against the hook process's cwd, which
@@ -230,6 +239,10 @@ export function enforceMaxBytes(
 // path stays within the cwd subtree. If `Deno.realPath` follows a symlink
 // that escapes cwd (e.g. a link pointing to /etc/passwd or any path outside
 // the project), we return the pre-resolution absolute path instead.
+//
+// Callers do NOT need to pre-resolve cwd: this function resolves cwd
+// internally via safeRealPath so containment is correct even when cwd
+// itself is a symlink (e.g. macOS /var/folders -> /private/var/folders).
 //
 // Design decision — return unresolved rather than null:
 //   Returning null would cause the harness to treat the path as "no entry
@@ -249,11 +262,17 @@ export async function resolvePathSafely(
     const real = await Deno.realPath(absolute);
     // Containment check: if a cwd was given and the resolved path escapes it,
     // fall back to the unresolved absolute path so the cache key stays within
-    // the project. A trailing separator is added to cwd to avoid false matches
-    // where cwd is a strict prefix of an unrelated sibling directory
+    // the project. A trailing separator is added to cwdReal to avoid false
+    // matches where cwd is a strict prefix of an unrelated sibling directory
     // (e.g. cwd=/foo matching /foobar/...).
-    if (cwd && !real.startsWith(cwd + "/") && real !== cwd) {
-      return absolute;
+    // cwdReal resolves cwd itself through any symlinks so the comparison
+    // works correctly even when cwd is a symlink (e.g. macOS
+    // /var/folders -> /private/var/folders).
+    if (cwd) {
+      const cwdReal = (await safeRealPath(cwd)) ?? cwd;
+      if (!real.startsWith(cwdReal + "/") && real !== cwdReal) {
+        return absolute;
+      }
     }
     return real;
   } catch {
