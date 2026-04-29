@@ -350,8 +350,7 @@ async function checkProcessExists(pid: number): Promise<boolean> {
   }
 }
 
-async function main(): Promise<number> {
-  const args = Deno.args;
+export async function runCli(args: string[]): Promise<number> {
   const command = args[0];
 
   const baseDir = Deno.env.get("OVERMIND_BASE_DIR") ?? DEFAULT_BASE_DIR;
@@ -396,5 +395,5 @@ async function main(): Promise<number> {
 }
 
 if (import.meta.main) {
-  Deno.exit(await main());
+  Deno.exit(await runCli(Deno.args));
 }

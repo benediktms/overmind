@@ -272,6 +272,29 @@ Deno.test("GET /lock returns 405", async () => {
   }
 });
 
+Deno.test("GET /health returns 200 with status:ok", async () => {
+  const h = await startTestServer();
+  try {
+    const res = await fetch(`${h.url}/health`);
+    assertEquals(res.status, 200);
+    const body = await res.json();
+    assertEquals(body.status, "ok");
+  } finally {
+    await h.shutdown();
+  }
+});
+
+Deno.test("POST /health returns 405 (health is GET-only)", async () => {
+  const h = await startTestServer();
+  try {
+    const res = await postJson(`${h.url}/health`, {});
+    assertEquals(res.status, 405);
+    await res.body?.cancel();
+  } finally {
+    await h.shutdown();
+  }
+});
+
 Deno.test("Unknown route returns 404", async () => {
   const h = await startTestServer();
   try {

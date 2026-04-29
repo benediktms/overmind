@@ -86,6 +86,18 @@ export class OvermindHttpServer {
       return jsonResponse({ error: "forbidden" }, 403);
     }
     const url = new URL(req.url);
+    // Liveness probe — GET /health, no auth, no body. Used by the MCP server
+    // and external monitors to confirm the kernel is up before issuing real
+    // requests. Mirrors brain / neural_link / context7. Must be handled
+    // before the POST-only gate below; non-GET on /health gets 405 explicitly
+    // (the resource exists, the method is wrong).
+    if (url.pathname === "/health") {
+      await req.body?.cancel();
+      if (req.method !== "GET") {
+        return jsonResponse({ error: "method_not_allowed" }, 405);
+      }
+      return jsonResponse({ status: "ok" });
+    }
     if (req.method !== "POST") {
       await req.body?.cancel();
       return jsonResponse({ error: "method_not_allowed" }, 405);

@@ -7,7 +7,7 @@ import type {
   SocketResponse,
 } from "./types.ts";
 import { fromFileUrl } from "@std/path";
-import type { Kernel } from "./kernel.ts";
+import { Kernel } from "./kernel.ts";
 import { LockRegistry } from "./locks.ts";
 import { OvermindHttpServer } from "./http.ts";
 
@@ -672,10 +672,21 @@ function readPortFromEnv(): number | null {
   return parsed;
 }
 
-if (import.meta.main) {
+export async function runDaemon(): Promise<never> {
+  // Attach a Kernel so the HTTP listener (on port 8080 by default) starts.
+  // Without this the daemon only serves the Unix socket path; the MCP server
+  // cannot reach the kernel because nothing is listening on localhost:8080
+  // for /lock, /event, etc.
+  const kernel = new Kernel();
+  await kernel.start();
   const daemon = new OvermindDaemon({
     baseDir: Deno.env.get("OVERMIND_DAEMON_BASE_DIR") ?? undefined,
+    kernel,
   });
   await daemon.start();
-  await new Promise<void>(() => {});
+  return await new Promise<never>(() => {});
+}
+
+if (import.meta.main) {
+  await runDaemon();
 }

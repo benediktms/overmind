@@ -7,6 +7,5 @@
   "homepage": "https://github.com/fresha/overmind",
   "license": "MIT",
   "keywords": ["claude-code", "plugin", "multi-agent", "orchestration", "neural-link", "brain"],
-  "skills": "./skills/",
-  "mcpServers": "./mcp-bridge.json"
+  "skills": "./skills/"
 }
