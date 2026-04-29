@@ -14,13 +14,10 @@ interface HookData {
   sessionId?: string;
 }
 
-function outputHookResult(additionalContext?: string): void {
+function outputHookResult(systemMessage?: string): void {
   const result: Record<string, unknown> = { continue: true };
-  if (additionalContext) {
-    result.hookSpecificOutput = {
-      hookEventName: "Stop",
-      additionalContext,
-    };
+  if (systemMessage) {
+    result.systemMessage = systemMessage;
   } else {
     result.suppressOutput = true;
   }
