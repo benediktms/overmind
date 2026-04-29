@@ -159,25 +159,63 @@ export function pruneStale(
   return { entries: fresh };
 }
 
+// Estimate the serialized byte cost for a single cache entry (path -> entry).
+//
+// JSON shape for one key-value pair inside "entries":
+//   "PATH":{"sha256":"HHHH...64","readAt":NNNNNNNNN,"sessionId":"SID"}
+//
+// Fixed chars per entry (excluding variable parts):
+//   "  "  :  {  "sha256":"  "  ,  "readAt":  ,  "sessionId":"  "  }
+//   1+1+1+1+8+1+64+1+1+8+1+12+1+11+1+sid+1+1  = 114 + path.length + sid.length
+// We round up to 150 to absorb readAt digit variance and any JSON encoder
+// overhead. The final boundary check (one JSON.stringify) is the authoritative
+// gate; this estimate only needs to be accurate enough to avoid under-evicting.
+const ENTRY_FIXED_OVERHEAD = 150;
+
+function estimateEntryBytes(path: string, entry: CacheEntry): number {
+  return ENTRY_FIXED_OVERHEAD + path.length + entry.sessionId.length;
+}
+
+// Outer object framing: {"entries":{}} = 14 bytes.
+const OBJECT_FRAMING = 14;
+
 export function enforceMaxBytes(
   cache: CacheFile,
   maxBytes = DEFAULT_MAX_BYTES,
 ): CacheFile {
-  let serialized = JSON.stringify(cache);
-  if (serialized.length <= maxBytes) return cache;
+  // Fast path: skip the O(n) size estimate entirely when the cache is clearly
+  // within budget. Use JSON.stringify once here (not in the loop below).
+  if (JSON.stringify(cache).length <= maxBytes) return cache;
 
+  // Sort newest-first so we keep the most recently read entries.
   const sorted = Object.entries(cache.entries).sort(
     (a, b) => b[1].readAt - a[1].readAt,
   );
-  const trimmed: Record<string, CacheEntry> = {};
+
+  // Walk entries newest-to-oldest, accumulating a byte estimate.
+  // Stop adding entries once we would exceed maxBytes. This is O(n).
+  let runningBytes = OBJECT_FRAMING;
+  let separatorBytes = 0; // commas between entries: first entry has none
+  const kept: Array<[string, CacheEntry]> = [];
   for (const [path, entry] of sorted) {
-    trimmed[path] = entry;
-    serialized = JSON.stringify({ entries: trimmed });
-    if (serialized.length > maxBytes) {
-      delete trimmed[path];
-      break;
-    }
+    const cost = estimateEntryBytes(path, entry) + separatorBytes;
+    if (runningBytes + cost > maxBytes) break;
+    runningBytes += cost;
+    separatorBytes = 1; // subsequent entries need a leading comma
+    kept.push([path, entry]);
   }
+
+  const trimmed: Record<string, CacheEntry> = Object.fromEntries(kept);
+
+  // Single authoritative boundary check. If the estimate was generous we may
+  // have kept one entry too many; drop it and re-check until we fit.
+  while (
+    JSON.stringify({ entries: trimmed }).length > maxBytes && kept.length > 0
+  ) {
+    const evicted = kept.pop()!;
+    delete trimmed[evicted[0]];
+  }
+
   return { entries: trimmed };
 }
 

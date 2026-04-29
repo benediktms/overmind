@@ -1,6 +1,7 @@
 import { assertEquals, assertNotEquals } from "@std/assert";
 import {
   computeSha256,
+  DEFAULT_MAX_BYTES,
   emptyCache,
   enforceMaxBytes,
   getCachePath,
@@ -121,6 +122,38 @@ Deno.test("enforceMaxBytes drops oldest entries first", () => {
   });
   assertEquals(allRemainingAreFresher, true);
   assertEquals(JSON.stringify(trimmed).length <= 1024, true);
+});
+
+// Benchmark-style test: enforceMaxBytes with 5000 entries must complete
+// within a wall-clock budget (500 ms is very generous; the O(n) impl runs in
+// single-digit ms on any modern machine). This guards against regression to
+// the O(n²) JSON.stringify-per-iteration approach.
+Deno.test("enforceMaxBytes O(n) performance: 5000 entries within 500ms", () => {
+  let cache = emptyCache();
+  // Build 5000 entries with paths/sessionIds that vary in length to stress
+  // the byte estimator.
+  for (let i = 0; i < 5000; i++) {
+    cache = upsertEntry(
+      cache,
+      `/project/src/module_${i}/component_${i}.tsx`,
+      "a".repeat(64),
+      `session-${i}`,
+      i * 1000,
+    );
+  }
+  const start = performance.now();
+  const trimmed = enforceMaxBytes(cache, DEFAULT_MAX_BYTES);
+  const elapsed = performance.now() - start;
+  // Must finish well within 500 ms even on a slow CI box.
+  assertEquals(
+    elapsed < 500,
+    true,
+    `enforceMaxBytes took ${
+      elapsed.toFixed(1)
+    }ms for 5000 entries (limit: 500ms)`,
+  );
+  // Result must fit within the byte limit.
+  assertEquals(JSON.stringify(trimmed).length <= DEFAULT_MAX_BYTES, true);
 });
 
 Deno.test("computeSha256 returns null for missing file", async () => {
