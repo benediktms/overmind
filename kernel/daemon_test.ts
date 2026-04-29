@@ -760,17 +760,48 @@ Deno.test("sendToSocket times out per-attempt against a hung peer (no abort sign
 
 // ── selectDispatcher ──────────────────────────────────────────────────────
 
-Deno.test("selectDispatcher returns ClientSideDispatcher when OVERMIND_CLIENT_DISPATCHER=1", async () => {
-  const dispatcher = await selectDispatcher((k) =>
-    k === "OVERMIND_CLIENT_DISPATCHER" ? "1" : undefined
+Deno.test("selectDispatcher: env OVERMIND_CLIENT_DISPATCHER=1 forces client_side over config", async () => {
+  const dispatcher = await selectDispatcher(
+    "subprocess",
+    (k) => k === "OVERMIND_CLIENT_DISPATCHER" ? "1" : undefined,
   );
   assert(dispatcher instanceof ClientSideDispatcher);
 });
 
-Deno.test("selectDispatcher returns ClaudeCodeDispatcher or undefined when env unset", async () => {
-  const dispatcher = await selectDispatcher((_k) => undefined);
+Deno.test("selectDispatcher: env OVERMIND_CLIENT_DISPATCHER=0 forces subprocess over config", async () => {
+  const dispatcher = await selectDispatcher(
+    "client_side",
+    (k) => k === "OVERMIND_CLIENT_DISPATCHER" ? "0" : undefined,
+  );
+  assert(
+    dispatcher === undefined || dispatcher instanceof ClaudeCodeDispatcher,
+    "expected ClaudeCodeDispatcher or undefined (Noop fallback) when env forces subprocess",
+  );
+});
+
+Deno.test("selectDispatcher: config 'client_side' is honored when env is unset", async () => {
+  const dispatcher = await selectDispatcher("client_side", (_k) => undefined);
+  assert(dispatcher instanceof ClientSideDispatcher);
+});
+
+Deno.test("selectDispatcher: config 'subprocess' (default) returns ClaudeCodeDispatcher or Noop when env unset", async () => {
+  const dispatcher = await selectDispatcher("subprocess", (_k) => undefined);
   assert(
     dispatcher === undefined || dispatcher instanceof ClaudeCodeDispatcher,
     "expected ClaudeCodeDispatcher or undefined when env unset",
+  );
+});
+
+Deno.test("selectDispatcher: omitting both args defaults to subprocess (matches doc)", async () => {
+  // The first overload — `selectDispatcher()` with no args — defaults to
+  // configMode='subprocess' and reads real Deno.env. This test only asserts
+  // the function is callable with no args (regression guard); the actual
+  // dispatcher type depends on whether `claude` is on PATH in the test env.
+  const dispatcher = await selectDispatcher();
+  assert(
+    dispatcher === undefined ||
+      dispatcher instanceof ClaudeCodeDispatcher ||
+      dispatcher instanceof ClientSideDispatcher,
+    "expected one of the three dispatcher branches",
   );
 });

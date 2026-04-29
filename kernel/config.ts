@@ -79,6 +79,12 @@ export class ConfigLoader {
         roomTtlSeconds: 3600,
       },
       skills: { autoInject: true, projectOverrides: true },
+      // Default to subprocess so any caller (CLI, CI, OpenCode) Just Works.
+      // Setting to "client_side" requires the caller to drain dispatches
+      // via overmind_pending_dispatches and spawn teammates itself; that's
+      // safe for Claude Code with experimental teams enabled but silently
+      // fails for headless callers, so it's never the default.
+      dispatcher: { mode: "subprocess" },
     } as OvermindConfig;
 
     if (!base && !override) return defaults;
@@ -96,6 +102,7 @@ export class ConfigLoader {
       "brain",
       "neural_link",
       "skills",
+      "dispatcher",
     ];
     for (const key of required) {
       if (!(key in cfg)) {
@@ -113,6 +120,7 @@ export class ConfigLoader {
       neuralLink: overmindCfg.neural_link,
       skills: overmindCfg.skills,
       modes: overmindCfg.modes,
+      dispatcher: overmindCfg.dispatcher,
     };
   }
 }

@@ -60,6 +60,7 @@ export interface KernelConfig {
   neuralLink: NeuralLinkConfig;
   skills: SkillsConfig;
   modes: ModesConfig;
+  dispatcher: DispatcherConfig;
 }
 
 export interface ModeRequest {
@@ -179,6 +180,31 @@ export interface SkillsConfig {
   projectOverrides: boolean;
 }
 
+/**
+ * Selects which AgentDispatcher implementation the daemon uses.
+ *
+ * - "subprocess" (default): the daemon spawns one `claude --print`
+ *   subprocess per agent dispatch. Works for any caller (CLI, CI,
+ *   OpenCode, Claude Code) because the daemon does the spawning.
+ *   Costs: ~150-300 MB RAM and 60-90s cold start per worker; full env
+ *   inheritance; --permission-mode bypassPermissions on each worker;
+ *   prompt visible in argv (ps -ef); per-worker MCP server re-handshake.
+ *
+ * - "client_side": the daemon queues dispatch requests; the calling
+ *   session must drain them via overmind_pending_dispatches and spawn
+ *   teammates via its own Agent tool with team_name + name +
+ *   subagent_type. Teammates run in-process — no fork, no env leak,
+ *   no argv leak, no bypassPermissions. Requires the caller to be a
+ *   Claude Code session with CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1.
+ *   Headless callers (CLI, CI) will silently fail because the queue
+ *   never gets drained.
+ */
+export type DispatcherMode = "subprocess" | "client_side";
+
+export interface DispatcherConfig {
+  mode: DispatcherMode;
+}
+
 export interface ModeSettings {
   description: string;
   maxAdjuncts?: number;
@@ -202,6 +228,7 @@ export interface OvermindConfig {
   brain: BrainConfig;
   neural_link: NeuralLinkConfig;
   skills: SkillsConfig;
+  dispatcher: DispatcherConfig;
 }
 
 export interface NeuralLinkPort {

@@ -9,6 +9,7 @@ import type {
 } from "./types.ts";
 import { fromFileUrl } from "@std/path";
 import { Kernel } from "./kernel.ts";
+import { ConfigLoader } from "./config.ts";
 import { ClaudeCodeDispatcher } from "./dispatchers/claude_code.ts";
 import { ClientSideDispatcher } from "./dispatchers/client_side.ts";
 import { LockRegistry } from "./locks.ts";
@@ -861,10 +862,33 @@ export async function stopDaemon(
   return `Daemon did not exit within ${timeoutMs}ms (PID ${pid}); send SIGKILL manually if needed`;
 }
 
+/**
+ * Pick the active dispatcher. Precedence (highest first):
+ *   1. `OVERMIND_CLIENT_DISPATCHER` env var: "1" forces client_side, "0"
+ *      forces subprocess. Useful for one-off testing without editing the
+ *      toml.
+ *   2. `configMode` argument (loaded from `[dispatcher] mode` in
+ *      overmind.toml): "client_side" or "subprocess".
+ *   3. Default "subprocess" if neither is set.
+ *
+ * client_side returns a ClientSideDispatcher unconditionally — there is
+ * no precondition to verify on the daemon side. subprocess probes for
+ * the `claude` binary and falls back to NoopDispatcher (returns
+ * undefined) if it's missing.
+ */
 export async function selectDispatcher(
+  configMode: "subprocess" | "client_side" = "subprocess",
   env: (key: string) => string | undefined = (k) => Deno.env.get(k),
 ): Promise<ClientSideDispatcher | ClaudeCodeDispatcher | undefined> {
-  if (env("OVERMIND_CLIENT_DISPATCHER") === "1") {
+  const envOverride = env("OVERMIND_CLIENT_DISPATCHER");
+  let mode: "subprocess" | "client_side" = configMode;
+  if (envOverride === "1") {
+    mode = "client_side";
+  } else if (envOverride === "0") {
+    mode = "subprocess";
+  }
+
+  if (mode === "client_side") {
     console.log(
       "[overmind] using ClientSideDispatcher (in-process teammate spawning); caller must drain via overmind_pending_dispatches",
     );
@@ -886,7 +910,11 @@ export async function runDaemon(): Promise<never> {
   // Without this the daemon only serves the Unix socket path; the MCP server
   // cannot reach the kernel because nothing is listening on localhost:8080
   // for /lock, /event, etc.
-  const dispatcher = await selectDispatcher();
+  //
+  // Dispatcher selection: load the config toml so [dispatcher] mode picks
+  // the default; OVERMIND_CLIENT_DISPATCHER env var (if set) overrides.
+  const cfg = await new ConfigLoader().load();
+  const dispatcher = await selectDispatcher(cfg.dispatcher.mode);
   const kernel = new Kernel({ dispatcher });
   await kernel.start();
   const daemon = new OvermindDaemon({
