@@ -116,7 +116,7 @@ Deno.test("executeScout waits for handoff messages using timeout", async () => {
   assertEquals(waitCalls.length, 3);
   for (const call of waitCalls) {
     assertEquals(call.args[1], "overmind-scout-lead");
-    assertEquals(call.args[2], 30000);
+    assertEquals(call.args[2], 180000);
     assertEquals(call.args[3], [MessageKind.Handoff]);
   }
 });
