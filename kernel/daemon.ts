@@ -2,6 +2,7 @@ import { OvermindError } from "./errors.ts";
 import { EventType, Mode } from "./types.ts";
 import type {
   CancelRequest,
+  DrainDispatchesRequest,
   ModeRequest,
   SocketRequest,
   SocketResponse,
@@ -9,6 +10,7 @@ import type {
 import { fromFileUrl } from "@std/path";
 import { Kernel } from "./kernel.ts";
 import { ClaudeCodeDispatcher } from "./dispatchers/claude_code.ts";
+import { ClientSideDispatcher } from "./dispatchers/client_side.ts";
 import { LockRegistry } from "./locks.ts";
 import { OvermindHttpServer } from "./http.ts";
 
@@ -365,10 +367,21 @@ export class OvermindDaemon {
       }
       const parsed = this.parseRequest(requestRaw);
 
-      let response: SocketResponse;
+      let responseBody: string;
       if (parsed.request) {
-        if (parsed.request.type === "cancel_request") {
+        if (parsed.request.type === "drain_dispatches") {
+          const req = parsed.request as DrainDispatchesRequest;
+          const dispatcher = this.kernel?.getDispatcher?.();
+          const dispatches = dispatcher?.drainPending?.(req.run_id) ?? [];
+          responseBody = JSON.stringify({
+            status: "accepted",
+            run_id: req.run_id,
+            error: null,
+            dispatches,
+          }) + "\n";
+        } else if (parsed.request.type === "cancel_request") {
           const req = parsed.request as CancelRequest;
+          let response: SocketResponse;
           if (this.kernel) {
             const cancelled = this.kernel.cancelRun(req.run_id);
             response = cancelled
@@ -381,9 +394,14 @@ export class OvermindDaemon {
               error: "No kernel available",
             };
           }
+          responseBody = JSON.stringify(response) + "\n";
         } else {
           const req = parsed.request as ModeRequest;
-          response = { status: "accepted", run_id: req.run_id, error: null };
+          const response: SocketResponse = {
+            status: "accepted",
+            run_id: req.run_id,
+            error: null,
+          };
           // Fire-and-forget mode execution if kernel is available
           if (this.kernel) {
             this.kernel.executeMode(
@@ -395,16 +413,17 @@ export class OvermindDaemon {
               console.error(`Mode execution error for ${req.run_id}:`, err);
             });
           }
+          responseBody = JSON.stringify(response) + "\n";
         }
       } else {
-        response = {
+        const response: SocketResponse = {
           status: "error",
           run_id: "",
           error: parsed.error ?? "Invalid request",
         };
+        responseBody = JSON.stringify(response) + "\n";
       }
 
-      const responseBody = JSON.stringify(response) + "\n";
       await conn.write(new TextEncoder().encode(responseBody));
     } finally {
       conn.close();
@@ -427,6 +446,10 @@ export class OvermindDaemon {
       return { request: payload, error: null };
     }
 
+    if (this.isDrainDispatchesRequest(payload)) {
+      return { request: payload, error: null };
+    }
+
     if (!this.isModeRequest(payload)) {
       return {
         request: null,
@@ -444,6 +467,17 @@ export class OvermindDaemon {
 
     const value = payload as Record<string, unknown>;
     return value.type === "cancel_request" &&
+      typeof value.run_id === "string" && value.run_id.length > 0;
+  }
+
+  private isDrainDispatchesRequest(
+    payload: unknown,
+  ): payload is DrainDispatchesRequest {
+    if (!payload || typeof payload !== "object") {
+      return false;
+    }
+    const value = payload as Record<string, unknown>;
+    return value.type === "drain_dispatches" &&
       typeof value.run_id === "string" && value.run_id.length > 0;
   }
 
@@ -827,19 +861,33 @@ export async function stopDaemon(
   return `Daemon did not exit within ${timeoutMs}ms (PID ${pid}); send SIGKILL manually if needed`;
 }
 
+export async function selectDispatcher(
+  env: (key: string) => string | undefined = (k) => Deno.env.get(k),
+): Promise<ClientSideDispatcher | ClaudeCodeDispatcher | undefined> {
+  if (env("OVERMIND_CLIENT_DISPATCHER") === "1") {
+    console.log(
+      "[overmind] using ClientSideDispatcher (in-process teammate spawning); caller must drain via overmind_pending_dispatches",
+    );
+    return new ClientSideDispatcher();
+  }
+  const subprocess = new ClaudeCodeDispatcher();
+  const ok = await subprocess.probeAvailability();
+  if (ok) {
+    return subprocess;
+  }
+  console.warn(
+    "[overmind] claude binary not found on PATH; falling back to NoopDispatcher (swarm/relay/scout will not actually spawn agents).",
+  );
+  return undefined;
+}
+
 export async function runDaemon(): Promise<never> {
   // Attach a Kernel so the HTTP listener (on port 8080 by default) starts.
   // Without this the daemon only serves the Unix socket path; the MCP server
   // cannot reach the kernel because nothing is listening on localhost:8080
   // for /lock, /event, etc.
-  const dispatcher = new ClaudeCodeDispatcher();
-  const available = await dispatcher.probeAvailability();
-  if (!available) {
-    console.warn(
-      "[overmind] claude binary not found on PATH; falling back to NoopDispatcher (swarm/relay/scout will not actually spawn agents).",
-    );
-  }
-  const kernel = new Kernel({ dispatcher: available ? dispatcher : undefined });
+  const dispatcher = await selectDispatcher();
+  const kernel = new Kernel({ dispatcher });
   await kernel.start();
   const daemon = new OvermindDaemon({
     baseDir: Deno.env.get("OVERMIND_DAEMON_BASE_DIR") ?? undefined,

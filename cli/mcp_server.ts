@@ -150,6 +150,21 @@ const TOOLS = [
       required: ["room_id"],
     },
   },
+  {
+    name: "overmind_pending_dispatches",
+    description:
+      "Return and drain pending agent dispatches for a run. Used by client-side orchestrators to retrieve queued agent spawn requests from the kernel.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        run_id: {
+          type: "string",
+          description: "Run ID whose pending dispatches should be drained",
+        },
+      },
+      required: ["run_id"],
+    },
+  },
 ];
 
 // JSON-RPC 2.0 standard error codes used below.
@@ -469,6 +484,8 @@ export class MCPServer {
           String(args.room_id ?? ""),
           (args.display_name as string) ?? "Claude Code",
         );
+      case "overmind_pending_dispatches":
+        return await this.pendingDispatches(String(args.run_id ?? ""));
       default:
         throw new Error(`Unknown tool: ${name}`);
     }
@@ -640,6 +657,28 @@ export class MCPServer {
       error:
         "room_join over neural_link MCP not yet supported — use neural_link's MCP server directly",
     };
+  }
+
+  private async pendingDispatches(runId: string): Promise<unknown> {
+    const trimmed = runId.trim();
+    if (!trimmed) {
+      return { success: false, error: "run_id is required" };
+    }
+    const request: SocketRequest = {
+      type: "drain_dispatches",
+      run_id: trimmed,
+    };
+    try {
+      const response = await this.delegateSink(request, this.config.baseDir);
+      const dispatches =
+        (response as unknown as Record<string, unknown>).dispatches ?? [];
+      return { run_id: trimmed, dispatches };
+    } catch (err) {
+      return {
+        success: false,
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
   }
 }
 

@@ -97,6 +97,10 @@ export class Kernel {
     return this.adapterRegistry;
   }
 
+  getDispatcher(): AgentDispatcher | null {
+    return this.dispatcher ?? this.adapterRegistry?.getDispatcher() ?? null;
+  }
+
   async receiveObjective(objective: string): Promise<void> {
     if (!this.running) throw new OvermindError("Kernel not running");
     this.emit(EventType.ObjectiveReceived, { objective });

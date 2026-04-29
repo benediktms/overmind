@@ -15,6 +15,7 @@ import {
   type AgentDispatchRequest,
   type AgentDispatchResult,
 } from "../agent_dispatcher.ts";
+import { buildSubprocessBootstrap } from "./bootstrap_prompt.ts";
 
 const DEFAULT_CLAUDE_BINARY = "claude";
 const DEFAULT_LOG_DIR = ".overmind/state/runs";
@@ -151,7 +152,7 @@ export class ClaudeCodeDispatcher implements AgentDispatcher {
     const logBase = await this.openLogBase(request, runId);
     const env = buildEnv(this.baseEnv, request, runId);
     const args = buildArgs(request);
-    const prompt = buildPrompt(request);
+    const prompt = buildSubprocessBootstrap(request);
 
     let stdoutFile: Deno.FsFile | null = null;
     let stderrFile: Deno.FsFile | null = null;
@@ -337,44 +338,6 @@ function buildArgs(request: AgentDispatchRequest): string[] {
     "--add-dir",
     request.workspace,
   ];
-}
-
-/**
- * The bootstrap prompt the spawned worker sees. It tells the worker who it
- * is, where to find its kickoff, and how to report back. Skill files in
- * `cli/claudecode-plugin/skills/` provide the per-role behavior; the worker
- * is expected to invoke its role skill (`/{role}`) on top of this.
- */
-function buildPrompt(request: AgentDispatchRequest): string {
-  return `You are an Overmind worker spawned by the kernel as agent_id=${request.agentId}.
-
-Run context (also available via env vars OVERMIND_*):
-- run_id: ${extractRunId(request.agentId)}
-- role: ${request.role}
-- room_id: ${request.roomId}
-- participant_id: ${request.participantId}
-- workspace: ${request.workspace}
-
-Bootstrap protocol — execute these steps in order:
-
-1. Join the room: call mcp__neural_link__room_join with
-   room_id=${request.roomId}, participant_id=${request.participantId},
-   display_name=${JSON.stringify(`${request.role} (${request.participantId})`)},
-   role=member.
-2. Read your kickoff message: call mcp__neural_link__inbox_read with
-   room_id=${request.roomId}, participant_id=${request.participantId}.
-   Your kickoff is the first message addressed to you.
-3. Execute the kickoff. Invoke the /${request.role} skill if available; act
-   as a ${request.role} otherwise. Original objective: ${request.prompt}.
-4. Post a handoff back to the lead: call mcp__neural_link__message_send
-   with room_id=${request.roomId}, from=${request.participantId},
-   kind=handoff, summary=<short summary>, body=<full findings>.
-5. Leave the room: call mcp__neural_link__room_leave with the same
-   room_id and participant_id.
-6. Exit. Do not loop, do not retry, do not start new investigations.
-
-If any step fails, post a handoff with kind=handoff, summary="error: <reason>",
-body=<details> before exiting. Never silently exit.`;
 }
 
 async function pipeToFiles(

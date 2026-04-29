@@ -11,9 +11,12 @@ import {
   ensureDaemonRunning,
   isDaemonReachable,
   OvermindDaemon,
+  selectDispatcher,
   sendToSocket,
   stopDaemon,
 } from "./daemon.ts";
+import { ClientSideDispatcher } from "./dispatchers/client_side.ts";
+import { ClaudeCodeDispatcher } from "./dispatchers/claude_code.ts";
 import { Mode } from "./types.ts";
 
 function createTestPaths(
@@ -753,4 +756,21 @@ Deno.test("sendToSocket times out per-attempt against a hung peer (no abort sign
     await acceptLoop.catch(() => {});
     await Deno.remove(tempDir, { recursive: true });
   }
+});
+
+// ── selectDispatcher ──────────────────────────────────────────────────────
+
+Deno.test("selectDispatcher returns ClientSideDispatcher when OVERMIND_CLIENT_DISPATCHER=1", async () => {
+  const dispatcher = await selectDispatcher((k) =>
+    k === "OVERMIND_CLIENT_DISPATCHER" ? "1" : undefined
+  );
+  assert(dispatcher instanceof ClientSideDispatcher);
+});
+
+Deno.test("selectDispatcher returns ClaudeCodeDispatcher or undefined when env unset", async () => {
+  const dispatcher = await selectDispatcher((_k) => undefined);
+  assert(
+    dispatcher === undefined || dispatcher instanceof ClaudeCodeDispatcher,
+    "expected ClaudeCodeDispatcher or undefined when env unset",
+  );
 });

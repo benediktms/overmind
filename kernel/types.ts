@@ -78,7 +78,15 @@ export interface CancelRequest {
   run_id: string;
 }
 
-export type SocketRequest = ModeRequest | CancelRequest;
+export interface DrainDispatchesRequest {
+  type: "drain_dispatches";
+  run_id: string;
+}
+
+export type SocketRequest =
+  | ModeRequest
+  | CancelRequest
+  | DrainDispatchesRequest;
 
 export interface SocketResponse {
   status: "accepted" | "error";

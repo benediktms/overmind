@@ -41,6 +41,13 @@ export interface AgentDispatcher {
    * resources to release (noop, mock) can ignore. Should not throw.
    */
   cancelRun?(runId: string): void;
+
+  /**
+   * Optional. Drain pending agent dispatches for a run. Implemented by
+   * ClientSideDispatcher; returns an empty array on dispatchers that spawn
+   * synchronously (subprocess, noop).
+   */
+  drainPending?(runId: string): AgentDispatchRequest[];
 }
 
 /**

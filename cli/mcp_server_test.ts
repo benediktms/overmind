@@ -748,3 +748,101 @@ Deno.test("notifications/cancelled is idempotent after the tool already complete
   await server.flush();
   assertEquals(out.length, 1, "late cancel must not emit a second response");
 });
+
+// ── overmind_pending_dispatches ─────────────────────────────────────────────
+
+Deno.test("tools/list response includes overmind_pending_dispatches", async () => {
+  const { server, out } = makeServer();
+  await server.feed(
+    JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "tools/list",
+      params: {},
+    }) + "\n",
+    "",
+  );
+  const tools = (out[0].result as { tools: { name: string }[] }).tools;
+  assertEquals(
+    tools.some((t) => t.name === "overmind_pending_dispatches"),
+    true,
+  );
+});
+
+Deno.test("overmind_pending_dispatches rejects an empty run_id without contacting the daemon", async () => {
+  const { server, out, delegateCalls } = makeServer();
+  await callTool(server, "overmind_pending_dispatches", { run_id: "   " });
+  assertEquals(delegateCalls.length, 0);
+  const payload = parseToolText(out[0]) as { success: boolean; error: string };
+  assertEquals(payload.success, false);
+  assertEquals(payload.error, "run_id is required");
+});
+
+Deno.test("overmind_pending_dispatches happy path: socket returns dispatches", async () => {
+  const fakeDispatches = [
+    {
+      agentId: "run-abc-scout",
+      role: "scout",
+      prompt: "do X",
+      roomId: "r1",
+      participantId: "p1",
+      workspace: "/w",
+    },
+    {
+      agentId: "run-abc-relay",
+      role: "relay",
+      prompt: "do Y",
+      roomId: "r1",
+      participantId: "p2",
+      workspace: "/w",
+    },
+    {
+      agentId: "run-abc-swarm",
+      role: "swarm",
+      prompt: "do Z",
+      roomId: "r1",
+      participantId: "p3",
+      workspace: "/w",
+    },
+  ];
+  // The daemon piggybacks dispatches on the SocketResponse envelope as an
+  // extra field. Cast through unknown so TypeScript accepts the augmented shape.
+  const delegateResponse = {
+    status: "accepted" as const,
+    run_id: "run-abc",
+    error: null,
+    dispatches: fakeDispatches,
+  } as unknown as import("../kernel/types.ts").SocketResponse;
+  const { server, out, delegateCalls } = makeServer({ delegateResponse });
+  await callTool(server, "overmind_pending_dispatches", { run_id: "run-abc" });
+  assertEquals(delegateCalls.length, 1);
+  assertEquals(delegateCalls[0].request.type, "drain_dispatches");
+  if (delegateCalls[0].request.type === "drain_dispatches") {
+    assertEquals(delegateCalls[0].request.run_id, "run-abc");
+  }
+  const payload = parseToolText(out[0]) as {
+    run_id: string;
+    dispatches: unknown[];
+  };
+  assertEquals(payload.run_id, "run-abc");
+  assertEquals(payload.dispatches.length, 3);
+});
+
+Deno.test("overmind_pending_dispatches idempotent-empty: socket returns empty dispatches", async () => {
+  const { server, out, delegateCalls } = makeServer({
+    delegateResponse: {
+      status: "accepted",
+      run_id: "run-xyz",
+      error: null,
+    },
+  });
+  await callTool(server, "overmind_pending_dispatches", { run_id: "run-xyz" });
+  assertEquals(delegateCalls.length, 1);
+  const payload = parseToolText(out[0]) as {
+    run_id: string;
+    dispatches: unknown[];
+  };
+  assertEquals(payload.run_id, "run-xyz");
+  assertEquals(Array.isArray(payload.dispatches), true);
+  assertEquals(payload.dispatches.length, 0);
+});
