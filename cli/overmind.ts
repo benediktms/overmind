@@ -10,11 +10,20 @@
 // invoking the MCP server.
 
 import { runCli } from "./main.ts";
-import { runDaemon } from "../kernel/daemon.ts";
+import { daemonStatus, restartDaemon, runDaemon, stopDaemon } from "../kernel/daemon.ts";
 import { runMcp } from "./mcp_server.ts";
+
+function resolveBinaryPath(): string {
+  // When running compiled, Deno.execPath() is the path to the compiled
+  // overmind binary itself — exactly what we want to re-spawn for restart.
+  // When running via `deno run cli/overmind.ts`, this would be the deno
+  // binary; users in dev should prefer `just daemon-restart` in that case.
+  return Deno.execPath();
+}
 
 async function runDaemonCommand(args: string[]): Promise<number> {
   const sub = args[0] ?? "start";
+  const baseDir = Deno.env.get("OVERMIND_BASE_DIR") ?? undefined;
 
   switch (sub) {
     case "start":
@@ -22,12 +31,29 @@ async function runDaemonCommand(args: string[]): Promise<number> {
       await runDaemon();
       return 0;
 
-    case "stop":
-    case "status":
-    case "restart":
-      console.error(`overmind daemon ${sub}: not yet implemented as a subcommand`);
-      console.error(`Use the justfile recipes (\`just daemon-stop\`, \`just daemon-restart\`) for now.`);
-      return 1;
+    case "stop": {
+      const msg = await stopDaemon(baseDir);
+      console.log(msg);
+      return 0;
+    }
+
+    case "status": {
+      const status = await daemonStatus(baseDir);
+      if (status.running) {
+        console.log(`Daemon is running (PID ${status.pid})`);
+      } else if (status.stale && status.pid !== null) {
+        console.log(`Daemon is not running (stale PID file for ${status.pid})`);
+      } else {
+        console.log("Daemon is not running");
+      }
+      return status.running ? 0 : 1;
+    }
+
+    case "restart": {
+      const msg = await restartDaemon(resolveBinaryPath(), baseDir);
+      console.log(msg);
+      return 0;
+    }
 
     default:
       console.error(`Unknown daemon subcommand: ${sub}`);

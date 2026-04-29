@@ -672,6 +672,92 @@ function readPortFromEnv(): number | null {
   return parsed;
 }
 
+// ─── Lifecycle: stop / status / restart ────────────────────────────────────
+// Mirrors brain's daemon CLI shape (`brain daemon stop|status|restart`).
+// Operates on the same PID file the running daemon writes (`daemon.pid` in
+// the base dir) and uses `Deno.kill(pid, 0)` to probe liveness without
+// affecting the target process.
+
+export interface DaemonStatus {
+  running: boolean;
+  pid: number | null;
+  /** True when a PID file exists but the process is dead (stale entry). */
+  stale: boolean;
+}
+
+/**
+ * Inspect the PID file and return what's there. Pure: no kill, no removal.
+ * Tests construct synthetic baseDirs to drive every code path.
+ */
+export async function daemonStatus(baseDir?: string): Promise<DaemonStatus> {
+  const resolvedBaseDir = resolveBaseDir(baseDir);
+  const pidPath = `${resolvedBaseDir}/${PID_FILE_NAME}`;
+
+  let pid: number | null = null;
+  try {
+    const raw = (await Deno.readTextFile(pidPath)).trim();
+    const parsed = Number(raw);
+    pid = Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+  } catch (err) {
+    if (!(err instanceof Deno.errors.NotFound)) throw err;
+  }
+
+  if (pid === null) return { running: false, pid: null, stale: false };
+  if (processExists(pid)) return { running: true, pid, stale: false };
+  return { running: false, pid, stale: true };
+}
+
+/**
+ * Send SIGTERM to a running daemon and wait briefly for it to exit. Removes
+ * a stale PID file if no process is running. Returns a string describing
+ * what happened, suitable for printing to stdout.
+ *
+ * Does not delete the socket file — the daemon's own shutdown removes it,
+ * and SIGKILL stragglers are handled by the next start's stale-socket
+ * detection (mirrors brain).
+ */
+export async function stopDaemon(
+  baseDir?: string,
+  options: { timeoutMs?: number; pollIntervalMs?: number } = {},
+): Promise<string> {
+  const timeoutMs = options.timeoutMs ?? 5_000;
+  const pollMs = options.pollIntervalMs ?? 100;
+  const resolvedBaseDir = resolveBaseDir(baseDir);
+  const pidPath = `${resolvedBaseDir}/${PID_FILE_NAME}`;
+
+  const status = await daemonStatus(resolvedBaseDir);
+  if (!status.running) {
+    if (status.stale && status.pid !== null) {
+      await removeIfExists(pidPath);
+      return `Daemon is not running (stale PID file for ${status.pid} removed)`;
+    }
+    return "Daemon is not running";
+  }
+
+  const pid = status.pid as number;
+  try {
+    Deno.kill(pid, "SIGTERM");
+  } catch (err) {
+    if (err instanceof Deno.errors.NotFound) {
+      // Race: process exited between status check and kill. Treat as success.
+      await removeIfExists(pidPath);
+      return `Daemon already exited (PID ${pid})`;
+    }
+    throw err;
+  }
+
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (!processExists(pid)) {
+      await removeIfExists(pidPath);
+      return `Daemon stopped (PID ${pid})`;
+    }
+    await sleep(pollMs);
+  }
+
+  return `Daemon did not exit within ${timeoutMs}ms (PID ${pid}); send SIGKILL manually if needed`;
+}
+
 export async function runDaemon(): Promise<never> {
   // Attach a Kernel so the HTTP listener (on port 8080 by default) starts.
   // Without this the daemon only serves the Unix socket path; the MCP server
@@ -685,6 +771,29 @@ export async function runDaemon(): Promise<never> {
   });
   await daemon.start();
   return await new Promise<never>(() => {});
+}
+
+/**
+ * Stop any running daemon and re-spawn one detached from the current process.
+ * Used by `overmind daemon restart`. Returns a status line for printing.
+ */
+export async function restartDaemon(
+  binaryPath: string,
+  baseDir?: string,
+): Promise<string> {
+  const stopMsg = await stopDaemon(baseDir);
+
+  const command = new Deno.Command(binaryPath, {
+    args: ["daemon", "start"],
+    stdin: "null",
+    stdout: "null",
+    stderr: "null",
+  });
+  const child = command.spawn();
+  child.unref();
+  child.status.catch(() => {});
+
+  return `${stopMsg}\nDaemon restart spawned (binary: ${binaryPath})`;
 }
 
 if (import.meta.main) {

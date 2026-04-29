@@ -93,28 +93,27 @@ daemon:
     else exec deno run --allow-all cli/overmind.ts daemon start
     fi
 
-# Stop a running daemon by PID file.
+# Stop a running daemon. Prefers the compiled binary's `daemon stop`
+# subcommand (proper SIGTERM + wait + stale-PID cleanup); falls back to
+# `deno run` if no compiled binary is present yet.
 daemon-stop:
     #!/usr/bin/env bash
-    if [ -f ~/.overmind/daemon.pid ]; then
-        pid=$(cat ~/.overmind/daemon.pid)
-        if kill "$pid" 2>/dev/null; then
-            echo "Stopped daemon (PID $pid)"
-        else
-            echo "PID $pid not running; removing stale daemon.pid"
-            rm -f ~/.overmind/daemon.pid
-        fi
-    else
-        echo "No daemon.pid found"
+    if [ -x "{{DIST_BIN}}" ]; then exec "{{DIST_BIN}}" daemon stop
+    else exec deno run --allow-all cli/overmind.ts daemon stop
     fi
 
-# Stop and restart the daemon (foreground).
+# Print whether the daemon is running, with PID.
+daemon-status:
+    #!/usr/bin/env bash
+    if [ -x "{{DIST_BIN}}" ]; then exec "{{DIST_BIN}}" daemon status
+    else exec deno run --allow-all cli/overmind.ts daemon status
+    fi
+
+# Stop the running daemon and respawn it detached.
 daemon-restart:
     #!/usr/bin/env bash
-    just daemon-stop
-    sleep 0.3
-    if [ -x "{{DIST_BIN}}" ]; then exec "{{DIST_BIN}}" daemon start
-    else exec deno run --allow-all cli/overmind.ts daemon start
+    if [ -x "{{DIST_BIN}}" ]; then exec "{{DIST_BIN}}" daemon restart
+    else exec deno run --allow-all cli/overmind.ts daemon restart
     fi
 
 # Compile the unified binary without running the rest of the install. Useful

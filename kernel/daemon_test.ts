@@ -6,7 +6,13 @@ import {
   assertStringIncludes,
 } from "@std/assert";
 
-import { ensureDaemonRunning, OvermindDaemon, sendToSocket } from "./daemon.ts";
+import {
+  daemonStatus,
+  ensureDaemonRunning,
+  OvermindDaemon,
+  sendToSocket,
+  stopDaemon,
+} from "./daemon.ts";
 import { Mode } from "./types.ts";
 
 function createTestPaths(
@@ -440,3 +446,122 @@ async function readNdjsonPayload(conn: Deno.Conn): Promise<string> {
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
+
+// ── Lifecycle: daemonStatus / stopDaemon ──────────────────────────────────
+// Drive the pure pieces with synthetic PID files. We never spawn a real
+// daemon here — alive cases use Deno.pid (the test runner itself, which is
+// guaranteed alive); dead cases use a high PID that's vanishingly unlikely
+// to be in use. Stop tests use a short-lived child we control.
+
+Deno.test("daemonStatus reports not-running when no PID file exists", async () => {
+  const tempDir = await Deno.makeTempDir();
+  try {
+    const { baseDir } = createTestPaths(tempDir);
+    await Deno.mkdir(baseDir, { recursive: true });
+    const status = await daemonStatus(baseDir);
+    assertEquals(status, { running: false, pid: null, stale: false });
+  } finally {
+    await Deno.remove(tempDir, { recursive: true });
+  }
+});
+
+Deno.test("daemonStatus reports running when PID file points at a live process", async () => {
+  const tempDir = await Deno.makeTempDir();
+  try {
+    const { baseDir, pidPath } = createTestPaths(tempDir);
+    await Deno.mkdir(baseDir, { recursive: true });
+    // Use the test runner's own PID — guaranteed alive throughout the test.
+    await Deno.writeTextFile(pidPath, `${Deno.pid}\n`);
+    const status = await daemonStatus(baseDir);
+    assertEquals(status.running, true);
+    assertEquals(status.pid, Deno.pid);
+    assertEquals(status.stale, false);
+  } finally {
+    await Deno.remove(tempDir, { recursive: true });
+  }
+});
+
+Deno.test("daemonStatus reports stale when PID file points at a dead process", async () => {
+  const tempDir = await Deno.makeTempDir();
+  try {
+    const { baseDir, pidPath } = createTestPaths(tempDir);
+    await Deno.mkdir(baseDir, { recursive: true });
+    // PID 99999999 is far above max_pid on Linux/macOS — guaranteed not in use.
+    await Deno.writeTextFile(pidPath, "99999999\n");
+    const status = await daemonStatus(baseDir);
+    assertEquals(status.running, false);
+    assertEquals(status.pid, 99999999);
+    assertEquals(status.stale, true);
+  } finally {
+    await Deno.remove(tempDir, { recursive: true });
+  }
+});
+
+Deno.test("daemonStatus tolerates a malformed PID file", async () => {
+  const tempDir = await Deno.makeTempDir();
+  try {
+    const { baseDir, pidPath } = createTestPaths(tempDir);
+    await Deno.mkdir(baseDir, { recursive: true });
+    await Deno.writeTextFile(pidPath, "not-a-pid\n");
+    const status = await daemonStatus(baseDir);
+    assertEquals(status, { running: false, pid: null, stale: false });
+  } finally {
+    await Deno.remove(tempDir, { recursive: true });
+  }
+});
+
+Deno.test("stopDaemon returns 'not running' and leaves filesystem alone when no PID file", async () => {
+  const tempDir = await Deno.makeTempDir();
+  try {
+    const { baseDir } = createTestPaths(tempDir);
+    await Deno.mkdir(baseDir, { recursive: true });
+    const msg = await stopDaemon(baseDir);
+    assertStringIncludes(msg, "not running");
+  } finally {
+    await Deno.remove(tempDir, { recursive: true });
+  }
+});
+
+Deno.test("stopDaemon removes a stale PID file and reports it", async () => {
+  const tempDir = await Deno.makeTempDir();
+  try {
+    const { baseDir, pidPath } = createTestPaths(tempDir);
+    await Deno.mkdir(baseDir, { recursive: true });
+    await Deno.writeTextFile(pidPath, "99999999\n");
+    const msg = await stopDaemon(baseDir);
+    assertStringIncludes(msg, "stale PID file");
+    assertStringIncludes(msg, "99999999");
+    // PID file should be gone.
+    await assertRejects(() => Deno.stat(pidPath), Deno.errors.NotFound);
+  } finally {
+    await Deno.remove(tempDir, { recursive: true });
+  }
+});
+
+Deno.test("stopDaemon SIGTERMs a live child and waits for exit", async () => {
+  const tempDir = await Deno.makeTempDir();
+  try {
+    const { baseDir, pidPath } = createTestPaths(tempDir);
+    await Deno.mkdir(baseDir, { recursive: true });
+
+    // Long-running sleep — we'll send SIGTERM to it and assert it exits.
+    const child = new Deno.Command("sleep", {
+      args: ["60"],
+      stdin: "null",
+      stdout: "null",
+      stderr: "null",
+    }).spawn();
+    await Deno.writeTextFile(pidPath, `${child.pid}\n`);
+
+    const msg = await stopDaemon(baseDir, { timeoutMs: 3_000, pollIntervalMs: 50 });
+    assertStringIncludes(msg, "stopped");
+    assertStringIncludes(msg, String(child.pid));
+
+    // PID file removed, process actually exited.
+    await assertRejects(() => Deno.stat(pidPath), Deno.errors.NotFound);
+    const exit = await child.status;
+    assert(!exit.success, "child should have been killed by SIGTERM");
+  } finally {
+    await Deno.remove(tempDir, { recursive: true });
+  }
+});
