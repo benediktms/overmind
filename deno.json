@@ -11,10 +11,10 @@
   "tasks": {
     "build": "deno run -A cli/claudecode-plugin/scripts/build.ts",
     "dev": "deno run --allow-all cli/main.ts",
-    "install-plugin": "deno run -A cli/claudecode-plugin/scripts/installer.ts install",
+    "install-plugin": "deno run -A --config deno.json cli/claudecode-plugin/scripts/installer.ts install",
     "test": "deno test --allow-all",
     "install": "deno task install-plugin",
-    "uninstall-plugin": "deno run -A cli/claudecode-plugin/scripts/installer.ts uninstall",
+    "uninstall-plugin": "deno run -A --config deno.json cli/claudecode-plugin/scripts/installer.ts uninstall",
     "uninstall": "deno task uninstall-plugin"
   },
   "compilerOptions": {
