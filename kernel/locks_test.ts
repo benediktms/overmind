@@ -428,6 +428,81 @@ Deno.test("two agents racing on the same non-existent path still collide", async
   });
 });
 
+// ── Compaction / TTL sweep (ovr-396.23.10) ──────────────────────────────────
+
+Deno.test("load() compacts the journal — size is bounded after N acquire/release cycles", async () => {
+  // Without compaction the journal grows by 2 lines per cycle (one "acquired"
+  // + one "released"). With snapshot-rewrite the journal after load() holds at
+  // most one line per *live* lock, regardless of how many historical cycles
+  // have been written.
+  await withTempJournal(async (journalPath) => {
+    const N = 20; // cycles that would produce 40 lines without compaction
+    const writer = new LockRegistry(journalPath);
+
+    // Acquire and release the same path N times.  Each cycle appends 2 lines.
+    for (let i = 0; i < N; i++) {
+      await writer.acquire({
+        path: "/cycle.ts",
+        sessionId: "S1",
+        agentId: "A",
+      });
+      await writer.release("/cycle.ts", "S1", "A");
+    }
+
+    // Also leave one lock live so the compacted journal is non-empty.
+    await writer.acquire({ path: "/live.ts", sessionId: "S2", agentId: "B" });
+
+    // Before load() the journal should have 2*N + 1 = 41 lines (plus the
+    // final "acquired" for /live.ts).
+    const before = (await Deno.readTextFile(journalPath))
+      .split("\n")
+      .filter((l) => l.trim().length > 0).length;
+    assert(before > N, `expected >N lines before compaction, got ${before}`);
+
+    // load() triggers compaction.
+    const reader = new LockRegistry(journalPath);
+    await reader.load();
+
+    // After load() the journal must contain exactly 1 line: the live lock.
+    const after = (await Deno.readTextFile(journalPath))
+      .split("\n")
+      .filter((l) => l.trim().length > 0).length;
+    assertEquals(
+      after,
+      1,
+      `expected 1 compacted line, got ${after}`,
+    );
+
+    // The in-memory registry must still reflect the live lock only.
+    const paths = reader.snapshot().map((e) => e.path);
+    assertEquals(paths, ["/live.ts"]);
+
+    // Subsequent operations must continue working normally after compaction.
+    const ok = await reader.release("/live.ts", "S2", "B");
+    assertEquals(ok, true);
+    assertEquals(reader.snapshot().length, 0);
+  });
+});
+
+Deno.test("load() on an empty registry after full release produces an empty journal", async () => {
+  await withTempJournal(async (journalPath) => {
+    const writer = new LockRegistry(journalPath);
+    await writer.acquire({ path: "/a.ts", sessionId: "S1", agentId: "A" });
+    await writer.release("/a.ts", "S1", "A");
+
+    const reader = new LockRegistry(journalPath);
+    await reader.load();
+
+    assertEquals(reader.snapshot().length, 0);
+    const afterContent = await Deno.readTextFile(journalPath);
+    assertEquals(
+      afterContent.trim(),
+      "",
+      "compacted journal should be empty when no locks are live",
+    );
+  });
+});
+
 Deno.test("acquire refuses new entries past the 10k cap (OOM defense)", async () => {
   await withTempJournal(async (journalPath) => {
     const registry = new LockRegistry(journalPath);

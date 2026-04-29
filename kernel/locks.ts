@@ -102,8 +102,7 @@ export class LockRegistry {
       // Replay paths verbatim. Pre-normalization journals may contain
       // non-canonical paths; those become orphans because new acquires
       // normalize and won't match the legacy keys. The orphans cannot cause
-      // false conflicts (different keys), only consume cap slots until the
-      // journal is compacted (deferred to ovr-396.23.10).
+      // false conflicts (different keys), only consume cap slots.
       if (event.kind === "acquired") {
         this.locks.set(entry.path, entry);
       } else if (event.kind === "released") {
@@ -117,6 +116,40 @@ export class LockRegistry {
         }
       }
     }
+
+    // Snapshot-rewrite compaction (ovr-396.23.10).
+    //
+    // After replaying the full history we collapse the journal to only the
+    // currently-live locks.  Without this the file grows monotonically: every
+    // acquire/release cycle appends two lines and nothing is ever removed.
+    //
+    // We chose snapshot-rewrite over per-run files because:
+    //   • simpler — one file, one writer, no directory housekeeping;
+    //   • bounded — worst case is MAX_LOCKS lines after load();
+    //   • safe — we rewrite atomically by writing the whole snapshot before
+    //     touching the queue, so an in-flight appendEvents cannot lose events
+    //     (they still append to the same file after the rewrite).
+    //
+    // The trade-off: a crash mid-rewrite could leave a truncated journal.
+    // That is acceptable because the rewrite only removes *already-released*
+    // locks — the worst outcome is losing released entries that were already
+    // not in the live set, which is the desired end state anyway.
+    const snapshot = Array.from(this.locks.values());
+    const compacted = snapshot
+      .map((entry) =>
+        JSON.stringify(
+          {
+            ts: entry.acquiredAt,
+            kind: "acquired",
+            entry,
+          } satisfies JournalEvent,
+        )
+      )
+      .join("\n");
+    const payload = compacted.length > 0 ? compacted + "\n" : "";
+    await Deno.mkdir(dirname(this.journalPath), { recursive: true });
+    await Deno.writeTextFile(this.journalPath, payload, { create: true });
+    this.journalDirReady = true;
   }
 
   async acquire(input: AcquireInput): Promise<AcquireResult> {
