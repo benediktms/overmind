@@ -35,6 +35,10 @@ export interface RoomOpenParams {
    * a deterministic key derived from a logical owner — e.g. an Overmind
    * `run_id`. Lets the MCP server return the room_id alongside the run_id
    * the moment a delegate is dispatched, with no registration round-trip.
+   *
+   * NOTE: no in-tree caller wires this field yet — the consumer wiring is
+   * tracked as ovr-412 (overmind brain). The field is supported upstream
+   * and will be wired by that task. Do not drop it.
    */
   id?: string;
   purpose?: string;
@@ -96,6 +100,10 @@ interface JsonRpcResponse {
 class NeuralLinkRpcClient {
   private sessionId: string | null = null;
   private nextId = 0;
+  // Coalesces concurrent re-inits so N concurrent 401s trigger exactly one
+  // initialize() round-trip rather than N parallel ones. Cleared when the
+  // in-flight init settles (success or failure).
+  private reinitInFlight: Promise<void> | null = null;
 
   constructor(private readonly httpUrl: string) {}
 
@@ -111,21 +119,44 @@ class NeuralLinkRpcClient {
       method: "initialize",
       params: { protocolVersion: MCP_PROTOCOL_VERSION, capabilities: {} },
     });
-    if (!resp.ok) {
-      throw new Error(
-        `neural_link initialize failed: HTTP ${resp.status} from ${this.mcpUrl()}`,
-      );
+    try {
+      if (!resp.ok) {
+        throw new Error(
+          `neural_link initialize failed: HTTP ${resp.status} from ${this.mcpUrl()}`,
+        );
+      }
+      const sid = resp.headers.get("mcp-session-id");
+      if (!sid) {
+        throw new Error(
+          "neural_link initialize response missing mcp-session-id header",
+        );
+      }
+      this.sessionId = sid;
+      // Drain the body so the connection can be reused — we don't need
+      // anything from the initialize result, only the session header.
+      await resp.body?.cancel();
+    } finally {
+      // Always drain on error paths too — an unread body counts as a leak
+      // in test runs and holds a connection slot in production.
+      if (resp.ok === false) {
+        await resp.body?.cancel().catch(() => {});
+      }
     }
-    const sid = resp.headers.get("mcp-session-id");
-    if (!sid) {
-      throw new Error(
-        "neural_link initialize response missing mcp-session-id header",
-      );
+  }
+
+  /**
+   * Coalesce concurrent re-inits behind a single shared Promise so N
+   * concurrent 401 responses trigger exactly ONE initialize() round-trip.
+   * The promise is cleared after it settles (success or error) so the next
+   * call that needs a re-init starts fresh.
+   */
+  private async ensureFreshSession(): Promise<void> {
+    if (!this.reinitInFlight) {
+      this.reinitInFlight = this.initialize().finally(() => {
+        this.reinitInFlight = null;
+      });
     }
-    this.sessionId = sid;
-    // Drain the body so the connection can be reused — we don't need
-    // anything from the initialize result, only the session header.
-    await resp.body?.cancel();
+    return this.reinitInFlight;
   }
 
   /**
@@ -137,13 +168,14 @@ class NeuralLinkRpcClient {
   async callTool(
     name: string,
     args: Record<string, unknown>,
+    timeoutMs = FETCH_TIMEOUT_MS,
   ): Promise<unknown | null> {
-    const result = await this.callToolOnce(name, args);
+    const result = await this.callToolOnce(name, args, timeoutMs);
     if (result.kind === "ok") return result.value;
     if (result.kind === "session-expired") {
-      // Re-initialize once and retry. If that fails too, give up.
+      // Coalesce concurrent re-inits — only one real initialize() goes out.
       try {
-        await this.initialize();
+        await this.ensureFreshSession();
       } catch (err) {
         console.warn(
           `neural_link re-initialize failed after session expiry: ${
@@ -152,8 +184,17 @@ class NeuralLinkRpcClient {
         );
         return null;
       }
-      const retried = await this.callToolOnce(name, args);
+      const retried = await this.callToolOnce(name, args, timeoutMs);
       if (retried.kind === "ok") return retried.value;
+      if (retried.kind === "session-expired") {
+        // Second 401 even after re-init — session mechanism is broken or
+        // the server rejected our new session immediately. Log explicitly
+        // so the issue is visible without a full packet trace.
+        console.warn(
+          `neural_link second 401 after re-init for ${name} at ${this.mcpUrl()}`,
+        );
+        return null;
+      }
       this.warnFailure(name, retried);
       return null;
     }
@@ -172,7 +213,10 @@ class NeuralLinkRpcClient {
     return `${this.httpUrl}/mcp`;
   }
 
-  private async rawPost(req: JsonRpcRequest): Promise<Response> {
+  private async rawPost(
+    req: JsonRpcRequest,
+    timeoutMs = FETCH_TIMEOUT_MS,
+  ): Promise<Response> {
     const headers: HeadersInit = {
       "Content-Type": "application/json",
       ...(this.sessionId ? { "Mcp-Session-Id": this.sessionId } : {}),
@@ -181,22 +225,26 @@ class NeuralLinkRpcClient {
       method: "POST",
       headers,
       body: JSON.stringify(req),
-      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+      signal: AbortSignal.timeout(timeoutMs),
     });
   }
 
   private async callToolOnce(
     name: string,
     args: Record<string, unknown>,
+    timeoutMs = FETCH_TIMEOUT_MS,
   ): Promise<CallResult> {
     let resp: Response;
     try {
-      resp = await this.rawPost({
-        jsonrpc: "2.0",
-        id: this.allocateId(),
-        method: "tools/call",
-        params: { name, arguments: args },
-      });
+      resp = await this.rawPost(
+        {
+          jsonrpc: "2.0",
+          id: this.allocateId(),
+          method: "tools/call",
+          params: { name, arguments: args },
+        },
+        timeoutMs,
+      );
     } catch (err) {
       return {
         kind: "transport-error",
@@ -281,13 +329,36 @@ type CallResult =
  */
 function unwrapToolResult(rawResult: unknown): CallResult {
   if (!isObject(rawResult) || !Array.isArray(rawResult.content)) {
-    // Fall back to treating the result as the unwrapped payload directly.
-    // Some hand-written stubs don't wrap; tolerating that keeps the
-    // contract narrow and the failure mode obvious.
-    return { kind: "ok", value: rawResult };
+    // Missing content array — malformed, not a tolerable "unwrapped" shape.
+    return {
+      kind: "parse-error",
+      message: "tools/call result missing content array",
+    };
   }
-  const first = rawResult.content[0];
-  if (!isObject(first) || typeof first.text !== "string") {
+  const content = rawResult.content as unknown[];
+  if (content.length !== 1) {
+    return {
+      kind: "parse-error",
+      message:
+        `tools/call expected exactly one content block, got ${content.length}`,
+    };
+  }
+  const first = content[0];
+  if (!isObject(first)) {
+    return {
+      kind: "parse-error",
+      message: "tools/call content[0] is not an object",
+    };
+  }
+  if (first.type !== "text") {
+    return {
+      kind: "parse-error",
+      message: `tools/call content[0].type !== text, got ${
+        typeof first.type === "string" ? first.type : JSON.stringify(first.type)
+      }`,
+    };
+  }
+  if (typeof first.text !== "string") {
     return {
       kind: "parse-error",
       message: "tools/call content[0] missing text field",
@@ -440,7 +511,11 @@ export class NeuralLinkAdapter implements NeuralLinkPort {
     if (timeoutMs !== undefined) args.timeout_ms = String(timeoutMs);
 
     const result = await this.client.callTool("room_leave", args);
-    return result !== null;
+    // Pin to specific success tokens from handlers.gleam:572.
+    // The real handler emits `status: "departed"` as the canonical success
+    // signal; `left: true` is the legacy stub shape kept for backward compat.
+    return isObject(result) &&
+      (result.status === "departed" || result.left === true);
   }
 
   async messageSend(params: MessageSendParams): Promise<boolean> {
@@ -460,7 +535,9 @@ export class NeuralLinkAdapter implements NeuralLinkPort {
     }
 
     const result = await this.client.callTool("message_send", args);
-    return result !== null;
+    // Pin to the real handler's success signal (handlers.gleam:644):
+    // `message_id` as a string is the canonical success token.
+    return isObject(result) && typeof result.message_id === "string";
   }
 
   async inboxRead(
@@ -501,7 +578,11 @@ export class NeuralLinkAdapter implements NeuralLinkPort {
       room_id: roomId,
       resolution,
     });
-    return result !== null;
+    // Pin to specific success tokens from handlers.gleam:907 region.
+    // The real handler emits `status: "closed"` as the canonical success
+    // signal; `closed: true` is the legacy stub shape kept for backward compat.
+    return isObject(result) &&
+      (result.status === "closed" || result.closed === true);
   }
 
   async waitFor(
@@ -521,7 +602,15 @@ export class NeuralLinkAdapter implements NeuralLinkPort {
     if (kinds && kinds.length > 0) args.kinds = kinds.join(",");
     if (from && from.length > 0) args.from = from.join(",");
 
-    const result = await this.client.callTool("wait_for", args);
+    // waitFor legitimately blocks server-side up to 120 s. Apply a small
+    // buffer above the server-side deadline so the client-side timeout
+    // only fires if the server goes completely silent — not on normal
+    // long-poll expiry.
+    const result = await this.client.callTool(
+      "wait_for",
+      args,
+      timeoutMs + 2_000,
+    );
     if (!isObject(result)) return null;
     // neural_link returns the matched message directly (or signals "no
     // match" via a distinct shape — we treat any payload missing

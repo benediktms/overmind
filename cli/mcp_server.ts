@@ -14,6 +14,8 @@ import {
 } from "../kernel/daemon.ts";
 import { Mode } from "../kernel/types.ts";
 import type { SocketRequest, SocketResponse } from "../kernel/types.ts";
+import { normalizeNeuralLinkBase } from "../adapters/neural_link/adapter.ts";
+export { normalizeNeuralLinkBase };
 
 interface JsonRpcMessage {
   jsonrpc: "2.0";
@@ -56,18 +58,6 @@ export interface DelegateSink {
     baseDir: string,
     signal?: AbortSignal,
   ): Promise<SocketResponse>;
-}
-
-/**
- * Trim a trailing `/mcp` suffix from a configured URL. Earlier versions of
- * this server (and the legacy Node bridge) baked `/mcp` into the env var;
- * we now treat the env var as the server BASE URL and append paths
- * explicitly. Accept both shapes for backward compat with existing user
- * configs.
- */
-export function normalizeNeuralLinkBase(raw: string): string {
-  const trimmed = raw.replace(/\/+$/, "");
-  return trimmed.endsWith("/mcp") ? trimmed.slice(0, -"/mcp".length) : trimmed;
 }
 
 function loadConfig(): MCPConfig {

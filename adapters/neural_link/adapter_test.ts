@@ -1,4 +1,9 @@
-import { assert, assertEquals, assertFalse } from "@std/assert";
+import {
+  assert,
+  assertEquals,
+  assertFalse,
+  assertStringIncludes,
+} from "@std/assert";
 import {
   MessageKind,
   NeuralLinkAdapter,
@@ -88,6 +93,11 @@ interface StubBehavior {
   ) => unknown;
   /** When true, the next tools/call returns 401 (one-shot — auto-clears). */
   failNextWith401?: boolean;
+  /**
+   * Number of consecutive tools/call requests to answer with 401 before
+   * accepting. Used to test concurrent re-init coalescing (N1).
+   */
+  failNextN401?: number;
 }
 
 interface StubServer {
@@ -191,6 +201,17 @@ async function startStub(initial: StubBehavior = {}): Promise<StubServer> {
           });
         }
 
+        if (
+          handles.behavior.failNextN401 !== undefined &&
+          handles.behavior.failNextN401 > 0
+        ) {
+          handles.behavior.failNextN401 -= 1;
+          return new Response('{"error":"Invalid session"}', {
+            status: 401,
+            headers: { "content-type": "application/json" },
+          });
+        }
+
         const handlerResult = handles.behavior.toolResponse?.(toolName, args) ??
           defaultToolResponse(toolName, args);
         // neural_link wraps every tool response in MCP's standard envelope:
@@ -266,17 +287,26 @@ function isToolErrorEnvelope(value: unknown): value is ToolErrorEnvelope {
   );
 }
 
+/**
+ * Default stub responses shaped to match real neural_link handler outputs.
+ * Shapes are sourced from handlers.gleam:
+ *   - room_leave:   line ~572 region
+ *   - room_close:   line ~907 region
+ *   - message_send: line ~644 region
+ */
 function defaultToolResponse(
   toolName: string,
   args: Record<string, unknown>,
 ): unknown {
   switch (toolName) {
     case "room_open":
+      // participant_id is always a string when created fresh; null only on
+      // already_existed: true paths. The default stub always creates fresh.
       return {
         room_id: args.id ?? "room_0123456789abcdef",
         title: args.title ?? "stub",
         status: "open",
-        participant_id: args.participant_id ?? null,
+        participant_id: String(args.participant_id ?? "lead"),
         role: "lead",
         already_existed: false,
       };
@@ -288,11 +318,33 @@ function defaultToolResponse(
         interaction_mode: null,
       };
     case "room_leave":
-      return { left: true };
+      // Real handler emits status:"departed" + drain_completed (handlers.gleam:572)
+      return {
+        room_id: args.room_id,
+        participant_id: args.participant_id,
+        status: "departed",
+        drain_completed: true,
+      };
     case "room_close":
-      return { closed: true };
+      // Real handler emits status:"closed" + extraction fields (handlers.gleam:907)
+      return {
+        room_id: args.room_id,
+        status: "closed",
+        message_count: 0,
+        participant_ids: [],
+        decisions: [],
+        open_questions: [],
+        unresolved_blockers: [],
+        artifact_record_id: null,
+      };
     case "message_send":
-      return { sent: true };
+      // Real handler emits message_id as the success signal (handlers.gleam:644)
+      return {
+        message_id: "msg_test",
+        room_id: args.room_id,
+        sequence: 1,
+        _inbox_pending: 0,
+      };
     case "message_ack":
       return { acked: true };
     case "inbox_read":
@@ -479,6 +531,56 @@ Deno.test("messageSend forwards optional fields only when present", async () => 
   }
 });
 
+Deno.test("messageSend returns true when server emits message_id (real handler contract)", async () => {
+  // Confirms the N2 success contract: messageSend pins to message_id presence,
+  // not `sent: true`. The default stub now returns the real handler shape.
+  const stub = await startStub();
+  try {
+    const adapter = await makeAdapter(stub);
+    const ok = await adapter.messageSend({
+      roomId: "room_0123456789abcdef",
+      from: "p",
+      kind: MessageKind.Finding,
+      summary: "finding",
+    });
+    assert(ok, "messageSend should return true when message_id is present");
+  } finally {
+    await stub.shutdown();
+  }
+});
+
+Deno.test("roomLeave returns true when server emits status:departed (real handler contract)", async () => {
+  // Confirms the N2 success contract: roomLeave pins to status:"departed",
+  // not a bare null-check. The default stub now returns the real handler shape.
+  const stub = await startStub();
+  try {
+    const adapter = await makeAdapter(stub);
+    const ok = await adapter.roomLeave(
+      "room_0123456789abcdef",
+      "p",
+    );
+    assert(ok, "roomLeave should return true when status is departed");
+  } finally {
+    await stub.shutdown();
+  }
+});
+
+Deno.test("roomClose returns true when server emits status:closed (real handler contract)", async () => {
+  // Confirms the N2 success contract: roomClose pins to status:"closed",
+  // not a bare null-check. The default stub now returns the real handler shape.
+  const stub = await startStub();
+  try {
+    const adapter = await makeAdapter(stub);
+    const ok = await adapter.roomClose(
+      "room_0123456789abcdef",
+      "completed",
+    );
+    assert(ok, "roomClose should return true when status is closed");
+  } finally {
+    await stub.shutdown();
+  }
+});
+
 Deno.test("inboxRead returns the raw array result (not wrapped in {messages})", async () => {
   const stub = await startStub({
     toolResponse: (name) => {
@@ -543,6 +645,43 @@ Deno.test("on 401 the adapter re-initializes once and retries the call", async (
   }
 });
 
+Deno.test("concurrent re-inits coalesce to a single initialize call (N1)", async () => {
+  // The stub answers the first 3 tools/call requests with 401, then accepts.
+  // Three concurrent roomJoin calls all hit 401, all try to re-init — but
+  // ensureFreshSession() coalesces them behind a single Promise<void>.
+  // Assert that exactly ONE re-init round-trip hit the server (not three).
+  const stub = await startStub({ failNextN401: 3 });
+  try {
+    const adapter = await makeAdapter(stub);
+
+    // Launch 3 concurrent calls. Each will see a 401 and trigger re-init,
+    // but the coalescing lock means only one initialize() goes out.
+    const [ok1, ok2, ok3] = await Promise.all([
+      adapter.roomJoin("room_aaaa0000bbbb1111", "p1", "P1"),
+      adapter.roomJoin("room_aaaa0000bbbb1111", "p2", "P2"),
+      adapter.roomJoin("room_aaaa0000bbbb1111", "p3", "P3"),
+    ]);
+
+    const initializeCalls = stub.calls.filter((c) => c.method === "initialize");
+    assertEquals(
+      initializeCalls.length,
+      2, // one initial connect + exactly one re-init (not 1+3)
+      `expected 1 initial + 1 re-init, got ${initializeCalls.length} initialize calls`,
+    );
+
+    // At least one of the three calls should have succeeded after the
+    // single re-init. (Others may have gotten a 401 on their retry if the
+    // stub's counter ran out before them — that is acceptable; the key
+    // invariant is only ONE re-init occurred.)
+    assert(
+      ok1 || ok2 || ok3,
+      "at least one concurrent call should succeed after re-init",
+    );
+  } finally {
+    await stub.shutdown();
+  }
+});
+
 Deno.test("tool-error envelope (isError: true) yields null/false without throwing", async () => {
   // Pins the unwrap of MCP's standard tool-level error envelope:
   //   {content: [{type: "text", text: "<msg>"}], isError: true}
@@ -556,6 +695,73 @@ Deno.test("tool-error envelope (isError: true) yields null/false without throwin
     const ok = await adapter.roomJoin("room_aaaa0000bbbb1111", "p", "P");
     assertFalse(ok);
   } finally {
+    await stub.shutdown();
+  }
+});
+
+Deno.test("tool-error path is distinct from parse-error: warn message contains 'tool error:' prefix (B3)", async () => {
+  // Mutation test confirmed: removing the isError check makes JSON.parse
+  // throw (the error text is not valid JSON), which falls through to the
+  // parse-error branch. This test pins the *semantic* distinction — the
+  // warn message must carry the 'tool error:' prefix that warnFailure emits
+  // for kind:"tool-error", not the 'malformed JSON-RPC response:' prefix
+  // that the parse-error branch would emit.
+  const stub = await startStub({
+    toolResponse: () => toolError("invalid id: room_id must match …"),
+  });
+
+  const warnings: string[] = [];
+  const originalWarn = console.warn;
+  console.warn = (...args: unknown[]) => {
+    warnings.push(args.map(String).join(" "));
+  };
+
+  try {
+    const adapter = await makeAdapter(stub);
+    const ok = await adapter.roomJoin("room_aaaa0000bbbb1111", "p", "P");
+    assertFalse(ok);
+
+    assertEquals(warnings.length, 1, "expected exactly one console.warn call");
+    assertStringIncludes(
+      warnings[0],
+      "tool error:",
+      "warn message must carry the 'tool error:' prefix, not 'malformed JSON-RPC response:'",
+    );
+  } finally {
+    console.warn = originalWarn;
+    await stub.shutdown();
+  }
+});
+
+Deno.test("non-JSON 200 response returns null and warns with 'malformed JSON-RPC response' (N6)", async () => {
+  // Drives a 200 response with a non-JSON body (raw HTML) through callToolOnce
+  // and asserts the adapter returns null AND console.warn was called with
+  // the parse-error prefix.
+  const stub = await startStubWithRawBody(
+    200,
+    "<html><body>Bad gateway</body></html>",
+    "text/html",
+  );
+
+  const warnings: string[] = [];
+  const originalWarn = console.warn;
+  console.warn = (...args: unknown[]) => {
+    warnings.push(args.map(String).join(" "));
+  };
+
+  try {
+    const adapter = await makeAdapter(stub);
+    const result = await adapter.roomJoin("room_x", "p", "P");
+    assertFalse(result, "should return false/null on non-JSON response");
+
+    assert(warnings.length > 0, "expected at least one console.warn call");
+    assertStringIncludes(
+      warnings[0],
+      "malformed JSON-RPC response",
+      "warn message must contain 'malformed JSON-RPC response'",
+    );
+  } finally {
+    console.warn = originalWarn;
     await stub.shutdown();
   }
 });
@@ -656,6 +862,67 @@ async function startStubWithError(
         }),
         { headers: { "content-type": "application/json" } },
       );
+    },
+  );
+  const addr = server.addr as Deno.NetAddr;
+  return {
+    url: `http://${addr.hostname}:${addr.port}`,
+    calls,
+    get currentSessionId() {
+      return handles.sessionId;
+    },
+    get behavior() {
+      return handles.behavior;
+    },
+    shutdown: async () => {
+      ac.abort();
+      await server.finished;
+    },
+  };
+}
+
+/**
+ * Stub variant that returns a raw non-JSON body on tools/call requests.
+ * Used for the parse-error path test (N6).
+ */
+async function startStubWithRawBody(
+  status: number,
+  body: string,
+  contentType: string,
+): Promise<StubServer> {
+  const calls: RecordedCall[] = [];
+  let sessionCounter = 0;
+  const handles: { sessionId: string; behavior: StubBehavior } = {
+    sessionId: "",
+    behavior: {},
+  };
+  const ac = new AbortController();
+  const server = Deno.serve(
+    { port: 0, signal: ac.signal, onListen: () => {} },
+    async (req) => {
+      const url = new URL(req.url);
+      if (url.pathname === "/health") {
+        return new Response('{"status":"ok"}');
+      }
+      const reqBody = await req.json() as { id: number; method: string };
+      if (reqBody.method === "initialize") {
+        sessionCounter += 1;
+        handles.sessionId = `stub-session-${sessionCounter}`;
+        calls.push({
+          method: "initialize",
+          hadSessionId: false,
+          sessionIdSent: null,
+        });
+        return new Response(
+          JSON.stringify({ jsonrpc: "2.0", id: reqBody.id, result: {} }),
+          { headers: { "mcp-session-id": handles.sessionId } },
+        );
+      }
+      // tools/call → raw non-JSON body.
+      return new Response(body, {
+        status,
+        headers: { "content-type": contentType },
+      });
     },
   );
   const addr = server.addr as Deno.NetAddr;
