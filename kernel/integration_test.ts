@@ -15,8 +15,9 @@ import { OvermindDaemon } from "./daemon.ts";
 import { Kernel } from "./kernel.ts";
 import { MockBrainAdapter, type MockCall } from "./test_helpers/mock_brain.ts";
 import { MockNeuralLinkAdapter } from "./test_helpers/mock_neural_link.ts";
-import { Mode, RunState } from "./types.ts";
+import { EventType, Mode, RunState } from "./types.ts";
 import type { WaitForMessage } from "./types.ts";
+import type { KernelEvent } from "./events.ts";
 import { tryAcquire } from "../cli/claudecode-plugin/scripts/lib/lock_client.ts";
 
 const MODE_EXECUTION_WAIT_MS = 100;
@@ -706,6 +707,53 @@ Deno.test("integration: HTTP /lock returns 409 with holder on cross-session cont
     } else {
       Deno.env.set("OVERMIND_EDIT_HARNESS", previousHarnessFlag);
     }
+    await shutdownHarness(harness);
+  }
+});
+
+Deno.test("integration: kernel /event POST is observable via EventBus subscriber", async () => {
+  // Hook deliveries via /event were previously dropped silently — the
+  // handler accepted the post but the eventSink defaulted to undefined.
+  // Wired through to the kernel's EventBus so multi-agent runs have a
+  // place to watch hook traffic land.
+  const harness = await createHarness();
+  try {
+    const baseUrl = `http://127.0.0.1:${harness.daemon.getHttpPort()}`;
+    const events: KernelEvent[] = [];
+    const off = harness.kernel.getEventBus().on(
+      EventType.ExternalHookEvent,
+      (event) => {
+        events.push(event);
+      },
+    );
+
+    try {
+      const res = await fetch(`${baseUrl}/event`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          event: "post_tool_verify",
+          data: { ok: true, file: "foo.ts" },
+          timestamp: "2026-04-29T00:00:00.000Z",
+        }),
+      });
+      assertEquals(res.status, 200);
+      await res.body?.cancel();
+
+      assertEquals(events.length, 1);
+      assertEquals(events[0].type, EventType.ExternalHookEvent);
+      assertEquals(
+        (events[0].payload as { body: unknown }).body,
+        {
+          event: "post_tool_verify",
+          data: { ok: true, file: "foo.ts" },
+          timestamp: "2026-04-29T00:00:00.000Z",
+        },
+      );
+    } finally {
+      off();
+    }
+  } finally {
     await shutdownHarness(harness);
   }
 });

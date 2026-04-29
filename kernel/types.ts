@@ -45,6 +45,12 @@ export enum EventType {
   ExternalDiscovery = "external_discovery",
   DecisionMade = "decision_made",
   KernelShutdown = "kernel_shutdown",
+  // External hook event delivered via the kernel's HTTP /event endpoint.
+  // Payload carries `body`: the raw JSON the hook POSTed. Hook scripts post
+  // arbitrary shapes so we deliberately don't pre-flatten — subscribers
+  // filter on body fields if they need a specific event kind. The kernel-
+  // observed timestamp lives on the KernelEvent's own `timestamp` field.
+  ExternalHookEvent = "external_hook_event",
 }
 
 export interface KernelConfig {

@@ -310,6 +310,36 @@ Deno.test("POST /event accepts any payload as best-effort", async () => {
   }
 });
 
+Deno.test("POST /event with empty body delivers null to the sink", async () => {
+  // readJsonBody returns null for empty bodies; pin that null propagates to
+  // the sink rather than being filtered out. A subscriber that assumed an
+  // object would silently fail otherwise (the bus emit catch swallows the
+  // throw, but the event is effectively dropped from that subscriber).
+  const events: unknown[] = [];
+  const dir = await Deno.makeTempDir();
+  const registry = new LockRegistry(join(dir, "locks.jsonl"));
+  const server = new OvermindHttpServer({
+    registry,
+    port: 0,
+    eventSink: (e) => {
+      events.push(e);
+    },
+  });
+  const { port, hostname } = server.start();
+  try {
+    const res = await fetch(`http://${hostname}:${port}/event`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+    });
+    assertEquals(res.status, 200);
+    assertEquals(await res.json(), { ok: true });
+    assertEquals(events, [null]);
+  } finally {
+    await server.shutdown();
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
 Deno.test("POST /event tolerates malformed JSON", async () => {
   const h = await startTestServer();
   try {

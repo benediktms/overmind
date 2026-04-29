@@ -1,5 +1,5 @@
 import { OvermindError } from "./errors.ts";
-import { Mode } from "./types.ts";
+import { EventType, Mode } from "./types.ts";
 import type {
   CancelRequest,
   ModeRequest,
@@ -235,10 +235,29 @@ export class OvermindDaemon {
     try {
       const registry = new LockRegistry(this.lockJournalPath);
       await registry.load();
+      const kernel = this.kernel;
+      // Wire /event posts onto the kernel's EventBus so hook deliveries land
+      // somewhere observable. Without a kernel (script-mode subprocess path)
+      // events drop silently — the existing fail-open contract on the hook
+      // side already handles that gracefully.
+      //
+      // We emit on the bus directly rather than via Kernel.emit, deliberately
+      // bypassing the TriggerEngine. External (attacker-controlled) hook
+      // payloads must never reach adapter actions like brain_task_create.
+      const eventSink = kernel
+        ? (body: unknown) => {
+          kernel.getEventBus().emit({
+            type: EventType.ExternalHookEvent,
+            timestamp: new Date(),
+            payload: { body },
+          });
+        }
+        : undefined;
       const server = new OvermindHttpServer({
         registry,
         port: this.httpPort,
         hostname: this.httpHostname,
+        eventSink,
       });
       server.start();
       this.lockRegistry = registry;
