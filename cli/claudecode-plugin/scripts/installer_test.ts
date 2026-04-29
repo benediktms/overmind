@@ -2,11 +2,11 @@ import { assertEquals, assertRejects } from "@std/assert";
 import { dirname } from "@std/path";
 
 import {
-  installPlugin,
   type InstallerOptions,
+  installPlugin,
   uninstallPlugin,
-  withOvermindAgentBlock,
   withoutOvermindAgentBlock,
+  withOvermindAgentBlock,
 } from "./installer.ts";
 
 async function writeJson(path: string, value: unknown): Promise<void> {
@@ -36,7 +36,10 @@ async function listBackups(claudeMdPath: string): Promise<string[]> {
   const out: string[] = [];
   try {
     for await (const entry of Deno.readDir(dir)) {
-      if (entry.isFile && entry.name.startsWith(`${base}.`) && entry.name.endsWith(".bak")) {
+      if (
+        entry.isFile && entry.name.startsWith(`${base}.`) &&
+        entry.name.endsWith(".bak")
+      ) {
         out.push(`${dir}/${entry.name}`);
       }
     }
@@ -86,6 +89,8 @@ interface TestEnv {
   pluginCacheRoot: string;
   binaryPath: string;
   binDir: string;
+  userConfigPath: string;
+  templateConfigPath: string;
   cleanup: () => Promise<void>;
 }
 
@@ -104,6 +109,10 @@ async function createTestEnv(): Promise<TestEnv> {
     pluginCacheRoot: `${root}/.claude/plugins/cache`,
     binaryPath: `${root}/.local/bin/overmind`,
     binDir: `${root}/.local/bin`,
+    // marketplaceSourcePath defaults to env.root in `isolated()`, so the
+    // template the installer copies from lives at <root>/config/overmind.toml.
+    userConfigPath: `${root}/.config/overmind/overmind.toml`,
+    templateConfigPath: `${root}/config/overmind.toml`,
     cleanup: () => Deno.remove(root, { recursive: true }),
   };
 }
@@ -112,7 +121,10 @@ async function createTestEnv(): Promise<TestEnv> {
  * Build an `installPlugin` options object that is fully isolated to the test
  * env (no real-filesystem writes outside `env.root`).
  */
-function isolated(env: TestEnv, extra: Partial<InstallerOptions> = {}): InstallerOptions {
+function isolated(
+  env: TestEnv,
+  extra: Partial<InstallerOptions> = {},
+): InstallerOptions {
   return {
     sourcePluginRoot: env.sourceRoot,
     pluginDir: env.pluginDir,
@@ -123,10 +135,16 @@ function isolated(env: TestEnv, extra: Partial<InstallerOptions> = {}): Installe
     binaryPath: env.binaryPath,
     binDir: env.binDir,
     marketplaceSourcePath: env.root,
+    userConfigPath: env.userConfigPath,
     skipCompile: true,
     skipDaemonStart: true,
     ...extra,
   };
+}
+
+async function writeTemplateConfig(env: TestEnv, body: string): Promise<void> {
+  await Deno.mkdir(dirname(env.templateConfigPath), { recursive: true });
+  await Deno.writeTextFile(env.templateConfigPath, body);
 }
 
 Deno.test("installPlugin creates plugin symlink and enables overmind plugin", async () => {
@@ -152,7 +170,9 @@ Deno.test("installPlugin creates plugin symlink and enables overmind plugin", as
 Deno.test("installPlugin is idempotent when run multiple times", async () => {
   const env = await createTestEnv();
   try {
-    await writeJson(env.settingsPath, { enabledPlugins: { "another@plugin": true } });
+    await writeJson(env.settingsPath, {
+      enabledPlugins: { "another@plugin": true },
+    });
     await installPlugin(isolated(env));
     await installPlugin(isolated(env));
 
@@ -160,7 +180,10 @@ Deno.test("installPlugin is idempotent when run multiple times", async () => {
     const enabledPlugins = settings.enabledPlugins as Record<string, unknown>;
     assertEquals(enabledPlugins["overmind@overmind"], true);
     assertEquals(enabledPlugins["another@plugin"], true);
-    assertEquals(Object.keys(enabledPlugins).sort(), ["another@plugin", "overmind@overmind"]);
+    assertEquals(Object.keys(enabledPlugins).sort(), [
+      "another@plugin",
+      "overmind@overmind",
+    ]);
   } finally {
     await env.cleanup();
   }
@@ -206,7 +229,10 @@ Deno.test("installPlugin registers MCP server in claude.json pointing at the bin
     await installPlugin(isolated(env));
 
     const claudeJson = await readJson(env.claudeJsonPath);
-    const mcpServers = claudeJson.mcpServers as Record<string, Record<string, unknown>>;
+    const mcpServers = claudeJson.mcpServers as Record<
+      string,
+      Record<string, unknown>
+    >;
     const overmind = mcpServers.overmind;
     assertEquals(overmind.type, "stdio");
     assertEquals(overmind.command, env.binaryPath);
@@ -234,7 +260,9 @@ Deno.test("installPlugin creates the plugin cache symlink under pluginCacheRoot"
 Deno.test("uninstallPlugin removes plugin path, cache tree, MCP entry, and settings entry", async () => {
   const env = await createTestEnv();
   try {
-    await writeJson(env.settingsPath, { enabledPlugins: { "other@local": true } });
+    await writeJson(env.settingsPath, {
+      enabledPlugins: { "other@local": true },
+    });
 
     await installPlugin(isolated(env));
     await uninstallPlugin(isolated(env));
@@ -279,7 +307,10 @@ Deno.test("installPlugin marketplace mode writes marketplace settings without cr
     assertEquals(enabledPlugins["overmind@overmind"], true);
     assertEquals(settings.allowedTools, ["bash"]);
 
-    const marketplaces = settings.extraKnownMarketplaces as Record<string, unknown>;
+    const marketplaces = settings.extraKnownMarketplaces as Record<
+      string,
+      unknown
+    >;
     const overmindSource = marketplaces["overmind"] as Record<string, unknown>;
     const source = overmindSource.source as Record<string, unknown>;
     assertEquals(source.source, "github");
@@ -298,7 +329,11 @@ Deno.test("installPlugin marketplace mode is idempotent", async () => {
 
     const settings = await readJson(env.settingsPath);
     const enabledPlugins = settings.enabledPlugins as Record<string, unknown>;
-    assertEquals(Object.keys(enabledPlugins).filter((k) => k.startsWith("overmind")).length, 1);
+    assertEquals(
+      Object.keys(enabledPlugins).filter((k) => k.startsWith("overmind"))
+        .length,
+      1,
+    );
   } finally {
     await env.cleanup();
   }
@@ -312,7 +347,10 @@ Deno.test("installPlugin marketplace mode does not leave a directory-source mark
     await installPlugin(isolated(env, { mode: "marketplace" }));
 
     const settings = await readJson(env.settingsPath);
-    const marketplaces = settings.extraKnownMarketplaces as Record<string, unknown>;
+    const marketplaces = settings.extraKnownMarketplaces as Record<
+      string,
+      unknown
+    >;
     const overmindEntry = marketplaces["overmind"] as Record<string, unknown>;
     const source = overmindEntry.source as Record<string, unknown>;
     assertEquals(source.source, "github");
@@ -404,7 +442,8 @@ Deno.test("withOvermindAgentBlock preserves user content above and below", () =>
 });
 
 Deno.test("withOvermindAgentBlock replaces stale version block (upgrade)", () => {
-  const stale = `${AGENT_START}\n<!-- overmind:version:0.0.1 -->\n# stale body\n${AGENT_END}\n`;
+  const stale =
+    `${AGENT_START}\n<!-- overmind:version:0.0.1 -->\n# stale body\n${AGENT_END}\n`;
   const result = withOvermindAgentBlock(stale);
   assertEquals(result.includes("# stale body"), false);
   assertEquals(result.includes(AGENT_START), true);
@@ -412,7 +451,8 @@ Deno.test("withOvermindAgentBlock replaces stale version block (upgrade)", () =>
 });
 
 Deno.test("withOvermindAgentBlock collapses duplicate blocks into one", () => {
-  const corrupted = `${AGENT_START}\nfirst\n${AGENT_END}\n\n# user content\n\n${AGENT_START}\nsecond\n${AGENT_END}\n`;
+  const corrupted =
+    `${AGENT_START}\nfirst\n${AGENT_END}\n\n# user content\n\n${AGENT_START}\nsecond\n${AGENT_END}\n`;
   const result = withOvermindAgentBlock(corrupted);
   assertEquals((result.match(/overmind:start/g) ?? []).length, 1);
   assertEquals(result.includes("first"), false);
@@ -421,7 +461,8 @@ Deno.test("withOvermindAgentBlock collapses duplicate blocks into one", () => {
 });
 
 Deno.test("withOvermindAgentBlock repairs unterminated block (start without end)", () => {
-  const broken = "# header\n\n" + AGENT_START + "\nhalf-written body — process killed mid-write\n";
+  const broken = "# header\n\n" + AGENT_START +
+    "\nhalf-written body — process killed mid-write\n";
   const result = withOvermindAgentBlock(broken);
   assertEquals(result.includes("half-written"), false);
   assertEquals(result.includes("# header"), true);
@@ -442,7 +483,8 @@ Deno.test("withoutOvermindAgentBlock is a no-op when no block is present", () =>
 });
 
 Deno.test("withoutOvermindAgentBlock removes every duplicate block", () => {
-  const corrupted = `${AGENT_START}\na\n${AGENT_END}\n\nuser\n\n${AGENT_START}\nb\n${AGENT_END}\n`;
+  const corrupted =
+    `${AGENT_START}\na\n${AGENT_END}\n\nuser\n\n${AGENT_START}\nb\n${AGENT_END}\n`;
   const result = withoutOvermindAgentBlock(corrupted);
   assertEquals(result.includes(AGENT_START), false);
   assertEquals(result.includes("user"), true);
@@ -502,7 +544,10 @@ ALWAYS prefix commits with [WIP]
 
     const md = await Deno.readTextFile(env.claudeMdPath);
     assertEquals(md.includes("# My personal Claude config"), true);
-    assertEquals(md.includes("Some freeform notes that are important to me."), true);
+    assertEquals(
+      md.includes("Some freeform notes that are important to me."),
+      true,
+    );
     assertEquals(md.includes("<!-- some-other-tool:start -->"), true);
     assertEquals(md.includes("Other tool's config"), true);
     assertEquals(md.includes("ALWAYS prefix commits with [WIP]"), true);
@@ -668,7 +713,8 @@ Deno.test("uninstallPlugin skips backup when CLAUDE.md has no overmind block", a
 Deno.test("install + uninstall round-trip yields byte-identical user content", async () => {
   const env = await createTestEnv();
   try {
-    const seed = "# header\n\nbody line 1\nbody line 2\n\n## subsection\n\nmore content\n";
+    const seed =
+      "# header\n\nbody line 1\nbody line 2\n\n## subsection\n\nmore content\n";
     await Deno.mkdir(dirname(env.claudeMdPath), { recursive: true });
     await Deno.writeTextFile(env.claudeMdPath, seed);
 
@@ -709,6 +755,57 @@ Deno.test("installPlugin replaces a stale plugin-dir symlink in copy mode (upser
     // dangling pre-existing symlink doesn't trip the install — it should
     // be cleaned up without errors.
     assertEquals(await lstatSafe(env.pluginDir), null);
+  } finally {
+    await env.cleanup();
+  }
+});
+
+Deno.test("installPlugin seeds user config from template when missing", async () => {
+  const env = await createTestEnv();
+  try {
+    const templateBody = '# template\n\n[dispatcher]\nmode = "subprocess"\n';
+    await writeTemplateConfig(env, templateBody);
+
+    assertEquals(await pathExists(env.userConfigPath), false);
+    await installPlugin(isolated(env));
+
+    assertEquals(await pathExists(env.userConfigPath), true);
+    const seeded = await Deno.readTextFile(env.userConfigPath);
+    assertEquals(seeded, templateBody);
+  } finally {
+    await env.cleanup();
+  }
+});
+
+Deno.test("installPlugin preserves an existing user config (no overwrite)", async () => {
+  const env = await createTestEnv();
+  try {
+    await writeTemplateConfig(env, "# template\n");
+    // Operator has already customised their config — don't blow it away.
+    const userEdits =
+      '# operator\'s customisations\n[dispatcher]\nmode = "client_side"\n';
+    await Deno.mkdir(dirname(env.userConfigPath), { recursive: true });
+    await Deno.writeTextFile(env.userConfigPath, userEdits);
+
+    await installPlugin(isolated(env));
+
+    const after = await Deno.readTextFile(env.userConfigPath);
+    assertEquals(after, userEdits);
+  } finally {
+    await env.cleanup();
+  }
+});
+
+Deno.test("installPlugin no-ops user-config seeding when template is missing", async () => {
+  const env = await createTestEnv();
+  try {
+    // No template at <root>/config/overmind.toml on purpose.
+    assertEquals(await pathExists(env.templateConfigPath), false);
+
+    await installPlugin(isolated(env));
+
+    // Should not have created an empty file or thrown — silent no-op.
+    assertEquals(await pathExists(env.userConfigPath), false);
   } finally {
     await env.cleanup();
   }

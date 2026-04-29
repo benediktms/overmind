@@ -9,7 +9,10 @@ import { dirname, fromFileUrl, join, resolve } from "@std/path";
 // github); the plugin ID is identical.
 const PLUGIN_ID = "overmind@overmind";
 const MARKETPLACE_NAME = "overmind";
-const MARKETPLACE_GITHUB_SOURCE = { source: "github" as const, repo: "benediktms/overmind" };
+const MARKETPLACE_GITHUB_SOURCE = {
+  source: "github" as const,
+  repo: "benediktms/overmind",
+};
 
 // Legacy ID written by older installer versions (which assumed a built-in
 // "local" marketplace that never existed). Cleaned up on every install.
@@ -92,6 +95,14 @@ export interface InstallerOptions {
   symlink?: boolean;
   skipCompile?: boolean;
   skipDaemonStart?: boolean;
+  /**
+   * Override for `~/.config/overmind/overmind.toml` — the user-level config
+   * file that the daemon's ConfigLoader reads at startup. The installer
+   * seeds this from the repo's `config/overmind.toml` template on first
+   * install and never overwrites an existing file. Tests should set this
+   * to a tmpdir path.
+   */
+  userConfigPath?: string;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -124,19 +135,30 @@ function resolvePaths(opts: InstallerOptions): {
   symlink: boolean;
   skipCompile: boolean;
   skipDaemonStart: boolean;
+  userConfigPath: string;
 } {
   const home = Deno.env.get("HOME");
   if (!home && (!opts.pluginDir || !opts.settingsPath)) {
-    throw new Error("HOME environment variable is required when pluginDir/settingsPath are not provided");
+    throw new Error(
+      "HOME environment variable is required when pluginDir/settingsPath are not provided",
+    );
   }
 
-  const sourcePluginRoot = resolve(opts.sourcePluginRoot ?? defaultSourcePluginRoot());
-  const marketplaceSourcePath = resolve(opts.marketplaceSourcePath ?? defaultMarketplaceSourcePath());
+  const sourcePluginRoot = resolve(
+    opts.sourcePluginRoot ?? defaultSourcePluginRoot(),
+  );
+  const marketplaceSourcePath = resolve(
+    opts.marketplaceSourcePath ?? defaultMarketplaceSourcePath(),
+  );
   const binDir = resolve(opts.binDir ?? `${home}/${DEFAULT_BIN_DIR}`);
-  const pluginDir = resolve(opts.pluginDir ?? `${home}/.claude/plugins/overmind`);
+  const pluginDir = resolve(
+    opts.pluginDir ?? `${home}/.claude/plugins/overmind`,
+  );
   // Default the cache root next to the plugin dir so test overrides of
   // pluginDir naturally redirect cache writes too.
-  const pluginCacheRoot = resolve(opts.pluginCacheRoot ?? `${dirname(pluginDir)}/cache`);
+  const pluginCacheRoot = resolve(
+    opts.pluginCacheRoot ?? `${dirname(pluginDir)}/cache`,
+  );
 
   return {
     pluginDir,
@@ -151,6 +173,9 @@ function resolvePaths(opts: InstallerOptions): {
     symlink: opts.symlink ?? true,
     skipCompile: opts.skipCompile ?? false,
     skipDaemonStart: opts.skipDaemonStart ?? false,
+    userConfigPath: resolve(
+      opts.userConfigPath ?? `${home}/.config/overmind/overmind.toml`,
+    ),
   };
 }
 
@@ -179,7 +204,10 @@ async function removePath(path: string): Promise<void> {
   await Deno.remove(path, { recursive: true });
 }
 
-async function copyDirectoryRecursive(sourceDir: string, targetDir: string): Promise<void> {
+async function copyDirectoryRecursive(
+  sourceDir: string,
+  targetDir: string,
+): Promise<void> {
   await Deno.mkdir(targetDir, { recursive: true });
 
   for await (const entry of Deno.readDir(sourceDir)) {
@@ -203,7 +231,9 @@ async function copyDirectoryRecursive(sourceDir: string, targetDir: string): Pro
   }
 }
 
-async function readSettings(settingsPath: string): Promise<Record<string, unknown>> {
+async function readSettings(
+  settingsPath: string,
+): Promise<Record<string, unknown>> {
   if (!(await pathExists(settingsPath))) {
     return {};
   }
@@ -214,19 +244,29 @@ async function readSettings(settingsPath: string): Promise<Record<string, unknow
   try {
     parsed = JSON.parse(content);
   } catch (error) {
-    throw new Error(`Invalid JSON in settings file (${settingsPath}): ${String(error)}`);
+    throw new Error(
+      `Invalid JSON in settings file (${settingsPath}): ${String(error)}`,
+    );
   }
 
   if (!isRecord(parsed)) {
-    throw new Error(`Invalid settings file (${settingsPath}): expected top-level JSON object`);
+    throw new Error(
+      `Invalid settings file (${settingsPath}): expected top-level JSON object`,
+    );
   }
 
   return parsed;
 }
 
-async function writeSettings(settingsPath: string, settings: Record<string, unknown>): Promise<void> {
+async function writeSettings(
+  settingsPath: string,
+  settings: Record<string, unknown>,
+): Promise<void> {
   await Deno.mkdir(dirname(settingsPath), { recursive: true });
-  await Deno.writeTextFile(settingsPath, `${JSON.stringify(settings, null, 2)}\n`);
+  await Deno.writeTextFile(
+    settingsPath,
+    `${JSON.stringify(settings, null, 2)}\n`,
+  );
 }
 
 function withLocalPlugin(
@@ -234,12 +274,16 @@ function withLocalPlugin(
   marketplaceSourcePath: string,
 ): Record<string, unknown> {
   const next = { ...settings };
-  const enabledPlugins = isRecord(next.enabledPlugins) ? { ...next.enabledPlugins } : {};
+  const enabledPlugins = isRecord(next.enabledPlugins)
+    ? { ...next.enabledPlugins }
+    : {};
   enabledPlugins[PLUGIN_ID] = true;
   delete enabledPlugins[LEGACY_LOCAL_PLUGIN_ID];
   next.enabledPlugins = enabledPlugins;
 
-  const marketplaces = isRecord(next.extraKnownMarketplaces) ? { ...next.extraKnownMarketplaces } : {};
+  const marketplaces = isRecord(next.extraKnownMarketplaces)
+    ? { ...next.extraKnownMarketplaces }
+    : {};
   marketplaces[MARKETPLACE_NAME] = {
     source: { source: "directory" as const, path: marketplaceSourcePath },
   };
@@ -248,14 +292,20 @@ function withLocalPlugin(
   return next;
 }
 
-function withMarketplacePlugin(settings: Record<string, unknown>): Record<string, unknown> {
+function withMarketplacePlugin(
+  settings: Record<string, unknown>,
+): Record<string, unknown> {
   const next = { ...settings };
-  const enabledPlugins = isRecord(next.enabledPlugins) ? { ...next.enabledPlugins } : {};
+  const enabledPlugins = isRecord(next.enabledPlugins)
+    ? { ...next.enabledPlugins }
+    : {};
   enabledPlugins[PLUGIN_ID] = true;
   delete enabledPlugins[LEGACY_LOCAL_PLUGIN_ID];
   next.enabledPlugins = enabledPlugins;
 
-  const marketplaces = isRecord(next.extraKnownMarketplaces) ? { ...next.extraKnownMarketplaces } : {};
+  const marketplaces = isRecord(next.extraKnownMarketplaces)
+    ? { ...next.extraKnownMarketplaces }
+    : {};
   marketplaces[MARKETPLACE_NAME] = { source: MARKETPLACE_GITHUB_SOURCE };
   next.extraKnownMarketplaces = marketplaces;
 
@@ -362,7 +412,10 @@ function backupPathFor(claudeMdPath: string, now: Date = new Date()): string {
 // before any mutation. Caller is responsible for skipping this when the
 // mutation is a no-op (idempotent re-run with unchanged content), so the
 // backup file count stays bounded by the number of *real* changes.
-async function snapshotBackup(claudeMdPath: string, contents: string): Promise<void> {
+async function snapshotBackup(
+  claudeMdPath: string,
+  contents: string,
+): Promise<void> {
   await Deno.writeTextFile(backupPathFor(claudeMdPath), contents);
 }
 
@@ -410,7 +463,9 @@ async function removeAgentBlock(claudeMdPath: string): Promise<void> {
   await Deno.writeTextFile(claudeMdPath, next);
 }
 
-function withoutAllOvemindPlugins(settings: Record<string, unknown>): Record<string, unknown> {
+function withoutAllOvemindPlugins(
+  settings: Record<string, unknown>,
+): Record<string, unknown> {
   const next = { ...settings };
 
   if (isRecord(next.enabledPlugins)) {
@@ -462,7 +517,10 @@ async function compileBinary(repoRoot: string): Promise<string | null> {
   return outputPath;
 }
 
-async function symlinkBinary(compiledPath: string, binaryPath: string): Promise<void> {
+async function symlinkBinary(
+  compiledPath: string,
+  binaryPath: string,
+): Promise<void> {
   await Deno.mkdir(dirname(binaryPath), { recursive: true });
   // Upsert: always replace, same rationale as ensureCacheSymlink.
   await removePath(binaryPath);
@@ -511,7 +569,9 @@ async function ensurePluginInstalled(
   await copyDirectoryRecursive(sourcePluginRoot, pluginDir);
 }
 
-export async function installPlugin(opts: InstallerOptions = {}): Promise<void> {
+export async function installPlugin(
+  opts: InstallerOptions = {},
+): Promise<void> {
   const mode = opts.mode ?? "local";
   const {
     pluginDir,
@@ -524,6 +584,7 @@ export async function installPlugin(opts: InstallerOptions = {}): Promise<void> 
     sourcePluginRoot,
     skipCompile,
     skipDaemonStart,
+    userConfigPath,
   } = resolvePaths(opts);
 
   // Local mode now relies entirely on the directory-source marketplace
@@ -578,9 +639,22 @@ export async function installPlugin(opts: InstallerOptions = {}): Promise<void> 
   // edits are picked up immediately and skills register correctly.
   if (mode === "local") {
     const version = await readPluginVersion(sourcePluginRoot);
-    const cacheDir = resolve(`${pluginCacheRoot}/${MARKETPLACE_NAME}/${MARKETPLACE_NAME}/${version}`);
+    const cacheDir = resolve(
+      `${pluginCacheRoot}/${MARKETPLACE_NAME}/${MARKETPLACE_NAME}/${version}`,
+    );
     await ensureCacheSymlink(sourcePluginRoot, cacheDir);
   }
+
+  // Seed the user-level config from the repo template if (and only if) the
+  // user doesn't have one yet. This is the bridge between the repo's
+  // `config/overmind.toml` (template, version-controlled) and the daemon's
+  // ConfigLoader, which reads `~/.config/overmind/overmind.toml`. Existing
+  // user configs are preserved on reinstall; the operator stays in charge
+  // of their settings.
+  await seedUserConfig(
+    `${marketplaceSourcePath}/config/overmind.toml`,
+    userConfigPath,
+  );
 
   // Boot the daemon so the kernel HTTP listener is up before the next MCP
   // tool call. The daemon's startup lock makes this a no-op when one is
@@ -602,7 +676,29 @@ async function readPluginVersion(sourcePluginRoot: string): Promise<string> {
   return "0.1.0";
 }
 
-async function ensureCacheSymlink(sourcePluginRoot: string, cacheDir: string): Promise<void> {
+/**
+ * Copy `config/overmind.toml` from the repo root to the user-level config
+ * path on first install. Idempotent: if the destination already exists
+ * (operator has customized it), this is a no-op so user edits are
+ * preserved across reinstalls. Without this seed step, the daemon's
+ * ConfigLoader silently falls through to its hardcoded defaults — the
+ * `[dispatcher]` section in the repo template is documentation only
+ * because none of the loader's three search paths point at the repo.
+ */
+async function seedUserConfig(
+  templatePath: string,
+  userConfigPath: string,
+): Promise<void> {
+  if (await pathExists(userConfigPath)) return;
+  if (!(await pathExists(templatePath))) return;
+  await Deno.mkdir(dirname(userConfigPath), { recursive: true });
+  await Deno.copyFile(templatePath, userConfigPath);
+}
+
+async function ensureCacheSymlink(
+  sourcePluginRoot: string,
+  cacheDir: string,
+): Promise<void> {
   await Deno.mkdir(dirname(cacheDir), { recursive: true });
   // Upsert: always replace whatever's at cacheDir (live symlink, dangling
   // symlink, regular dir from a copy install, etc.) with a fresh symlink to
@@ -612,8 +708,17 @@ async function ensureCacheSymlink(sourcePluginRoot: string, cacheDir: string): P
   await Deno.symlink(sourcePluginRoot, cacheDir);
 }
 
-export async function uninstallPlugin(opts: InstallerOptions = {}): Promise<void> {
-  const { pluginDir, settingsPath, claudeJsonPath, claudeMdPath, pluginCacheRoot, binaryPath } = resolvePaths(opts);
+export async function uninstallPlugin(
+  opts: InstallerOptions = {},
+): Promise<void> {
+  const {
+    pluginDir,
+    settingsPath,
+    claudeJsonPath,
+    claudeMdPath,
+    pluginCacheRoot,
+    binaryPath,
+  } = resolvePaths(opts);
 
   await removePath(pluginDir);
   await removeAgentBlock(claudeMdPath);
@@ -655,10 +760,14 @@ function parseBoolean(value: string): boolean {
   throw new Error(`Invalid boolean value: ${value}`);
 }
 
-function parseCliArgs(args: string[]): { command: "install" | "uninstall"; options: InstallerOptions } {
+function parseCliArgs(
+  args: string[],
+): { command: "install" | "uninstall"; options: InstallerOptions } {
   const [command, ...rest] = args;
   if (command !== "install" && command !== "uninstall") {
-    throw new Error("Usage: installer.ts <install|uninstall> [--mode local|marketplace] [--plugin-dir <path>] [--settings-path <path>] [--source-plugin-root <path>] [--symlink <true|false>]");
+    throw new Error(
+      "Usage: installer.ts <install|uninstall> [--mode local|marketplace] [--plugin-dir <path>] [--settings-path <path>] [--source-plugin-root <path>] [--symlink <true|false>]",
+    );
   }
 
   const options: InstallerOptions = {};
