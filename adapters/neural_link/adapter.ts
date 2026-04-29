@@ -1,4 +1,10 @@
-import type { NeuralLinkConfig, RoomSummary, WaitForMessage, InboxMessage, NeuralLinkPort } from "../../kernel/types.ts";
+import type {
+  InboxMessage,
+  NeuralLinkConfig,
+  NeuralLinkPort,
+  RoomSummary,
+  WaitForMessage,
+} from "../../kernel/types.ts";
 import { NeuralLinkError } from "../../kernel/errors.ts";
 
 export enum MessageKind {
@@ -50,12 +56,26 @@ export class NeuralLinkAdapter implements NeuralLinkPort {
     this.config = config;
 
     try {
-      const response = await fetch(`${config.httpUrl}/health`);
+      // Bounded probe — without an explicit timeout, a misconfigured httpUrl
+      // (DNS resolves but server black-holes the connection) blocks the OS
+      // default TCP timeout, which on macOS can run minutes. Because this
+      // runs inside kernel.start() before the daemon opens its socket, an
+      // unbounded fetch here can stall the entire daemon spawn.
+      const response = await fetch(`${config.httpUrl}/health`, {
+        signal: AbortSignal.timeout(3_000),
+      });
       if (response.ok) {
         this.connected = true;
       }
     } catch (err) {
-      console.warn("neural_link not available, running without coordination:", err);
+      // Log loudly with the URL so a typoed OVERMIND_NEURAL_LINK_URL doesn't
+      // present as silent "running without coordination" — the operator
+      // needs to see what was probed and why it failed.
+      console.warn(
+        `neural_link unreachable at ${config.httpUrl}/health (${
+          err instanceof Error ? err.message : String(err)
+        }) — running without coordination`,
+      );
       this.connected = false;
     }
   }
@@ -91,7 +111,10 @@ export class NeuralLinkAdapter implements NeuralLinkPort {
 
     if (!response.ok) return null;
 
-    const data = await response.json() as { room_id?: string; session_id?: string };
+    const data = await response.json() as {
+      room_id?: string;
+      session_id?: string;
+    };
     if (data.session_id) this.sessionId = data.session_id;
     return data.room_id ?? null;
   }
@@ -170,7 +193,10 @@ export class NeuralLinkAdapter implements NeuralLinkPort {
     return response.ok;
   }
 
-  async inboxRead(roomId: string, participantId: string): Promise<InboxMessage[]> {
+  async inboxRead(
+    roomId: string,
+    participantId: string,
+  ): Promise<InboxMessage[]> {
     if (!this.connected) return [];
 
     const response = await fetch(
@@ -187,7 +213,11 @@ export class NeuralLinkAdapter implements NeuralLinkPort {
     return data.messages ?? [];
   }
 
-  async messageAck(roomId: string, participantId: string, messageIds: string[]): Promise<boolean> {
+  async messageAck(
+    roomId: string,
+    participantId: string,
+    messageIds: string[],
+  ): Promise<boolean> {
     if (!this.connected) return false;
 
     const response = await fetch(`${this.config!.httpUrl}/message/ack`, {

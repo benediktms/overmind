@@ -34,6 +34,12 @@ const HTTP_DEFAULT_PORT = 8080;
 const HTTP_DEFAULT_BIND = "127.0.0.1";
 const STARTUP_RETRY_ATTEMPTS = 5;
 const STARTUP_RETRY_INTERVAL_MS = 200;
+// Per-attempt cap on a single socket round-trip. Without this, a half-open
+// connection (daemon accepted the connect but never wrote a response — e.g.
+// stuck inside executeMode's synchronous prefix) hangs the client forever
+// because Deno.Conn.read has no inherent timeout. Crossed this and the conn
+// is force-closed, the read throws BadResource, and the retry loop kicks in.
+const SOCKET_REQUEST_TIMEOUT_MS = 5_000;
 const managedDaemonChildren = new Map<string, Deno.ChildProcess>();
 
 export async function ensureDaemonRunning(baseDir?: string): Promise<void> {
@@ -92,13 +98,35 @@ export async function ensureDaemonRunning(baseDir?: string): Promise<void> {
 export async function sendToSocket(
   request: SocketRequest,
   socketPath = `${resolveBaseDir()}/${SOCKET_FILE_NAME}`,
+  callerSignal?: AbortSignal,
+  requestTimeoutMs: number = SOCKET_REQUEST_TIMEOUT_MS,
 ): Promise<SocketResponse> {
   let lastError: unknown;
 
   for (let attempt = 1; attempt <= STARTUP_RETRY_ATTEMPTS; attempt += 1) {
+    if (callerSignal?.aborted) {
+      throw new OvermindError("sendToSocket aborted by caller");
+    }
     let conn: Deno.Conn | null = null;
+    let connected = false;
+    let timer: number | null = null;
+    let timedOut = false;
+    const closeConn = () => {
+      try {
+        conn?.close();
+      } catch {
+        // Already closed (or never opened) — idempotent close.
+      }
+    };
     try {
       conn = await Deno.connect({ transport: "unix", path: socketPath });
+      connected = true;
+      timer = setTimeout(() => {
+        timedOut = true;
+        closeConn();
+      }, requestTimeoutMs);
+      callerSignal?.addEventListener("abort", closeConn, { once: true });
+
       const body = JSON.stringify(request) + "\n";
       await conn.write(new TextEncoder().encode(body));
 
@@ -110,13 +138,27 @@ export async function sendToSocket(
 
       return payload;
     } catch (err) {
-      lastError = err;
-      if (attempt < STARTUP_RETRY_ATTEMPTS) {
+      lastError = timedOut
+        ? new OvermindError(
+          `Daemon did not respond within ${requestTimeoutMs}ms`,
+        )
+        : err;
+      // Pre-connect failures (ENOENT, ECONNREFUSED) are transient startup
+      // races and warrant retry. Post-connect failures (timeout, malformed
+      // response) signal a daemon-side problem that another attempt won't
+      // fix — surface them immediately instead of burning the full retry
+      // budget.
+      if (connected) break;
+      if (
+        attempt < STARTUP_RETRY_ATTEMPTS && !callerSignal?.aborted
+      ) {
         await sleep(STARTUP_RETRY_INTERVAL_MS);
         continue;
       }
     } finally {
-      conn?.close();
+      if (timer !== null) clearTimeout(timer);
+      callerSignal?.removeEventListener("abort", closeConn);
+      closeConn();
     }
   }
 
@@ -310,6 +352,16 @@ export class OvermindDaemon {
   private async handleConnection(conn: Deno.Conn): Promise<void> {
     try {
       const requestRaw = await this.readRequestPayload(conn);
+      // Probe-and-close pattern: liveness checks (isDaemonAvailable,
+      // isDaemonReachable, the startup readiness probe in
+      // ensureDaemonRunning) all connect and may close immediately. An
+      // empty payload from a closed peer means "are you up?" — answering
+      // would just BrokenPipe-rejection on the write, which surfaces as an
+      // uncaught error because acceptLoop fires this method as `void`.
+      // Bail before attempting to respond.
+      if (requestRaw.length === 0) {
+        return;
+      }
       const parsed = this.parseRequest(requestRaw);
 
       let response: SocketResponse;
@@ -531,6 +583,22 @@ async function isDaemonAvailable(
   } catch {
     return false;
   }
+}
+
+/**
+ * Public wrapper around `isDaemonAvailable` that takes a baseDir. Returns
+ * true only when the PID file points at a live process AND the Unix socket
+ * accepts a connection — i.e. when `overmind_delegate` would actually be
+ * able to reach the daemon. Use this for status reporting; the HTTP
+ * `/health` endpoint is a separate, best-effort surface and can be up while
+ * the socket is down (or vice versa).
+ */
+export async function isDaemonReachable(baseDir?: string): Promise<boolean> {
+  const resolved = resolveBaseDir(baseDir);
+  return await isDaemonAvailable(
+    `${resolved}/${PID_FILE_NAME}`,
+    `${resolved}/${SOCKET_FILE_NAME}`,
+  );
 }
 
 function startDaemonProcess(baseDir: string): void {

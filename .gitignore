@@ -1,3 +1,9 @@
 cli/claudecode-plugin/dist/
 dist/
 node_modules/
+
+# Workspace-scoped daemon state — run journals, scout/swarm checkpoints,
+# capabilities cache. Created under the workspace whenever a kernel run
+# touches this directory (e.g. dogfooding delegate calls from inside the
+# repo). Runtime artifact; do not commit.
+.overmind/

@@ -9,6 +9,7 @@ import {
 import {
   daemonStatus,
   ensureDaemonRunning,
+  isDaemonReachable,
   OvermindDaemon,
   sendToSocket,
   stopDaemon,
@@ -510,6 +511,62 @@ Deno.test("daemonStatus tolerates a malformed PID file", async () => {
   }
 });
 
+Deno.test("isDaemonReachable returns false when no PID file exists", async () => {
+  const tempDir = await Deno.makeTempDir();
+  try {
+    const { baseDir } = createTestPaths(tempDir);
+    await Deno.mkdir(baseDir, { recursive: true });
+    assertEquals(await isDaemonReachable(baseDir), false);
+  } finally {
+    await Deno.remove(tempDir, { recursive: true });
+  }
+});
+
+Deno.test("isDaemonReachable returns false when PID file is stale (process is dead)", async () => {
+  // Regression: the old MCP status probe checked HTTP /health and could
+  // report kernel_available: true while the actual delegate transport
+  // (Unix socket) was unreachable. This pins the post-fix contract — a
+  // dead PID means unreachable, regardless of HTTP.
+  const tempDir = await Deno.makeTempDir();
+  try {
+    const { baseDir, pidPath } = createTestPaths(tempDir);
+    await Deno.mkdir(baseDir, { recursive: true });
+    await Deno.writeTextFile(pidPath, "99999999\n");
+    assertEquals(await isDaemonReachable(baseDir), false);
+  } finally {
+    await Deno.remove(tempDir, { recursive: true });
+  }
+});
+
+Deno.test("isDaemonReachable returns false when PID is live but socket is missing", async () => {
+  const tempDir = await Deno.makeTempDir();
+  try {
+    const { baseDir, pidPath } = createTestPaths(tempDir);
+    await Deno.mkdir(baseDir, { recursive: true });
+    // Live PID (the test runner) but no socket file → not reachable.
+    await Deno.writeTextFile(pidPath, `${Deno.pid}\n`);
+    assertEquals(await isDaemonReachable(baseDir), false);
+  } finally {
+    await Deno.remove(tempDir, { recursive: true });
+  }
+});
+
+Deno.test("isDaemonReachable returns true when PID is live and socket accepts connections", async () => {
+  const tempDir = await Deno.makeTempDir();
+  try {
+    const { baseDir } = createTestPaths(tempDir);
+    const daemon = new OvermindDaemon({ baseDir, enableHttp: false });
+    await daemon.start();
+    try {
+      assertEquals(await isDaemonReachable(baseDir), true);
+    } finally {
+      await daemon.shutdown();
+    }
+  } finally {
+    await Deno.remove(tempDir, { recursive: true });
+  }
+});
+
 Deno.test("stopDaemon returns 'not running' and leaves filesystem alone when no PID file", async () => {
   const tempDir = await Deno.makeTempDir();
   try {
@@ -553,7 +610,10 @@ Deno.test("stopDaemon SIGTERMs a live child and waits for exit", async () => {
     }).spawn();
     await Deno.writeTextFile(pidPath, `${child.pid}\n`);
 
-    const msg = await stopDaemon(baseDir, { timeoutMs: 3_000, pollIntervalMs: 50 });
+    const msg = await stopDaemon(baseDir, {
+      timeoutMs: 3_000,
+      pollIntervalMs: 50,
+    });
     assertStringIncludes(msg, "stopped");
     assertStringIncludes(msg, String(child.pid));
 
@@ -562,6 +622,135 @@ Deno.test("stopDaemon SIGTERMs a live child and waits for exit", async () => {
     const exit = await child.status;
     assert(!exit.success, "child should have been killed by SIGTERM");
   } finally {
+    await Deno.remove(tempDir, { recursive: true });
+  }
+});
+
+// ── sendToSocket: hang resilience ─────────────────────────────────────────
+// A peer that accepts the connection but never writes a response used to
+// hang sendToSocket forever (Deno.Conn.read has no inherent timeout). The
+// fix is a per-attempt timer that closes the conn, forcing the read to
+// throw and the retry loop to advance. These tests pin both that timeout
+// and the AbortSignal escape hatch.
+
+Deno.test("sendToSocket aborts when caller signal fires before response", async () => {
+  const tempDir = await Deno.makeTempDir();
+  const { socketPath } = createTestPaths(tempDir);
+  await Deno.mkdir(`${tempDir}/.overmind`, { recursive: true });
+
+  // Hung peer: accepts the connection, reads the request, never writes.
+  const listener = Deno.listen({ transport: "unix", path: socketPath });
+  const acceptedConns: Deno.Conn[] = [];
+  const acceptLoop = (async () => {
+    while (true) {
+      try {
+        const conn = await listener.accept();
+        acceptedConns.push(conn);
+        // Drain the request but deliberately never respond.
+        const buf = new Uint8Array(4096);
+        await conn.read(buf).catch(() => {});
+      } catch {
+        return;
+      }
+    }
+  })();
+
+  try {
+    const ac = new AbortController();
+    setTimeout(() => ac.abort(), 100);
+    const started = Date.now();
+    await assertRejects(
+      () =>
+        sendToSocket(
+          {
+            type: "mode_request",
+            run_id: "abort-test",
+            mode: Mode.Scout,
+            objective: "x",
+            workspace: tempDir,
+          },
+          socketPath,
+          ac.signal,
+        ),
+      Error,
+    );
+    const elapsed = Date.now() - started;
+    // Aborts should unwind well before the per-attempt timeout (~5s) × retries.
+    assert(elapsed < 2_000, `expected fast abort, took ${elapsed}ms`);
+  } finally {
+    listener.close();
+    for (const c of acceptedConns) {
+      try {
+        c.close();
+      } catch {
+        // already closed
+      }
+    }
+    await acceptLoop.catch(() => {});
+    await Deno.remove(tempDir, { recursive: true });
+  }
+});
+
+Deno.test("sendToSocket times out per-attempt against a hung peer (no abort signal)", async () => {
+  // Pins the PRIMARY fix for the original 290s hang: a per-attempt timer
+  // that closes the conn so a half-open socket can't wait forever. Uses
+  // the injectable timeoutMs so CI doesn't sit on the production 5s.
+  const tempDir = await Deno.makeTempDir();
+  const { socketPath } = createTestPaths(tempDir);
+  await Deno.mkdir(`${tempDir}/.overmind`, { recursive: true });
+
+  const listener = Deno.listen({ transport: "unix", path: socketPath });
+  const acceptedConns: Deno.Conn[] = [];
+  const acceptLoop = (async () => {
+    while (true) {
+      try {
+        const conn = await listener.accept();
+        acceptedConns.push(conn);
+        const buf = new Uint8Array(4096);
+        await conn.read(buf).catch(() => {});
+      } catch {
+        return;
+      }
+    }
+  })();
+
+  try {
+    const started = Date.now();
+    await assertRejects(
+      () =>
+        sendToSocket(
+          {
+            type: "mode_request",
+            run_id: "timeout-test",
+            mode: Mode.Scout,
+            objective: "x",
+            workspace: tempDir,
+          },
+          socketPath,
+          undefined,
+          150, // tight per-attempt timeout for fast CI
+        ),
+      Error,
+    );
+    const elapsed = Date.now() - started;
+    // Once the post-connect timeout fires we break out of the retry loop
+    // (see kernel/daemon.ts: `if (connected) break;`), so worst case is
+    // ~timeoutMs + small overhead. Without the per-attempt timer this
+    // call would hang until acceptLoop teardown forced a close.
+    assert(
+      elapsed < 1_000,
+      `expected ~150ms timeout to surface quickly, took ${elapsed}ms`,
+    );
+  } finally {
+    listener.close();
+    for (const c of acceptedConns) {
+      try {
+        c.close();
+      } catch {
+        // already closed
+      }
+    }
+    await acceptLoop.catch(() => {});
     await Deno.remove(tempDir, { recursive: true });
   }
 });
