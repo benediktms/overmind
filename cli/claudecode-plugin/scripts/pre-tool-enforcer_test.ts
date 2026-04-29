@@ -374,6 +374,127 @@ Deno.test("parseBashWriteCandidates: no writes returns empty", () => {
   assertEquals(parseBashWriteCandidates(""), []);
 });
 
+// --- ovr-396.23.8: cp / mv / dd / perl -i / ruby -i / patch / truncate / install ---
+
+// cp
+Deno.test("parseBashWriteCandidates: cp captures destination (dangerous)", () => {
+  const c = parseBashWriteCandidates("cp src.ts dest.ts");
+  assertEquals(c.includes("dest.ts"), true);
+  assertEquals(c.includes("src.ts"), false);
+});
+
+Deno.test("parseBashWriteCandidates: cp -r copies dir — dest captured (dangerous)", () => {
+  const c = parseBashWriteCandidates("cp -r src/ dest/");
+  assertEquals(c.includes("dest/"), true);
+  assertEquals(c.includes("src/"), false);
+});
+
+Deno.test("parseBashWriteCandidates: cp with only one arg — no destination (safe form)", () => {
+  // A bare `cp file` is invalid bash; we must not emit a false positive.
+  const c = parseBashWriteCandidates("cp onlyone");
+  assertEquals(c.includes("onlyone"), false);
+});
+
+// mv
+Deno.test("parseBashWriteCandidates: mv captures destination (dangerous)", () => {
+  const c = parseBashWriteCandidates("mv old.ts new.ts");
+  assertEquals(c.includes("new.ts"), true);
+  assertEquals(c.includes("old.ts"), false);
+});
+
+Deno.test("parseBashWriteCandidates: mv -f src dest — dest captured", () => {
+  const c = parseBashWriteCandidates("mv -f old.ts new.ts");
+  assertEquals(c.includes("new.ts"), true);
+});
+
+Deno.test("parseBashWriteCandidates: mv with only one arg — no false positive (safe form)", () => {
+  const c = parseBashWriteCandidates("mv onlyone");
+  assertEquals(c.includes("onlyone"), false);
+});
+
+// dd
+Deno.test("parseBashWriteCandidates: dd of=<file> captures output file (dangerous)", () => {
+  const c = parseBashWriteCandidates(
+    "dd if=/dev/urandom of=random.bin bs=1M count=1",
+  );
+  assertEquals(c.includes("random.bin"), true);
+});
+
+Deno.test("parseBashWriteCandidates: dd without of= — no false positive (safe form)", () => {
+  // dd if=src | something — no of= so nothing to capture.
+  const c = parseBashWriteCandidates("dd if=src.bin bs=512");
+  assertEquals(c.some((p) => p.startsWith("if=")), false);
+  assertEquals(c.length, 0);
+});
+
+// perl -i
+Deno.test("parseBashWriteCandidates: perl -i captures file (dangerous)", () => {
+  const c = parseBashWriteCandidates("perl -i -pe 's/foo/bar/' file.txt");
+  assertEquals(c.includes("file.txt"), true);
+});
+
+Deno.test("parseBashWriteCandidates: perl -i.bak captures file (dangerous)", () => {
+  const c = parseBashWriteCandidates("perl -i.bak -pe 's/x/y/' notes.md");
+  assertEquals(c.includes("notes.md"), true);
+});
+
+Deno.test("parseBashWriteCandidates: perl without -i — no false positive (safe form)", () => {
+  const c = parseBashWriteCandidates("perl -ne 'print' file.txt");
+  assertEquals(c.includes("file.txt"), false);
+});
+
+// ruby -i
+Deno.test("parseBashWriteCandidates: ruby -i captures file (dangerous)", () => {
+  const c = parseBashWriteCandidates(
+    "ruby -i -pe 'gsub(/foo/, \"bar\")' file.rb",
+  );
+  assertEquals(c.includes("file.rb"), true);
+});
+
+Deno.test("parseBashWriteCandidates: ruby without -i — no false positive (safe form)", () => {
+  const c = parseBashWriteCandidates("ruby script.rb");
+  assertEquals(c.includes("script.rb"), false);
+});
+
+// patch
+Deno.test("parseBashWriteCandidates: patch <file> captures file (dangerous)", () => {
+  const c = parseBashWriteCandidates("patch -p1 src/main.ts < changes.patch");
+  assertEquals(c.includes("src/main.ts"), true);
+});
+
+Deno.test("parseBashWriteCandidates: patch with no positional file — no false positive (safe form)", () => {
+  // `patch -p1 < changes.patch` applies to files listed in the patch; we
+  // can't know them statically, so nothing is captured. This is acceptable —
+  // fail-open: no spurious warning when there's nothing to match.
+  const c = parseBashWriteCandidates("patch -p1 < changes.patch");
+  assertEquals(c.length, 0);
+});
+
+// truncate
+Deno.test("parseBashWriteCandidates: truncate -s 0 <file> captures file (dangerous)", () => {
+  const c = parseBashWriteCandidates("truncate -s 0 secrets.txt");
+  assertEquals(c.includes("secrets.txt"), true);
+});
+
+Deno.test("parseBashWriteCandidates: truncate --size 0 captures file (dangerous)", () => {
+  const c = parseBashWriteCandidates("truncate --size 0 secrets.txt");
+  assertEquals(c.includes("secrets.txt"), true);
+});
+
+// install
+Deno.test("parseBashWriteCandidates: install src dest captures destination (dangerous)", () => {
+  const c = parseBashWriteCandidates(
+    "install -m 755 bin/app /usr/local/bin/app",
+  );
+  assertEquals(c.includes("/usr/local/bin/app"), true);
+  assertEquals(c.includes("bin/app"), false);
+});
+
+Deno.test("parseBashWriteCandidates: install with only one positional — no false positive (safe form)", () => {
+  const c = parseBashWriteCandidates("install onlyone");
+  assertEquals(c.includes("onlyone"), false);
+});
+
 Deno.test("evaluateBashCacheBypass: harness off → no warning", async () => {
   await withTempHomeAndFile(async (home, cwd, filePath) => {
     const cachePath = getCachePath(cwd, home);

@@ -263,6 +263,12 @@ function splitTopLevelSegments(command: string): string[] {
 const REDIRECT_RE =
   /(?:^|\s)(?:1|2|&)?>{1,2}\|?\s*("([^"]+)"|'([^']+)'|([^\s|;&<>()]+))/g;
 
+// Input redirect: `< file` or `0< file`. Strip these so that `patch -p1
+// src/main.ts < changes.patch` doesn't count `changes.patch` as a positional
+// argument to patch. Capture group 1 holds the path (unused — we only strip).
+const INPUT_REDIRECT_RE =
+  /(?:^|\s)(?:0)?<\s*("([^"]+)"|'([^']+)'|([^\s|;&<>()]+))/g;
+
 function isSedExpressionLike(token: string): boolean {
   // Crude heuristic: sed substitution / transliteration / address forms.
   // Matches `s/x/y/`, `s|x|y|`, `y/abc/xyz/`, `1,$d`, `/regex/p`.
@@ -284,12 +290,44 @@ function tokenIsAwkCommand(token: string): boolean {
   return token === "awk" || token.endsWith("/awk");
 }
 
+function tokenIsCpCommand(token: string): boolean {
+  return token === "cp" || token.endsWith("/cp");
+}
+
+function tokenIsMvCommand(token: string): boolean {
+  return token === "mv" || token.endsWith("/mv");
+}
+
+function tokenIsDdCommand(token: string): boolean {
+  return token === "dd" || token.endsWith("/dd");
+}
+
+function tokenIsPerlCommand(token: string): boolean {
+  return token === "perl" || token.endsWith("/perl");
+}
+
+function tokenIsRubyCommand(token: string): boolean {
+  return token === "ruby" || token.endsWith("/ruby");
+}
+
+function tokenIsPatchCommand(token: string): boolean {
+  return token === "patch" || token.endsWith("/patch");
+}
+
+function tokenIsTruncateCommand(token: string): boolean {
+  return token === "truncate" || token.endsWith("/truncate");
+}
+
+function tokenIsInstallCommand(token: string): boolean {
+  return token === "install" || token.endsWith("/install");
+}
+
 // Parse a Bash command for tokens that look like file writes the harness
-// won't see (sed -i, awk -i inplace, output redirection, tee). Permissive on
-// purpose: we surface a warning, never block, so over-matching is preferred
-// to under-matching. False positives are noisy; false negatives let stale
-// writes through silently. Known limitations: no `bash -c '...'` recursion,
-// no $() / backtick nesting tracking — both documented in ovr-396.23.1.
+// won't see (sed -i, awk -i inplace, output redirection, tee, cp, mv, dd,
+// perl -i, ruby -i, patch, truncate, install). Permissive on purpose: we
+// surface a warning, never block, so over-matching is preferred to under-
+// matching. False positives are noisy; false negatives let stale writes
+// through silently.
 export function parseBashWriteCandidates(command: string): string[] {
   const found = new Set<string>();
   const addCandidate = (raw: string) => {
@@ -301,10 +339,13 @@ export function parseBashWriteCandidates(command: string): string[] {
   };
 
   for (const segment of splitTopLevelSegments(command)) {
-    // Strip redirect sequences before sed/awk file detection so that
-    // `sed -i 'expr' file.txt > /dev/null` doesn't mis-pick `/dev/null`
-    // as the sed file. Redirects are still captured separately below.
-    const segmentNoRedir = segment.replace(REDIRECT_RE, "");
+    // Strip redirect sequences before file detection so that neither output
+    // redirects (`> /dev/null`) nor input redirects (`< patch.diff`) are
+    // mistaken for positional file arguments. Output redirects are still
+    // captured separately below via matchAll(REDIRECT_RE).
+    const segmentNoRedir = segment
+      .replace(REDIRECT_RE, "")
+      .replace(INPUT_REDIRECT_RE, "");
     const tokens = tokenizeQuoteAware(segmentNoRedir);
 
     // sed [-i|--in-place ...] <file>. Detection accepts `sed` or any
@@ -344,6 +385,181 @@ export function parseBashWriteCandidates(command: string): string[] {
           addCandidate(t);
           break;
         }
+      }
+    }
+
+    // cp <src> <dest> — the destination (last non-flag token) is the write target.
+    // cp -r src/ dest/ and cp -f src dest are both captured via the same rule.
+    // cp -i (interactive) is the safe flag — we still capture the dest since the
+    // file may be overwritten.
+    const cpIdx = tokens.findIndex(tokenIsCpCommand);
+    if (cpIdx > -1) {
+      const args = tokens.slice(cpIdx + 1).filter((t) => !t.startsWith("-"));
+      // cp requires at least two positional args: source(s) + destination.
+      // The last positional arg is the destination.
+      if (args.length >= 2) {
+        addCandidate(args[args.length - 1]);
+      }
+    }
+
+    // mv <src> <dest> — same shape as cp: last positional arg is the destination.
+    const mvIdx = tokens.findIndex(tokenIsMvCommand);
+    if (mvIdx > -1) {
+      const args = tokens.slice(mvIdx + 1).filter((t) => !t.startsWith("-"));
+      if (args.length >= 2) {
+        addCandidate(args[args.length - 1]);
+      }
+    }
+
+    // dd: look for of=<file> among tokens.
+    const ddIdx = tokens.findIndex(tokenIsDdCommand);
+    if (ddIdx > -1) {
+      for (let i = ddIdx + 1; i < tokens.length; i++) {
+        const t = stripQuotes(tokens[i]);
+        if (t.startsWith("of=")) {
+          addCandidate(t.slice(3));
+        }
+      }
+    }
+
+    // perl -i ... <file> / perl -i.bak ... <file>
+    // The `-i` flag (with or without an extension suffix) marks in-place editing.
+    // The file is the last non-flag, non-program token.
+    const perlIdx = tokens.findIndex(tokenIsPerlCommand);
+    if (perlIdx > -1) {
+      const hasInPlace = tokens.some(
+        (t, i) => i > perlIdx && /^-i/.test(t),
+      );
+      if (hasInPlace) {
+        // Walk backward: skip flags and -e program strings; first plain token is the file.
+        let skipNext = false;
+        for (let i = tokens.length - 1; i > perlIdx; i--) {
+          const t = tokens[i];
+          if (skipNext) {
+            skipNext = false;
+            continue;
+          }
+          if (t === "-e" || t === "-E") {
+            skipNext = true;
+            continue;
+          }
+          if (t.startsWith("-")) continue;
+          if (t.startsWith("'") || t.startsWith('"')) continue;
+          addCandidate(t);
+          break;
+        }
+      }
+    }
+
+    // ruby -i ... <file> — same shape as perl -i.
+    const rubyIdx = tokens.findIndex(tokenIsRubyCommand);
+    if (rubyIdx > -1) {
+      const hasInPlace = tokens.some(
+        (t, i) => i > rubyIdx && /^-i/.test(t),
+      );
+      if (hasInPlace) {
+        let skipNext = false;
+        for (let i = tokens.length - 1; i > rubyIdx; i--) {
+          const t = tokens[i];
+          if (skipNext) {
+            skipNext = false;
+            continue;
+          }
+          if (t === "-e" || t === "-E") {
+            skipNext = true;
+            continue;
+          }
+          if (t.startsWith("-")) continue;
+          if (t.startsWith("'") || t.startsWith('"')) continue;
+          addCandidate(t);
+          break;
+        }
+      }
+    }
+
+    // patch [-p<n>] [-i <patchfile>] [<file>]
+    // patch modifies files in place. The target file is the last non-flag arg,
+    // or the file listed inside the patch (we can't know that statically, so we
+    // capture the last positional token if present).
+    const patchIdx = tokens.findIndex(tokenIsPatchCommand);
+    if (patchIdx > -1) {
+      // Collect positional args (non-flags, skipping the arg after -i/-F/-r/-o).
+      const skipFlagArgs = new Set(["-i", "-F", "-r", "-o", "-b", "-z"]);
+      const positionals: string[] = [];
+      let skipNext = false;
+      for (let i = patchIdx + 1; i < tokens.length; i++) {
+        const t = tokens[i];
+        if (skipNext) {
+          skipNext = false;
+          continue;
+        }
+        if (skipFlagArgs.has(t)) {
+          skipNext = true;
+          continue;
+        }
+        if (t.startsWith("-")) continue;
+        positionals.push(t);
+      }
+      if (positionals.length > 0) {
+        addCandidate(positionals[positionals.length - 1]);
+      }
+    }
+
+    // truncate -s <size> <file> — truncates (overwrites) a file to a given size.
+    const truncIdx = tokens.findIndex(tokenIsTruncateCommand);
+    if (truncIdx > -1) {
+      const args = tokens.slice(truncIdx + 1);
+      let skipNext = false;
+      for (let i = 0; i < args.length; i++) {
+        const t = args[i];
+        if (skipNext) {
+          skipNext = false;
+          continue;
+        }
+        if (t === "-s" || t === "--size" || t === "-c" || t === "--no-create") {
+          if (t === "-s" || t === "--size") skipNext = true;
+          continue;
+        }
+        if (t.startsWith("-")) continue;
+        addCandidate(t);
+      }
+    }
+
+    // install <src> <dest> — copies src to dest, creating the destination.
+    // The last positional arg is the destination (file or directory).
+    const installIdx = tokens.findIndex(tokenIsInstallCommand);
+    if (installIdx > -1) {
+      // Flags that consume a following argument.
+      const installFlagArgs = new Set([
+        "-g",
+        "--group",
+        "-m",
+        "--mode",
+        "-o",
+        "--owner",
+        "-t",
+        "--target-directory",
+        "-S",
+        "--suffix",
+      ]);
+      const positionals: string[] = [];
+      let skipNext = false;
+      for (let i = installIdx + 1; i < tokens.length; i++) {
+        const t = tokens[i];
+        if (skipNext) {
+          skipNext = false;
+          continue;
+        }
+        if (installFlagArgs.has(t)) {
+          skipNext = true;
+          continue;
+        }
+        if (t.startsWith("-")) continue;
+        positionals.push(t);
+      }
+      // Need at least src + dest.
+      if (positionals.length >= 2) {
+        addCandidate(positionals[positionals.length - 1]);
       }
     }
 
