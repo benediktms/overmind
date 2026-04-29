@@ -503,6 +503,29 @@ Deno.test("load() on an empty registry after full release produces an empty jour
   });
 });
 
+Deno.test("load() is crash-safe — stale .tmp does not clobber live locks", async () => {
+  // Simulates a crash that occurred after writing the .tmp file but before
+  // the rename completed.  A subsequent load() must recover the original
+  // journal rather than being confused by the abandoned .tmp file.
+  await withTempJournal(async (journalPath) => {
+    // Write a well-formed journal with one live lock.
+    const writer = new LockRegistry(journalPath);
+    await writer.acquire({ path: "/live.ts", sessionId: "S1", agentId: "A" });
+
+    // Simulate a crash: leave a stale .tmp containing only garbage content.
+    // In a real mid-write crash the .tmp might be partial or empty; here we
+    // use empty to represent the worst case (total data loss in .tmp).
+    await Deno.writeTextFile(journalPath + ".tmp", "");
+
+    // A fresh load() must ignore the stale .tmp and replay the original journal.
+    const reader = new LockRegistry(journalPath);
+    await reader.load();
+
+    const paths = reader.snapshot().map((e) => e.path);
+    assertEquals(paths, ["/live.ts"], "live lock must survive a stale .tmp");
+  });
+});
+
 Deno.test("acquire refuses new entries past the 10k cap (OOM defense)", async () => {
   await withTempJournal(async (journalPath) => {
     const registry = new LockRegistry(journalPath);

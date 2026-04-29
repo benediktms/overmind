@@ -126,14 +126,11 @@ export class LockRegistry {
     // We chose snapshot-rewrite over per-run files because:
     //   • simpler — one file, one writer, no directory housekeeping;
     //   • bounded — worst case is MAX_LOCKS lines after load();
-    //   • safe — we rewrite atomically by writing the whole snapshot before
-    //     touching the queue, so an in-flight appendEvents cannot lose events
-    //     (they still append to the same file after the rewrite).
-    //
-    // The trade-off: a crash mid-rewrite could leave a truncated journal.
-    // That is acceptable because the rewrite only removes *already-released*
-    // locks — the worst outcome is losing released entries that were already
-    // not in the live set, which is the desired end state anyway.
+    //   • crash-safe — we write the full snapshot to a .tmp file and then
+    //     atomically rename it into place.  A crash between the two steps
+    //     leaves the .tmp file behind but the original journal intact, so
+    //     live locks are never lost.  A stale .tmp from a previous crashed
+    //     run is silently overwritten on the next load().
     const snapshot = Array.from(this.locks.values());
     const compacted = snapshot
       .map((entry) =>
@@ -148,7 +145,9 @@ export class LockRegistry {
       .join("\n");
     const payload = compacted.length > 0 ? compacted + "\n" : "";
     await Deno.mkdir(dirname(this.journalPath), { recursive: true });
-    await Deno.writeTextFile(this.journalPath, payload, { create: true });
+    const tmpPath = this.journalPath + ".tmp";
+    await Deno.writeTextFile(tmpPath, payload, { create: true });
+    await Deno.rename(tmpPath, this.journalPath);
     this.journalDirReady = true;
   }
 
