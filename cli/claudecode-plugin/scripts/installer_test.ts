@@ -1,5 +1,5 @@
 import { assertEquals, assertRejects } from "@std/assert";
-import { dirname } from "node:path";
+import { dirname } from "@std/path";
 
 import {
   installPlugin,
@@ -25,6 +25,26 @@ async function pathExists(path: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+// List every timestamped backup that exists for a given CLAUDE.md path.
+// Backups land at `<path>.<ISO-stamp>.bak`, so we read the parent dir and
+// match anything that starts with `<basename>.` and ends with `.bak`.
+async function listBackups(claudeMdPath: string): Promise<string[]> {
+  const dir = dirname(claudeMdPath);
+  const base = claudeMdPath.slice(dir.length + 1);
+  const out: string[] = [];
+  try {
+    for await (const entry of Deno.readDir(dir)) {
+      if (entry.isFile && entry.name.startsWith(`${base}.`) && entry.name.endsWith(".bak")) {
+        out.push(`${dir}/${entry.name}`);
+      }
+    }
+  } catch (err) {
+    if (!(err instanceof Deno.errors.NotFound)) throw err;
+  }
+  out.sort();
+  return out;
 }
 
 async function lstatSafe(path: string): Promise<Deno.FileInfo | null> {
@@ -520,7 +540,7 @@ unrelated config
   }
 });
 
-Deno.test("installPlugin backs up an existing CLAUDE.md to <path>.bak before modifying", async () => {
+Deno.test("installPlugin backs up an existing CLAUDE.md to a timestamped .bak before modifying", async () => {
   const env = await createTestEnv();
   try {
     const seed = "# Existing user content\n\nimportant notes\n";
@@ -529,7 +549,9 @@ Deno.test("installPlugin backs up an existing CLAUDE.md to <path>.bak before mod
 
     await installPlugin(isolated(env));
 
-    const backup = await Deno.readTextFile(`${env.claudeMdPath}.bak`);
+    const backups = await listBackups(env.claudeMdPath);
+    assertEquals(backups.length, 1);
+    const backup = await Deno.readTextFile(backups[0]);
     assertEquals(backup, seed);
 
     const md = await Deno.readTextFile(env.claudeMdPath);
@@ -544,28 +566,43 @@ Deno.test("installPlugin does not create a backup when no CLAUDE.md exists", asy
   const env = await createTestEnv();
   try {
     await installPlugin(isolated(env));
-    assertEquals(await pathExists(`${env.claudeMdPath}.bak`), false);
+    assertEquals((await listBackups(env.claudeMdPath)).length, 0);
     assertEquals(await pathExists(env.claudeMdPath), true);
   } finally {
     await env.cleanup();
   }
 });
 
-Deno.test("installPlugin preserves the original .bak on re-install (one-shot backup)", async () => {
+Deno.test("installPlugin produces a distinct backup for each real mutation, never overwriting earlier ones", async () => {
   const env = await createTestEnv();
   try {
     const original = "# Pristine\n\nfirst-ever content\n";
     await Deno.mkdir(dirname(env.claudeMdPath), { recursive: true });
     await Deno.writeTextFile(env.claudeMdPath, original);
 
-    await installPlugin(isolated(env));
-    // After first install, CLAUDE.md is mutated (block appended). A second
-    // install would naïvely back up the *modified* file — clobbering the
-    // pristine backup. Verify we don't.
+    // First install mutates the file (appends the block) → one backup.
     await installPlugin(isolated(env));
 
-    const backup = await Deno.readTextFile(`${env.claudeMdPath}.bak`);
-    assertEquals(backup, original);
+    // User edits CLAUDE.md outside the overmind block, then a second
+    // install runs. The block stays the same but the file has new user
+    // content, so the next install path must capture *that* state too —
+    // and crucially, it must not clobber the first (pristine) backup.
+    const intermediate = await Deno.readTextFile(env.claudeMdPath);
+    const edited = intermediate + "\n# user-added section\n\nnew notes\n";
+    await Deno.writeTextFile(env.claudeMdPath, edited);
+
+    // Force a non-trivial timestamp gap so the two .bak filenames differ
+    // (timestamps are millisecond-resolution UTC ISO strings).
+    await new Promise((r) => setTimeout(r, 5));
+    await installPlugin(isolated(env));
+
+    const backups = await listBackups(env.claudeMdPath);
+    assertEquals(backups.length, 2);
+
+    // Sorted lexicographically; ISO timestamps sort chronologically, so
+    // [0] is the oldest = pristine pre-install state.
+    assertEquals(await Deno.readTextFile(backups[0]), original);
+    assertEquals(await Deno.readTextFile(backups[1]), edited);
   } finally {
     await env.cleanup();
   }
@@ -576,11 +613,53 @@ Deno.test("installPlugin skips backup when re-running would not change the file"
   try {
     await installPlugin(isolated(env));
     // First install created CLAUDE.md but no .bak (file didn't exist before).
-    assertEquals(await pathExists(`${env.claudeMdPath}.bak`), false);
+    assertEquals((await listBackups(env.claudeMdPath)).length, 0);
     await installPlugin(isolated(env));
     // Second install: file existed but the upsert is a no-op (idempotent
     // content). We should NOT create a backup of the already-installed file.
-    assertEquals(await pathExists(`${env.claudeMdPath}.bak`), false);
+    assertEquals((await listBackups(env.claudeMdPath)).length, 0);
+  } finally {
+    await env.cleanup();
+  }
+});
+
+Deno.test("uninstallPlugin backs up CLAUDE.md before stripping the block", async () => {
+  const env = await createTestEnv();
+  try {
+    const seed = "# Personal notes\n\nimportant\n";
+    await Deno.mkdir(dirname(env.claudeMdPath), { recursive: true });
+    await Deno.writeTextFile(env.claudeMdPath, seed);
+
+    // Install creates one backup (of `seed`).
+    await installPlugin(isolated(env));
+    const installedState = await Deno.readTextFile(env.claudeMdPath);
+    await new Promise((r) => setTimeout(r, 5));
+
+    // Uninstall mutates CLAUDE.md too, so it must capture the pre-strip
+    // state in its own timestamped backup — otherwise an install/uninstall
+    // cycle silently loses anything the user added between the two ops.
+    await uninstallPlugin(isolated(env));
+
+    const backups = await listBackups(env.claudeMdPath);
+    assertEquals(backups.length, 2);
+    assertEquals(await Deno.readTextFile(backups[0]), seed);
+    assertEquals(await Deno.readTextFile(backups[1]), installedState);
+  } finally {
+    await env.cleanup();
+  }
+});
+
+Deno.test("uninstallPlugin skips backup when CLAUDE.md has no overmind block", async () => {
+  const env = await createTestEnv();
+  try {
+    const seed = "# Just user content, no overmind block\n";
+    await Deno.mkdir(dirname(env.claudeMdPath), { recursive: true });
+    await Deno.writeTextFile(env.claudeMdPath, seed);
+
+    await uninstallPlugin(isolated(env));
+
+    assertEquals((await listBackups(env.claudeMdPath)).length, 0);
+    assertEquals(await Deno.readTextFile(env.claudeMdPath), seed);
   } finally {
     await env.cleanup();
   }

@@ -1,7 +1,6 @@
 #!/usr/bin/env -S deno run -A --quiet
 
-import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { dirname, fromFileUrl, join, resolve } from "@std/path";
 
 // Plugin IDs: <plugin-name>@<marketplace-name>. Both modes use the same
 // marketplace name ("overmind") because Claude Code requires the @<marketplace>
@@ -37,7 +36,7 @@ const DEFAULT_BIN_DIR = ".local/bin";
 // `<!-- OMC:START -->` pattern so the two systems coexist without stomping.
 // On install we upsert the block; on uninstall we remove it (preserving
 // anything outside the markers).
-const AGENT_BLOCK_VERSION = "0.2.0";
+const AGENT_BLOCK_VERSION = "0.3.0";
 const AGENT_BLOCK_START = "<!-- overmind:start -->";
 const AGENT_BLOCK_END = "<!-- overmind:end -->";
 const AGENT_BLOCK_BODY = `${AGENT_BLOCK_START}
@@ -45,37 +44,25 @@ const AGENT_BLOCK_BODY = `${AGENT_BLOCK_START}
 
 # Overmind — Multi-Agent Orchestration
 
-You have access to overmind, a swarm coordinator exposed via \`mcp__overmind__*\`
-tools. The compiled binary lives at \`~/.local/bin/overmind\` and the kernel
-daemon listens on \`localhost:8080\`.
+Overmind is a swarm coordinator exposed via \`mcp__overmind__*\` tools.
 
 <delegation_rules>
-Delegate via \`mcp__overmind__overmind_delegate\` for: code reviews, multi-file
-refactors, planning across files, parallel research, and any task that
-benefits from verify/fix loops or independent parallel agents.
-Do NOT delegate: single-file edits, lookups, or anything completable in
-fewer than three tool calls.
+Delegate via \`mcp__overmind__overmind_delegate\` when work spans multiple
+files, benefits from parallel investigation, or wants a verify/fix loop.
+Otherwise do the work inline.
+
+If \`overmind_delegate\` returns a connection error, fall back to inline —
+do not pre-flight \`overmind_status\`.
 </delegation_rules>
 
-<mode_routing>
-\`scout\` — parallel context fetch, no fix loop (research, surveying).
-\`relay\` — sequential pipeline plan → execute → verify (refactors, migrations).
-\`swarm\` — parallel execution with verify/fix loop (reviews, multi-agent work).
+<mode_defaults>
 Default to \`swarm\` for reviews, \`relay\` for refactors, \`scout\` for research.
-</mode_routing>
-
-<preconditions>
-Before delegating, call \`mcp__overmind__overmind_status\` to confirm the
-kernel daemon and neural_link bus are reachable. If \`configured\` is false
-or both \`kernel_available\` and \`neural_link_available\` are false, fall
-back to running the work inline.
-</preconditions>
+The tool schema's \`mode\` description explains each mode in detail.
+</mode_defaults>
 
 <tool_reference>
 \`mcp__overmind__overmind_delegate\` — submit an objective with mode + priority.
 \`mcp__overmind__overmind_status\`   — kernel + neural_link health snapshot.
-\`mcp__overmind__overmind_cancel\`   — cancel a running objective by id.
-\`mcp__overmind__overmind_room_join\` — join a coordination room.
 </tool_reference>
 
 ${AGENT_BLOCK_END}`;
@@ -112,7 +99,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function defaultSourcePluginRoot(): string {
-  const scriptDir = dirname(fileURLToPath(import.meta.url));
+  const scriptDir = dirname(fromFileUrl(import.meta.url));
   return resolve(scriptDir, "..");
 }
 
@@ -120,7 +107,7 @@ function defaultMarketplaceSourcePath(): string {
   // The directory-source marketplace points at the repo root, where
   // `.claude-plugin/marketplace.json` lives. Three levels up from this
   // script: cli/claudecode-plugin/scripts/installer.ts → repo root.
-  const scriptDir = dirname(fileURLToPath(import.meta.url));
+  const scriptDir = dirname(fromFileUrl(import.meta.url));
   return resolve(scriptDir, "..", "..", "..");
 }
 
@@ -358,6 +345,27 @@ export function withoutOvermindAgentBlock(existing: string): string {
   return stripAgentBlocks(existing);
 }
 
+// Build the timestamped backup path for a given CLAUDE.md location.
+// Format: `<path>.<UTC ISO timestamp with `:` and `.` replaced by `-`>.bak`,
+// e.g. `CLAUDE.md.2026-04-29T13-45-22-123Z.bak`. The replacements keep the
+// filename portable across filesystems that disallow `:` (Windows / SMB /
+// some FAT variants) and avoid the dot-confusion of a second `.` inside the
+// stem. Each mutation gets its own file so backups never silently overwrite
+// each other; users can `ls *.bak | sort` to find the oldest pre-overmind
+// state when needed.
+function backupPathFor(claudeMdPath: string, now: Date = new Date()): string {
+  const stamp = now.toISOString().replace(/[:.]/g, "-");
+  return `${claudeMdPath}.${stamp}.bak`;
+}
+
+// Snapshot the current contents of CLAUDE.md to a fresh timestamped `.bak`
+// before any mutation. Caller is responsible for skipping this when the
+// mutation is a no-op (idempotent re-run with unchanged content), so the
+// backup file count stays bounded by the number of *real* changes.
+async function snapshotBackup(claudeMdPath: string, contents: string): Promise<void> {
+  await Deno.writeTextFile(backupPathFor(claudeMdPath), contents);
+}
+
 async function upsertAgentBlock(claudeMdPath: string): Promise<void> {
   await Deno.mkdir(dirname(claudeMdPath), { recursive: true });
 
@@ -374,17 +382,8 @@ async function upsertAgentBlock(claudeMdPath: string): Promise<void> {
     return;
   }
 
-  // Defensive backup: before mutating an existing CLAUDE.md, snapshot the
-  // current contents to <path>.bak. Only create the backup once (if-not-
-  // exists), so the user can always recover the pre-overmind state even
-  // across multiple re-installs that otherwise modify the file.
   if (existing !== null) {
-    const backupPath = `${claudeMdPath}.bak`;
-    try {
-      await Deno.writeTextFile(backupPath, existing, { createNew: true });
-    } catch (err) {
-      if (!(err instanceof Deno.errors.AlreadyExists)) throw err;
-    }
+    await snapshotBackup(claudeMdPath, existing);
   }
 
   await Deno.writeTextFile(claudeMdPath, next);
@@ -400,6 +399,10 @@ async function removeAgentBlock(claudeMdPath: string): Promise<void> {
   }
   const next = withoutOvermindAgentBlock(existing);
   if (next === existing) return;
+
+  // Uninstall mutates CLAUDE.md too — same backup contract as install.
+  await snapshotBackup(claudeMdPath, existing);
+
   if (next.length === 0) {
     await Deno.remove(claudeMdPath);
     return;
