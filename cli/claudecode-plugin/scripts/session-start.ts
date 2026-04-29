@@ -69,10 +69,16 @@ async function main(): Promise<void> {
       ? `Persistence: Brain checkpointing active (${activeState.persistence.brain.brainName})`
       : `Persistence: local-only fallback (${activeState.persistence.brain.status})`;
 
+    const prompt = activeState.original_prompt ?? "";
+    const firstLine = prompt.split("\n", 1)[0].trim();
+    const taskSummary = firstLine.length > 160
+      ? `${firstLine.slice(0, 157)}...`
+      : (firstLine || "unknown");
+
     messages.push(
       `[OVERMIND ${activeState.mode.toUpperCase()} MODE RESTORED]\n` +
       `Active since: ${activeState.started_at}\n` +
-      `Original task: ${activeState.original_prompt ?? "unknown"}\n` +
+      `Original task: ${taskSummary}\n` +
       `${persistenceLine}\n`,
     );
   }

@@ -44,9 +44,13 @@ async function main(): Promise<void> {
     const resumeHint = activeState.persistence.brain.available
       ? "Brain checkpointing is active for resume support."
       : "Local-only fallback is active; preserve a concise summary before exiting.";
+    const firstLine = activeState.original_prompt.split("\n", 1)[0].trim();
+    const taskSummary = firstLine.length > 160
+      ? `${firstLine.slice(0, 157)}...`
+      : firstLine;
     messages.push(
       `[OVERMIND ${activeState.mode.toUpperCase()} MODE]` +
-        `\n  Task: ${activeState.original_prompt}` +
+        `\n  Task: ${taskSummary}` +
         `\n  ${resumeHint}`,
     );
   }

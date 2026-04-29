@@ -65,13 +65,10 @@ async function sendMessage(kind: string, summary: string, body: Record<string, u
   }
 }
 
-function outputHookResult(additionalContext?: string, eventName = "SubagentStart"): void {
+function outputHookResult(systemMessage?: string, _eventName = "SubagentStart"): void {
   const result: Record<string, unknown> = { continue: true };
-  if (additionalContext) {
-    result.hookSpecificOutput = {
-      hookEventName: eventName,
-      additionalContext,
-    };
+  if (systemMessage) {
+    result.systemMessage = systemMessage;
   } else {
     result.suppressOutput = true;
   }

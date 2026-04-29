@@ -36,17 +36,8 @@ async function notifyKernel(
   }
 }
 
-function outputHookResult(additionalContext?: string): void {
-  const result: Record<string, unknown> = { continue: true };
-  if (additionalContext) {
-    result.hookSpecificOutput = {
-      hookEventName: "SubagentStop",
-      additionalContext,
-    };
-  } else {
-    result.suppressOutput = true;
-  }
-  console.log(JSON.stringify(result));
+function outputHookResult(): void {
+  console.log(JSON.stringify({ continue: true, suppressOutput: true }));
 }
 
 async function main(): Promise<void> {

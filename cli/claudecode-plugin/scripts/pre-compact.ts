@@ -68,13 +68,10 @@ async function createBrainSnapshot(
   }
 }
 
-function outputHookResult(additionalContext?: string): void {
+function outputHookResult(systemMessage?: string): void {
   const result: Record<string, unknown> = { continue: true };
-  if (additionalContext) {
-    result.hookSpecificOutput = {
-      hookEventName: "PreCompact",
-      additionalContext,
-    };
+  if (systemMessage) {
+    result.systemMessage = systemMessage;
   } else {
     result.suppressOutput = true;
   }
@@ -112,20 +109,20 @@ async function main(): Promise<void> {
   const usagePercent =
     maxSize > 0 ? Math.round((currentSize / maxSize) * 100) : 0;
 
-  let additionalContext: string | undefined;
+  let message: string | undefined;
   if (snapshotResult) {
-    additionalContext =
+    message =
       `[OVERMIND] Pre-compact snapshot saved to brain. ` +
       `Context at ${usagePercent}% capacity. ` +
       `Summarize completed work and archive intermediates before proceeding.`;
   } else if (usagePercent > 80) {
-    additionalContext =
+    message =
       `[OVERMIND] Context at ${usagePercent}% capacity. ` +
       `Consider summarizing completed work and archiving intermediate files ` +
       `before proceeding. Use brain records to persist important findings.`;
   }
 
-  outputHookResult(additionalContext);
+  outputHookResult(message);
 }
 
 main();

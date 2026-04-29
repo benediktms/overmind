@@ -183,8 +183,7 @@ Recording session completion. Summarize what was accomplished and close relevant
   const additionalContext =
     `[OVERMIND KEYWORD DETECTED: ${matches.map((m) => m.mode.toUpperCase()).join(", ")}]\n\n` +
     modeBlocks.join("\n\n---\n\n") +
-    daemonStatus +
-    `\n\n---\nUser request: ${prompt}`;
+    daemonStatus;
 
   console.log(createHookOutput(additionalContext));
 }
