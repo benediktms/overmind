@@ -72,7 +72,10 @@ export class ConfigLoader {
       brain: { enabled: true, brainName: "overmind", taskPrefix: "OVR" },
       neural_link: {
         enabled: true,
-        httpUrl: "http://localhost:9961/mcp",
+        // Base URL only — the adapter appends `/health` and `/mcp` itself.
+        // Existing configs that bake `/mcp` in still work via the
+        // adapter's `normalizeNeuralLinkBase` defensive strip.
+        httpUrl: "http://localhost:9961",
         roomTtlSeconds: 3600,
       },
       skills: { autoInject: true, projectOverrides: true },

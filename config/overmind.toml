@@ -51,7 +51,11 @@ task_prefix = "OVR"
 
 [neural_link]
 enabled = true
-http_url = "http://localhost:9961/mcp"
+# Base URL only — the adapter appends `/health` and `/mcp` itself.
+# Existing configs that bake `/mcp` in still work via the adapter's
+# defensive `normalizeNeuralLinkBase` strip, but new installs use the
+# clean base.
+http_url = "http://localhost:9961"
 room_ttl_seconds = 3600
 
 [skills]

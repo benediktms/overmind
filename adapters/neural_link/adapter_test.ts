@@ -1,5 +1,72 @@
 import { assert, assertEquals, assertFalse } from "@std/assert";
-import { MessageKind, NeuralLinkAdapter } from "./adapter.ts";
+import {
+  MessageKind,
+  NeuralLinkAdapter,
+  normalizeNeuralLinkBase,
+} from "./adapter.ts";
+
+// ── normalizeNeuralLinkBase ────────────────────────────────────────────────
+// Defensive strip of the legacy `/mcp` suffix and trailing slashes. Mirrors
+// the same helper in cli/mcp_server.ts. Existing configs (including the
+// shipped overmind.toml prior to this change) bake `/mcp` into http_url —
+// without this normalize the adapter probes `${url}/mcp/health` which 404s.
+
+Deno.test("normalizeNeuralLinkBase strips a trailing /mcp", () => {
+  assertEquals(
+    normalizeNeuralLinkBase("http://localhost:9961/mcp"),
+    "http://localhost:9961",
+  );
+});
+
+Deno.test("normalizeNeuralLinkBase strips trailing slashes", () => {
+  assertEquals(
+    normalizeNeuralLinkBase("http://localhost:9961/"),
+    "http://localhost:9961",
+  );
+  assertEquals(
+    normalizeNeuralLinkBase("http://localhost:9961/mcp/"),
+    "http://localhost:9961",
+  );
+});
+
+Deno.test("normalizeNeuralLinkBase leaves a clean base URL alone", () => {
+  assertEquals(
+    normalizeNeuralLinkBase("http://localhost:9961"),
+    "http://localhost:9961",
+  );
+});
+
+Deno.test("normalizeNeuralLinkBase does NOT strip /mcp mid-path", () => {
+  // Only a literal trailing /mcp is the legacy compat shape; preserve
+  // user-deliberate prefix paths.
+  assertEquals(
+    normalizeNeuralLinkBase("https://gw.example.com/api/mcp"),
+    "https://gw.example.com/api",
+  );
+  assertEquals(
+    normalizeNeuralLinkBase("https://example.com/mcpserver"),
+    "https://example.com/mcpserver",
+  );
+});
+
+Deno.test("connect tolerates a legacy /mcp-suffixed httpUrl", async () => {
+  const stub = await startStub();
+  try {
+    const adapter = new NeuralLinkAdapter();
+    // Pass the legacy shape — adapter must still find /health and /mcp.
+    await adapter.connect({
+      enabled: true,
+      httpUrl: `${stub.url}/mcp`,
+      roomTtlSeconds: 3600,
+    });
+    assert(
+      adapter.isConnected(),
+      "adapter should normalize trailing /mcp and connect",
+    );
+  } finally {
+    await stub.shutdown();
+  }
+});
 
 // ── Stub /mcp server ───────────────────────────────────────────────────────
 // Drives the adapter against a controllable JSON-RPC handler so tests can
@@ -124,13 +191,26 @@ async function startStub(initial: StubBehavior = {}): Promise<StubServer> {
           });
         }
 
-        const result = handles.behavior.toolResponse?.(toolName, args) ??
+        const handlerResult = handles.behavior.toolResponse?.(toolName, args) ??
           defaultToolResponse(toolName, args);
+        // neural_link wraps every tool response in MCP's standard envelope:
+        //   {content: [{type: "text", text: "<JSON-encoded handler result>"}],
+        //    isError?: bool}
+        // The stub mirrors that exactly so the adapter's unwrap logic gets
+        // exercised for real.
+        const envelope = isToolErrorEnvelope(handlerResult)
+          ? {
+            content: [{ type: "text", text: handlerResult.errorText }],
+            isError: true,
+          }
+          : {
+            content: [{ type: "text", text: JSON.stringify(handlerResult) }],
+          };
         return new Response(
           JSON.stringify({
             jsonrpc: "2.0",
             id: body.id,
-            result,
+            result: envelope,
           }),
           { headers: { "content-type": "application/json" } },
         );
@@ -163,6 +243,27 @@ async function startStub(initial: StubBehavior = {}): Promise<StubServer> {
       await server.finished;
     },
   };
+}
+
+/**
+ * Marker shape: a stub `toolResponse` that returns this object signals
+ * that the response should be wrapped with `isError: true` and the
+ * given text instead of the structured success envelope.
+ */
+interface ToolErrorEnvelope {
+  __isToolError: true;
+  errorText: string;
+}
+
+function toolError(errorText: string): ToolErrorEnvelope {
+  return { __isToolError: true, errorText };
+}
+
+function isToolErrorEnvelope(value: unknown): value is ToolErrorEnvelope {
+  return (
+    value !== null && typeof value === "object" &&
+    (value as { __isToolError?: unknown }).__isToolError === true
+  );
 }
 
 function defaultToolResponse(
@@ -437,6 +538,57 @@ Deno.test("on 401 the adapter re-initializes once and retries the call", async (
     assertEquals(toolCalls.length, 2, "expected the failed call + the retry");
     // The retry must have carried the *new* session id.
     assertEquals(toolCalls[1].sessionIdSent, adapter.getSessionId());
+  } finally {
+    await stub.shutdown();
+  }
+});
+
+Deno.test("tool-error envelope (isError: true) yields null/false without throwing", async () => {
+  // Pins the unwrap of MCP's standard tool-level error envelope:
+  //   {content: [{type: "text", text: "<msg>"}], isError: true}
+  // Distinct from a JSON-RPC protocol error — neural_link uses isError for
+  // handler-rejected calls (e.g. invalid id format on room_open).
+  const stub = await startStub({
+    toolResponse: () => toolError("invalid id: room_id must match …"),
+  });
+  try {
+    const adapter = await makeAdapter(stub);
+    const ok = await adapter.roomJoin("room_aaaa0000bbbb1111", "p", "P");
+    assertFalse(ok);
+  } finally {
+    await stub.shutdown();
+  }
+});
+
+Deno.test("room_open unwraps the MCP envelope and returns the inner room_id", async () => {
+  // Direct regression for the bug we shipped on the first cut: the
+  // adapter previously assumed `result` was the unwrapped handler shape,
+  // but neural_link's tools/call always wraps it in `{content:[{text}]}`.
+  // The default stub response now exercises that envelope end-to-end —
+  // this test asserts the inner room_id is extracted from the text JSON
+  // string rather than read off the (non-existent) top-level field.
+  const stub = await startStub({
+    toolResponse: (name, args) => {
+      if (name !== "room_open") return null;
+      return {
+        room_id: args.id ?? "room_deadbeefdeadbeef",
+        title: args.title,
+        status: "open",
+        participant_id: args.participant_id,
+        role: "lead",
+        already_existed: false,
+      };
+    },
+  });
+  try {
+    const adapter = await makeAdapter(stub);
+    const roomId = await adapter.roomOpen({
+      id: "room_cafef00dcafef00d",
+      title: "envelope round-trip",
+      participantId: "lead",
+      displayName: "Lead",
+    });
+    assertEquals(roomId, "room_cafef00dcafef00d");
   } finally {
     await stub.shutdown();
   }

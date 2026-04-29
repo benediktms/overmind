@@ -59,6 +59,17 @@ const FETCH_TIMEOUT_MS = 5_000;
 const HEALTH_TIMEOUT_MS = 3_000;
 const MCP_PROTOCOL_VERSION = "2024-11-05";
 
+/**
+ * Trim a trailing `/mcp` (and any trailing slashes) from a configured URL
+ * so the adapter can append `/health` or `/mcp` to a clean base. Mirrors
+ * `normalizeNeuralLinkBase` in cli/mcp_server.ts: historical configs
+ * baked `/mcp` into the env var / TOML, and we want both shapes to work.
+ */
+export function normalizeNeuralLinkBase(raw: string): string {
+  const trimmed = raw.replace(/\/+$/, "");
+  return trimmed.endsWith("/mcp") ? trimmed.slice(0, -"/mcp".length) : trimmed;
+}
+
 interface JsonRpcRequest {
   jsonrpc: "2.0";
   id: number;
@@ -222,7 +233,7 @@ class NeuralLinkRpcClient {
         message: payload.error.message,
       };
     }
-    return { kind: "ok", value: payload.result };
+    return unwrapToolResult(payload.result);
   }
 
   private warnFailure(name: string, result: CallResult): void {
@@ -243,6 +254,9 @@ class NeuralLinkRpcClient {
       case "rpc-error":
         detail = `JSON-RPC ${result.code}: ${result.message}`;
         break;
+      case "tool-error":
+        detail = `tool error: ${result.message}`;
+        break;
     }
     console.warn(`neural_link ${name} failed at ${this.mcpUrl()} — ${detail}`);
   }
@@ -254,7 +268,50 @@ type CallResult =
   | { kind: "transport-error"; message: string }
   | { kind: "http-error"; status: number; body: string }
   | { kind: "parse-error"; message: string }
-  | { kind: "rpc-error"; code: number; message: string };
+  | { kind: "rpc-error"; code: number; message: string }
+  | { kind: "tool-error"; message: string };
+
+/**
+ * Pull the structured payload out of an MCP `tools/call` result envelope.
+ * neural_link wraps every tool response as `{content: [{type: "text",
+ * text: "<JSON-encoded data>"}], isError?: bool}` per the MCP protocol —
+ * the adapter has to unwrap that to get back to the handler's actual
+ * shape (e.g. `{room_id, ...}`). When `isError: true`, the text is a
+ * plain error message rather than a JSON object.
+ */
+function unwrapToolResult(rawResult: unknown): CallResult {
+  if (!isObject(rawResult) || !Array.isArray(rawResult.content)) {
+    // Fall back to treating the result as the unwrapped payload directly.
+    // Some hand-written stubs don't wrap; tolerating that keeps the
+    // contract narrow and the failure mode obvious.
+    return { kind: "ok", value: rawResult };
+  }
+  const first = rawResult.content[0];
+  if (!isObject(first) || typeof first.text !== "string") {
+    return {
+      kind: "parse-error",
+      message: "tools/call content[0] missing text field",
+    };
+  }
+  if (rawResult.isError === true) {
+    return { kind: "tool-error", message: first.text };
+  }
+  // Empty text is a valid no-op for tools that return nothing meaningful;
+  // surface as an empty object rather than a parse error.
+  if (first.text === "") {
+    return { kind: "ok", value: {} };
+  }
+  try {
+    return { kind: "ok", value: JSON.parse(first.text) };
+  } catch (err) {
+    return {
+      kind: "parse-error",
+      message: `tools/call text not JSON: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    };
+  }
+}
 
 export class NeuralLinkAdapter implements NeuralLinkPort {
   private config: NeuralLinkConfig | null = null;
@@ -264,13 +321,18 @@ export class NeuralLinkAdapter implements NeuralLinkPort {
   async connect(config: NeuralLinkConfig): Promise<void> {
     if (!config.enabled) return;
 
-    this.config = config;
+    // Normalize the base URL so the adapter can confidently append
+    // `/health` and `/mcp`. The shipped TOML and historical env vars
+    // bake `/mcp` into the URL; without this normalize the health probe
+    // hits `${url}/mcp/health` and 404s every time.
+    const baseUrl = normalizeNeuralLinkBase(config.httpUrl);
+    this.config = { ...config, httpUrl: baseUrl };
 
     // Health probe is bounded so a misconfigured httpUrl can't stall
     // kernel.start(). Logged loudly with the URL on failure so a typo
     // doesn't silently degrade to "running without coordination".
     try {
-      const response = await fetch(`${config.httpUrl}/health`, {
+      const response = await fetch(`${baseUrl}/health`, {
         signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS),
       });
       // Drain the body even on success — we only care about the status,
@@ -279,13 +341,13 @@ export class NeuralLinkAdapter implements NeuralLinkPort {
       await response.body?.cancel();
       if (!response.ok) {
         console.warn(
-          `neural_link /health returned HTTP ${response.status} at ${config.httpUrl}/health — running without coordination`,
+          `neural_link /health returned HTTP ${response.status} at ${baseUrl}/health — running without coordination`,
         );
         return;
       }
     } catch (err) {
       console.warn(
-        `neural_link unreachable at ${config.httpUrl}/health (${
+        `neural_link unreachable at ${baseUrl}/health (${
           err instanceof Error ? err.message : String(err)
         }) — running without coordination`,
       );
@@ -295,12 +357,12 @@ export class NeuralLinkAdapter implements NeuralLinkPort {
     // Health is up — handshake. Failure here is also non-fatal: we log
     // and stay disconnected. The kernel's modes guard every call on
     // isConnected() and degrade gracefully.
-    const client = new NeuralLinkRpcClient(config.httpUrl);
+    const client = new NeuralLinkRpcClient(baseUrl);
     try {
       await client.initialize();
     } catch (err) {
       console.warn(
-        `neural_link initialize handshake failed at ${config.httpUrl}/mcp (${
+        `neural_link initialize handshake failed at ${baseUrl}/mcp (${
           err instanceof Error ? err.message : String(err)
         }) — running without coordination`,
       );
