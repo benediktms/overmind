@@ -226,7 +226,7 @@ export interface OvermindConfig {
   modes: ModesConfig;
   agents: Record<string, AgentConfig>;
   brain: BrainConfig;
-  neural_link: NeuralLinkConfig;
+  neuralLink: NeuralLinkConfig;
   skills: SkillsConfig;
   dispatcher: DispatcherConfig;
 }
