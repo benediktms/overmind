@@ -19,6 +19,45 @@ import {
 const DEFAULT_CLAUDE_BINARY = "claude";
 const DEFAULT_LOG_DIR = ".overmind/state/runs";
 
+/**
+ * Environment variable name prefixes that are safe to forward to worker
+ * subprocesses. Everything else is stripped to avoid leaking secrets.
+ */
+const ALLOWED_ENV_PREFIXES = ["OVERMIND_", "DENO_", "ANTHROPIC_"];
+
+/**
+ * Explicit env var names (beyond the prefix list) that workers need for basic
+ * OS functionality.
+ */
+const ALLOWED_ENV_KEYS = new Set([
+  "PATH",
+  "HOME",
+  "USER",
+  "LANG",
+  "TERM",
+  "SHELL",
+  "TMPDIR",
+]);
+
+/**
+ * Return a copy of `raw` retaining only the keys whose name starts with an
+ * allowed prefix or is in the explicit allowlist.
+ */
+function filterEnv(
+  raw: Record<string, string>,
+): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [key, value] of Object.entries(raw)) {
+    if (
+      ALLOWED_ENV_KEYS.has(key) ||
+      ALLOWED_ENV_PREFIXES.some((p) => key.startsWith(p))
+    ) {
+      out[key] = value;
+    }
+  }
+  return out;
+}
+
 export interface ClaudeCodeDispatcherOptions {
   /** Path to the Claude Code binary. Defaults to "claude" (PATH lookup). */
   binaryPath?: string;
@@ -31,28 +70,42 @@ export interface ClaudeCodeDispatcherOptions {
   logsDir?: string;
   /** Override the spawn primitive — used by tests. */
   spawn?: (cmd: string, options: Deno.CommandOptions) => Deno.ChildProcess;
+  /**
+   * Milliseconds to wait after SIGTERM before escalating to SIGKILL.
+   * Defaults to 5000. Tests may pass a shorter value.
+   */
+  killGraceMs?: number;
 }
 
 interface InflightAgent {
   runId: string;
   child: Deno.ChildProcess;
+  /** True once cancelRun has been called for this entry. */
+  cancelled: boolean;
+  /** Handle for the SIGKILL escalation timer; cleared on clean exit. */
+  killTimer?: number;
 }
 
 export class ClaudeCodeDispatcher implements AgentDispatcher {
   private readonly binaryPath: string;
   private readonly logsDir: string;
+  private readonly killGraceMs: number;
   private readonly spawn: (
     cmd: string,
     options: Deno.CommandOptions,
   ) => Deno.ChildProcess;
   private readonly inflight = new Map<string, InflightAgent>();
   private available: boolean | null = null;
+  /** Filtered snapshot of process env taken at construction time. */
+  private readonly baseEnv: Record<string, string>;
 
   constructor(options: ClaudeCodeDispatcherOptions = {}) {
     this.binaryPath = options.binaryPath ?? DEFAULT_CLAUDE_BINARY;
     this.logsDir = options.logsDir ?? DEFAULT_LOG_DIR;
+    this.killGraceMs = options.killGraceMs ?? 5000;
     this.spawn = options.spawn ??
       ((cmd, opts) => new Deno.Command(cmd, opts).spawn());
+    this.baseEnv = filterEnv(Deno.env.toObject());
   }
 
   /**
@@ -96,8 +149,9 @@ export class ClaudeCodeDispatcher implements AgentDispatcher {
 
     const runId = extractRunId(request.agentId);
     const logBase = await this.openLogBase(request, runId);
-    const env = buildEnv(request, runId);
+    const env = buildEnv(this.baseEnv, request, runId);
     const args = buildArgs(request);
+    const prompt = buildPrompt(request);
 
     let stdoutFile: Deno.FsFile | null = null;
     let stderrFile: Deno.FsFile | null = null;
@@ -119,7 +173,8 @@ export class ClaudeCodeDispatcher implements AgentDispatcher {
       const error = err instanceof Error ? err.message : String(err);
       return {
         launched: false,
-        error: `failed to open log file at ${logBase}.{stdout,stderr}.log: ${error}`,
+        error:
+          `failed to open log file at ${logBase}.{stdout,stderr}.log: ${error}`,
       };
     }
 
@@ -129,7 +184,7 @@ export class ClaudeCodeDispatcher implements AgentDispatcher {
         args,
         cwd: request.workspace,
         env,
-        stdin: "null",
+        stdin: "piped",
         stdout: "piped",
         stderr: "piped",
       });
@@ -144,11 +199,31 @@ export class ClaudeCodeDispatcher implements AgentDispatcher {
       return { launched: false, error: `spawn failed: ${error}` };
     }
 
-    this.inflight.set(request.agentId, { runId, child });
+    // Feed the prompt via stdin so it does not appear in process argv (ps).
+    try {
+      const writer = child.stdin.getWriter();
+      await writer.write(new TextEncoder().encode(prompt));
+      await writer.close();
+    } catch {
+      // stdin write failure is non-fatal — the child may have already exited
+      // or the fake child in tests may not buffer stdin.
+    }
+
+    const agent: InflightAgent = {
+      runId,
+      child,
+      cancelled: false,
+    };
+    this.inflight.set(request.agentId, agent);
 
     const stdoutCapture = stdoutFile;
     const stderrCapture = stderrFile;
     pipeToFiles(child, stdoutCapture, stderrCapture, () => {
+      // Clear the SIGKILL timer: a clean exit means escalation is unneeded.
+      if (agent.killTimer !== undefined) {
+        clearTimeout(agent.killTimer);
+        agent.killTimer = undefined;
+      }
       this.inflight.delete(request.agentId);
     });
 
@@ -156,21 +231,39 @@ export class ClaudeCodeDispatcher implements AgentDispatcher {
   }
 
   /**
-   * Send SIGTERM to every in-flight child whose agentId belongs to `runId`.
-   * Best-effort — children may have already exited. Returns the number of
-   * signals sent (not the number of children that successfully exit).
+   * Send SIGTERM to every in-flight child whose agentId belongs to `runId`,
+   * then schedule a SIGKILL escalation after `killGraceMs` if the child has
+   * not exited by then (tracked via pipeToFiles' onExit callback).
+   *
+   * Returns the number of SIGTERM signals sent. Idempotent: a second call for
+   * the same runId is a no-op (children already marked cancelled).
    */
   cancelRun(runId: string): number {
     let count = 0;
-    for (const [agentId, agent] of this.inflight.entries()) {
+    for (const [_agentId, agent] of this.inflight.entries()) {
       if (agent.runId !== runId) continue;
+      if (agent.cancelled) {
+        // Already cancelled; still count it so callers get a stable return.
+        count++;
+        continue;
+      }
+      agent.cancelled = true;
       try {
         agent.child.kill("SIGTERM");
         count++;
       } catch {
         // Child may have already exited; ignore.
       }
-      this.inflight.delete(agentId);
+      // Schedule SIGKILL escalation. The timer handle is stored so pipeToFiles
+      // can clear it when the child exits cleanly after SIGTERM.
+      // TODO ovr-b65: dedicated test for SIGKILL grace in CI
+      agent.killTimer = setTimeout(() => {
+        try {
+          agent.child.kill("SIGKILL");
+        } catch {
+          // Child already gone — this is the happy path.
+        }
+      }, this.killGraceMs);
     }
     return count;
   }
@@ -216,11 +309,12 @@ function isAbsolute(path: string): boolean {
 }
 
 function buildEnv(
+  base: Record<string, string>,
   request: AgentDispatchRequest,
   runId: string,
 ): Record<string, string> {
   return {
-    ...Deno.env.toObject(),
+    ...base,
     OVERMIND_RUN_ID: runId,
     OVERMIND_AGENT_ID: request.agentId,
     OVERMIND_ROLE: request.role,
@@ -229,11 +323,14 @@ function buildEnv(
   };
 }
 
+/**
+ * Build the CLI args for the worker subprocess. The prompt is fed via stdin
+ * (see dispatch()) so that it does not appear in process argv / `ps` output.
+ */
 function buildArgs(request: AgentDispatchRequest): string[] {
-  const prompt = buildPrompt(request);
   return [
     "--print",
-    prompt,
+    "-",
     "--permission-mode",
     "bypassPermissions",
     "--no-session-persistence",
@@ -301,7 +398,11 @@ async function pipeToFiles(
     try {
       stderrFile.close();
     } catch { /* already closed */ }
-    onExit();
+    // onExit is the sole deleter from the inflight map. Wrap it so that a
+    // close() exception above cannot prevent the entry from being removed.
+    try {
+      onExit();
+    } catch { /* ignore */ }
   }
 }
 
