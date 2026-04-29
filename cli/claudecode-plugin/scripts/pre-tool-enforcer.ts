@@ -70,7 +70,13 @@ function outputDeny(reason: string): void {
   console.log(JSON.stringify({ continue: false, stopReason: reason }));
 }
 
-export function evaluateBash(command: string): Decision {
+export function evaluateBash(command: string, _depth = 0): Decision {
+  // Guard against infinite recursion in adversarial inputs.
+  if (_depth > 5) return { kind: "allow" };
+
+  // Direct danger patterns (applied to the full command string before
+  // segment splitting so they fire even inside wrappers passed as a single
+  // unquoted string).
   if (
     command.includes("rm -rf /") ||
     command.includes("rm -f /") ||
@@ -83,6 +89,43 @@ export function evaluateBash(command: string): Decision {
         "[OVERMIND SAFETY] Dangerous command detected. Verify this is intentional before executing.",
     };
   }
+
+  // Recursive check: detect `bash -c '...'`, `sh -c '...'`, `eval '...'`, and
+  // backtick-wrapped commands. These wrappers allow an agent to embed a
+  // dangerous inner command that the top-level scan would otherwise miss.
+  // We extract the inner body and re-run evaluateBash on it.
+  for (const segment of splitTopLevelSegments(command)) {
+    const tokens = tokenizeQuoteAware(segment.trim());
+    if (tokens.length === 0) continue;
+
+    // bash -c <body> / sh -c <body>
+    const shellIdx = tokens.findIndex(
+      (t) =>
+        t === "bash" || t === "sh" || t.endsWith("/bash") || t.endsWith("/sh"),
+    );
+    if (shellIdx > -1 && tokens[shellIdx + 1] === "-c") {
+      const body = tokens[shellIdx + 2];
+      if (body) {
+        const inner = evaluateBash(stripQuotes(body), _depth + 1);
+        if (inner.kind === "allow" && inner.message) return inner;
+      }
+    }
+
+    // eval <body>
+    if (tokens[0] === "eval" && tokens.length > 1) {
+      const body = tokens.slice(1).join(" ");
+      const inner = evaluateBash(stripQuotes(body), _depth + 1);
+      if (inner.kind === "allow" && inner.message) return inner;
+    }
+
+    // Backtick command substitution: extract content between first pair of ``.
+    const backtickMatch = segment.match(/`([^`]+)`/);
+    if (backtickMatch) {
+      const inner = evaluateBash(backtickMatch[1], _depth + 1);
+      if (inner.kind === "allow" && inner.message) return inner;
+    }
+  }
+
   return { kind: "allow" };
 }
 
@@ -131,41 +174,79 @@ function stripQuotes(s: string): string {
 }
 
 // Split a command on top-level shell separators (|, ||, &, &&, ;) so that
-// `sed -i ... file && other` doesn't pull tokens past the `&&`. Quote-aware.
+// `sed -i ... file && other` doesn't pull tokens past the `&&`. Quote-aware
+// and $() / backtick nesting-aware: separators inside command substitutions
+// are never treated as top-level splits.
 function splitTopLevelSegments(command: string): string[] {
   const segments: string[] = [];
   let buf = "";
   let inSingle = false;
   let inDouble = false;
+  // Tracks $( ... ) nesting depth. Every `$(` increments, every unquoted `)`
+  // at depth > 0 decrements. Backtick substitutions use a separate flag
+  // because they don't nest (a second backtick always closes the first).
+  let subshellDepth = 0;
+  let inBacktick = false;
   for (let i = 0; i < command.length; i++) {
     const ch = command[i];
-    if (!inDouble && ch === "'") {
+    if (!inDouble && !inBacktick && ch === "'") {
       inSingle = !inSingle;
       buf += ch;
       continue;
     }
-    if (!inSingle && ch === '"') {
+    if (!inSingle && !inBacktick && ch === '"') {
       inDouble = !inDouble;
       buf += ch;
       continue;
     }
-    if (!inSingle && !inDouble) {
-      // Noclobber `>|` is a single redirect operator, not a pipe. Detect
-      // by looking at the most recent non-whitespace char; if it's `>`,
-      // keep the `|` attached to the buffer.
-      if (ch === "|") {
-        const prevNonSpace = buf.replace(/\s+$/, "");
-        if (prevNonSpace.endsWith(">")) {
+    // Backtick command substitution: toggle outside of single-quotes.
+    if (!inSingle && !inDouble && ch === "`") {
+      inBacktick = !inBacktick;
+      buf += ch;
+      continue;
+    }
+    if (!inSingle && !inDouble && !inBacktick) {
+      // $( opens a subshell — track depth so inner `&&`/`|`/`;` are not splits.
+      if (ch === "$" && command[i + 1] === "(") {
+        subshellDepth++;
+        buf += ch;
+        continue;
+      }
+      if (ch === "(") {
+        // A bare `(` also opens a subshell context (subshell grouping).
+        subshellDepth++;
+        buf += ch;
+        continue;
+      }
+      if (ch === ")") {
+        if (subshellDepth > 0) {
+          subshellDepth--;
           buf += ch;
           continue;
         }
-      }
-      if (ch === "|" || ch === "&" || ch === ";") {
-        if (buf.trim()) segments.push(buf);
-        buf = "";
-        // Skip the second char of "||" or "&&".
-        if (command[i + 1] === ch) i++;
+        // Unmatched `)` — pass through (e.g. trailing paren in test).
+        buf += ch;
         continue;
+      }
+      // Only split on separators at depth 0 (not inside a $() or backtick).
+      if (subshellDepth === 0) {
+        // Noclobber `>|` is a single redirect operator, not a pipe. Detect
+        // by looking at the most recent non-whitespace char; if it's `>`,
+        // keep the `|` attached to the buffer.
+        if (ch === "|") {
+          const prevNonSpace = buf.replace(/\s+$/, "");
+          if (prevNonSpace.endsWith(">")) {
+            buf += ch;
+            continue;
+          }
+        }
+        if (ch === "|" || ch === "&" || ch === ";") {
+          if (buf.trim()) segments.push(buf);
+          buf = "";
+          // Skip the second char of "||" or "&&".
+          if (command[i + 1] === ch) i++;
+          continue;
+        }
       }
     }
     buf += ch;

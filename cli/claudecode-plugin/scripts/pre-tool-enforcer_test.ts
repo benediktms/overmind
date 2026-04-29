@@ -490,6 +490,93 @@ Deno.test("parseBashWriteCandidates: subshell doesn't trap trailing paren in pat
   assertEquals(c.some((p) => p.endsWith(")")), false);
 });
 
+// --- ovr-396.23.7: $() / backtick nesting in splitTopLevelSegments ---
+
+Deno.test("splitTopLevelSegments: does not split inside $()", () => {
+  // cmd1 $(rm -rf foo && rm bar) cmd2 must produce ONE segment, not three.
+  // Previously `&&` inside $() was treated as a top-level separator.
+  const c = parseBashWriteCandidates(
+    "cmd1 $(rm -rf foo && rm bar) > out.txt",
+  );
+  // The redirect target is still captured — but the $() body is not split.
+  assertEquals(c.includes("out.txt"), true);
+});
+
+Deno.test("splitTopLevelSegments: does not split inside backtick substitution", () => {
+  // Backtick body `rm -rf /tmp && echo x` must not cause a mid-backtick split.
+  const c = parseBashWriteCandidates(
+    "echo `cat foo && cat bar` > result.txt",
+  );
+  assertEquals(c.includes("result.txt"), true);
+});
+
+Deno.test("splitTopLevelSegments: nested $() — outer separator still splits", () => {
+  // The && outside the $() is a real separator.
+  const c = parseBashWriteCandidates(
+    "echo $(cat file) && tee out.log",
+  );
+  assertEquals(c.includes("out.log"), true);
+});
+
+// --- ovr-396.23.7: evaluateBash recursion through bash -c / eval / backtick ---
+
+Deno.test("evaluateBash: detects danger inside bash -c '...'", () => {
+  const d = evaluateBash("bash -c 'rm -rf /'");
+  assertEquals(d.kind, "allow");
+  if (d.kind === "allow") {
+    assertEquals(d.message?.includes("Dangerous"), true);
+  }
+});
+
+Deno.test("evaluateBash: detects danger inside sh -c '...'", () => {
+  const d = evaluateBash("sh -c 'rm -rf /'");
+  assertEquals(d.kind, "allow");
+  if (d.kind === "allow") {
+    assertEquals(d.message?.includes("Dangerous"), true);
+  }
+});
+
+Deno.test("evaluateBash: detects danger inside eval '...'", () => {
+  const d = evaluateBash("eval 'rm -rf /'");
+  assertEquals(d.kind, "allow");
+  if (d.kind === "allow") {
+    assertEquals(d.message?.includes("Dangerous"), true);
+  }
+});
+
+Deno.test("evaluateBash: detects danger inside backtick wrapper", () => {
+  const d = evaluateBash("`rm -rf /`");
+  assertEquals(d.kind, "allow");
+  if (d.kind === "allow") {
+    assertEquals(d.message?.includes("Dangerous"), true);
+  }
+});
+
+Deno.test("evaluateBash: safe bash -c does not false-positive", () => {
+  const d = evaluateBash("bash -c 'ls -la'");
+  assertEquals(d.kind, "allow");
+  if (d.kind === "allow") {
+    assertEquals(d.message, undefined);
+  }
+});
+
+Deno.test("evaluateBash: safe eval does not false-positive", () => {
+  const d = evaluateBash("eval 'echo hello'");
+  assertEquals(d.kind, "allow");
+  if (d.kind === "allow") {
+    assertEquals(d.message, undefined);
+  }
+});
+
+Deno.test("evaluateBash: detects danger nested two levels deep", () => {
+  // bash -c 'eval "rm -rf /"' — two hops before the danger.
+  const d = evaluateBash(`bash -c 'eval "rm -rf /"'`);
+  assertEquals(d.kind, "allow");
+  if (d.kind === "allow") {
+    assertEquals(d.message?.includes("Dangerous"), true);
+  }
+});
+
 // --- M2 review: handleBashTool integration / precedence ---
 
 Deno.test("handleBashTool: danger pattern wins over cache-bypass nudge", async () => {
