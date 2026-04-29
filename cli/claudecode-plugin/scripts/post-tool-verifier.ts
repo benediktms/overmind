@@ -17,23 +17,20 @@ import {
   upsertEntry,
 } from "./lib/read_hash_cache.ts";
 import { isHarnessEnabled } from "./lib/harness_config.ts";
+import type { BaseHookData } from "./lib/hook_data.ts";
+
+export type { BaseHookData };
 
 const OVERMIND_KERNEL_HTTP_URL = Deno.env.get("OVERMIND_KERNEL_HTTP_URL") ??
   "http://localhost:8080";
 
-export interface HookData {
-  tool_name?: string;
-  toolName?: string;
-  tool_input?: Record<string, unknown>;
-  toolInput?: Record<string, unknown>;
+// PostToolUse-specific hook payload. Extends BaseHookData with tool output
+// fields that are only present after a tool has executed.
+export interface HookData extends BaseHookData {
   tool_response?: unknown;
   toolResponse?: unknown;
   tool_output?: unknown;
   toolOutput?: unknown;
-  cwd?: string;
-  directory?: string;
-  session_id?: string;
-  sessionId?: string;
 }
 
 export interface RefreshOptions {
@@ -222,8 +219,8 @@ export async function refreshCacheIfApplicable(
   const sessionId = data.session_id ?? data.sessionId ?? "default";
   const cachePath = getCachePath(cwd, home);
   const cacheDir = cachePath.substring(0, cachePath.lastIndexOf("/"));
-  const filePath = await resolvePathSafely(rawPath, cwd);
   const cwdReal = await resolvePathSafely(cwd);
+  const filePath = await resolvePathSafely(rawPath, cwdReal);
 
   if (isTransientPath(filePath, cacheDir, cwdReal)) return;
 

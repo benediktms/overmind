@@ -22,21 +22,16 @@ import {
 } from "./lib/read_hash_cache.ts";
 import { isHarnessEnabled } from "./lib/harness_config.ts";
 import { tryAcquire, type TryAcquireResult } from "./lib/lock_client.ts";
+import type { BaseHookData } from "./lib/hook_data.ts";
 
 export { isHarnessEnabled };
+export type { BaseHookData };
 
-export interface HookData {
-  tool_name?: string;
-  toolName?: string;
-  tool_input?: Record<string, unknown>;
-  toolInput?: Record<string, unknown>;
-  cwd?: string;
-  directory?: string;
-  // CC's hook payload identity. Mirrors `post-tool-verifier.ts:35-37` and
-  // the M1 hash-cache identity tuple. `agentId` (subagents) and `agent_type`
-  // (some payload shapes) are equivalent — see `subagent-coordinator.ts`.
-  session_id?: string;
-  sessionId?: string;
+// PreToolUse-specific hook payload. Extends BaseHookData with the agent
+// identity fields used for the cross-agent lock check (M4).
+// CC's hook payload identity. `agentId` (subagents) and `agent_type`
+// (some payload shapes) are equivalent — see `subagent-coordinator.ts`.
+export interface HookData extends BaseHookData {
   agentId?: string;
   agent_type?: string;
 }
@@ -368,8 +363,12 @@ export async function evaluateHarness(
   const home = opts.home ?? Deno.env.get("HOME") ?? "/";
   const cachePath = getCachePath(cwd, home);
   const cacheDir = cachePath.substring(0, cachePath.lastIndexOf("/"));
-  const filePath = await resolvePathSafely(rawPath, cwd);
+  // Resolve cwd first so the containment check inside resolvePathSafely uses
+  // the real path (e.g. /private/var/... on macOS) rather than the symlink
+  // form (/var/...). Without this, temp-dir paths used in tests would fail the
+  // containment check and return the unresolved key, missing the cache entry.
   const cwdReal = await resolvePathSafely(cwd);
+  const filePath = await resolvePathSafely(rawPath, cwdReal);
 
   if (isTransientPath(filePath, cacheDir, cwdReal)) return { kind: "allow" };
 
@@ -432,8 +431,8 @@ export async function evaluateLockClaim(
   const home = opts.home ?? env.get("HOME") ?? "/";
   const cachePath = getCachePath(cwd, home);
   const cacheDir = cachePath.substring(0, cachePath.lastIndexOf("/"));
-  const filePath = await resolvePathSafely(rawPath, cwd);
   const cwdReal = await resolvePathSafely(cwd);
+  const filePath = await resolvePathSafely(rawPath, cwdReal);
 
   // Mirror `evaluateHarness`: transient files (`/tmp`, `/var/folders/`, the
   // hash cache itself) are out of scope for the harness. Skipping them here
@@ -512,10 +511,11 @@ export async function evaluateBashCacheBypass(
   // Match evaluateHarness's pipeline (prune + cap) so a bloated cache file
   // doesn't blow up memory on the Bash check path.
   const cache = enforceMaxBytes(pruneStale(await loadCache(cachePath)));
+  const cwdReal = await resolvePathSafely(cwd);
 
   const hits: string[] = [];
   for (const raw of candidates) {
-    const resolved = await resolvePathSafely(raw, cwd);
+    const resolved = await resolvePathSafely(raw, cwdReal);
     if (getEntry(cache, resolved)) hits.push(raw);
   }
   if (hits.length === 0) return { kind: "allow" };
