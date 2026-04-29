@@ -41,6 +41,26 @@ interface JournalEvent {
   readonly entry: LockEntry;
 }
 
+// Resolve symlinks and `.`/`..` segments so two agents posting different
+// representations of the same physical file (e.g. macOS `/var/folders` vs
+// `/private/var/folders`, a workspace symlink, or `./foo` vs `foo`) collide
+// on a single map key. Falls back to the caller's path only when the target
+// does not exist yet — a Write that creates a new file legitimately fails
+// realPath with NotFound, and the lock-before-create case must remain
+// fail-open. Other realPath errors (ELOOP, EACCES, etc.) propagate so the
+// HTTP layer surfaces a 500 rather than silently defeating normalization
+// (e.g. an ELOOP fallback would let a symlink loop bypass the very
+// collision detection this exists to provide). Sync to preserve the
+// LockRegistry's "no await before map mutation" atomicity invariant.
+function normalizePath(path: string): string {
+  try {
+    return Deno.realPathSync(path);
+  } catch (err) {
+    if (err instanceof Deno.errors.NotFound) return path;
+    throw err;
+  }
+}
+
 /**
  * Per-session file lock store. Owner identity is `(sessionId, agentId)` from
  * CC's hook payload; re-entrant when both match, conflict when either differs.
@@ -79,6 +99,11 @@ export class LockRegistry {
       }
       const entry = event.entry;
       if (!entry?.path || !entry.sessionId || !entry.agentId) continue;
+      // Replay paths verbatim. Pre-normalization journals may contain
+      // non-canonical paths; those become orphans because new acquires
+      // normalize and won't match the legacy keys. The orphans cannot cause
+      // false conflicts (different keys), only consume cap slots until the
+      // journal is compacted (deferred to ovr-396.23.10).
       if (event.kind === "acquired") {
         this.locks.set(entry.path, entry);
       } else if (event.kind === "released") {
@@ -95,7 +120,8 @@ export class LockRegistry {
   }
 
   async acquire(input: AcquireInput): Promise<AcquireResult> {
-    const existing = this.locks.get(input.path);
+    const normalizedPath = normalizePath(input.path);
+    const existing = this.locks.get(normalizedPath);
     if (
       existing &&
       (existing.sessionId !== input.sessionId ||
@@ -114,9 +140,10 @@ export class LockRegistry {
     }
     const entry: LockEntry = {
       ...input,
+      path: normalizedPath,
       acquiredAt: new Date().toISOString(),
     };
-    this.locks.set(input.path, entry);
+    this.locks.set(normalizedPath, entry);
     await this.appendEvents([{
       ts: entry.acquiredAt,
       kind: "acquired",
@@ -130,12 +157,13 @@ export class LockRegistry {
     sessionId: string,
     agentId: string,
   ): Promise<boolean> {
-    const existing = this.locks.get(path);
+    const normalizedPath = normalizePath(path);
+    const existing = this.locks.get(normalizedPath);
     if (!existing) return true;
     if (existing.sessionId !== sessionId || existing.agentId !== agentId) {
       return false;
     }
-    this.locks.delete(path);
+    this.locks.delete(normalizedPath);
     await this.appendEvents([{
       ts: new Date().toISOString(),
       kind: "released",

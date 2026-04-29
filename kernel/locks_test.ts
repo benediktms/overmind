@@ -264,6 +264,170 @@ Deno.test("load reflects a re-entrant acquire by replacing acquiredAt", async ()
   });
 });
 
+Deno.test("acquire normalizes paths so a symlink and its target collide on the same lock", async () => {
+  // Two agents post different representations of the same physical file.
+  // Without kernel-side normalization the registry stored two distinct keys
+  // and silently missed the conflict — a covert way for parallel agents to
+  // both edit the same file unobserved.
+  await withTempJournal(async (journalPath) => {
+    const fileDir = await Deno.makeTempDir();
+    try {
+      const realFilePath = join(fileDir, "real.ts");
+      const linkPath = join(fileDir, "link.ts");
+      await Deno.writeTextFile(realFilePath, "");
+      await Deno.symlink(realFilePath, linkPath);
+      const canonical = await Deno.realPath(linkPath);
+
+      const registry = new LockRegistry(journalPath);
+      const first = await registry.acquire({
+        path: linkPath,
+        sessionId: "S1",
+        agentId: "A",
+      });
+      assertEquals(first.ok, true);
+
+      const second = await registry.acquire({
+        path: realFilePath,
+        sessionId: "S2",
+        agentId: "B",
+      });
+      assertEquals(second.ok, false);
+      if (!second.ok) {
+        assertEquals(second.holder, { sessionId: "S1", agentId: "A" });
+      }
+      assertEquals(registry.snapshot().length, 1);
+      // Pin the stored path: the LockEntry's `path` is the canonical form,
+      // not the symlink the caller posted. This is what makes journal replay
+      // land the lock under the same key on kernel restart — keeping the Map
+      // key normalized while storing the non-canonical input here would pass
+      // the conflict assertion above but silently break load().
+      assertEquals(registry.snapshot()[0].path, canonical);
+    } finally {
+      await Deno.remove(fileDir, { recursive: true });
+    }
+  });
+});
+
+Deno.test("load replays a symlink-acquired lock under the canonical path key", async () => {
+  // End-to-end across persistence: acquire under symlink, restart, verify
+  // the reloaded registry conflicts with a canonical-path acquire. Catches
+  // regressions where the journal stores a non-canonical path and replay
+  // lands the lock under a key new acquires can never hit.
+  await withTempJournal(async (journalPath) => {
+    const fileDir = await Deno.makeTempDir();
+    try {
+      const realFilePath = join(fileDir, "real.ts");
+      const linkPath = join(fileDir, "link.ts");
+      await Deno.writeTextFile(realFilePath, "");
+      await Deno.symlink(realFilePath, linkPath);
+
+      const writer = new LockRegistry(journalPath);
+      await writer.acquire({
+        path: linkPath,
+        sessionId: "S1",
+        agentId: "A",
+      });
+
+      const reader = new LockRegistry(journalPath);
+      await reader.load();
+      assertEquals(reader.snapshot().length, 1);
+
+      const conflict = await reader.acquire({
+        path: realFilePath,
+        sessionId: "S2",
+        agentId: "B",
+      });
+      assertEquals(conflict.ok, false);
+      if (!conflict.ok) {
+        assertEquals(conflict.holder, { sessionId: "S1", agentId: "A" });
+      }
+    } finally {
+      await Deno.remove(fileDir, { recursive: true });
+    }
+  });
+});
+
+Deno.test("release normalizes paths so the symlink form releases the canonical lock", async () => {
+  await withTempJournal(async (journalPath) => {
+    const fileDir = await Deno.makeTempDir();
+    try {
+      const realFilePath = join(fileDir, "real.ts");
+      const linkPath = join(fileDir, "link.ts");
+      await Deno.writeTextFile(realFilePath, "");
+      await Deno.symlink(realFilePath, linkPath);
+
+      const registry = new LockRegistry(journalPath);
+      await registry.acquire({
+        path: realFilePath,
+        sessionId: "S1",
+        agentId: "A",
+      });
+      const released = await registry.release(linkPath, "S1", "A");
+      assertEquals(released, true);
+      assertEquals(registry.snapshot().length, 0);
+    } finally {
+      await Deno.remove(fileDir, { recursive: true });
+    }
+  });
+});
+
+Deno.test("acquire on a non-existent path falls back to as-is (lock-before-create works)", async () => {
+  // Write tools acquire a lock before creating the file. realPath() throws
+  // NotFound for not-yet-existing files; the registry must fail-open and use
+  // the path verbatim rather than refuse the lock.
+  await withTempJournal(async (journalPath) => {
+    const fileDir = await Deno.makeTempDir();
+    try {
+      const futurePath = join(fileDir, "does-not-exist-yet.ts");
+      const registry = new LockRegistry(journalPath);
+      const result = await registry.acquire({
+        path: futurePath,
+        sessionId: "S1",
+        agentId: "A",
+      });
+      assertEquals(result.ok, true);
+      const snapshot = registry.snapshot();
+      assertEquals(snapshot.length, 1);
+      assertEquals(snapshot[0].path, futurePath);
+    } finally {
+      await Deno.remove(fileDir, { recursive: true });
+    }
+  });
+});
+
+Deno.test("two agents racing on the same non-existent path still collide", async () => {
+  // Pin the regression risk: even with realPath unable to canonicalize a
+  // not-yet-existing file, two acquires for the *same verbatim string* must
+  // still see each other. This is the create-then-create race that the
+  // fail-open fallback must not silently bypass.
+  await withTempJournal(async (journalPath) => {
+    const fileDir = await Deno.makeTempDir();
+    try {
+      const futurePath = join(fileDir, "future.ts");
+      const registry = new LockRegistry(journalPath);
+      const first = await registry.acquire({
+        path: futurePath,
+        sessionId: "S1",
+        agentId: "A",
+      });
+      assertEquals(first.ok, true);
+
+      const second = await registry.acquire({
+        path: futurePath,
+        sessionId: "S2",
+        agentId: "B",
+      });
+      assertEquals(second.ok, false);
+      if (!second.ok) {
+        assertEquals(second.holder, { sessionId: "S1", agentId: "A" });
+      }
+      assertEquals(registry.snapshot().length, 1);
+    } finally {
+      await Deno.remove(fileDir, { recursive: true });
+    }
+  });
+});
+
 Deno.test("acquire refuses new entries past the 10k cap (OOM defense)", async () => {
   await withTempJournal(async (journalPath) => {
     const registry = new LockRegistry(journalPath);

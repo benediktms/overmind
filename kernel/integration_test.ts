@@ -710,6 +710,60 @@ Deno.test("integration: HTTP /lock returns 409 with holder on cross-session cont
   }
 });
 
+Deno.test("integration: kernel /lock normalizes symlinked paths so cross-agent races are caught", async () => {
+  // End-to-end: drone A acquires under the symlink path, drone B acquires
+  // under the canonical target path. Without kernel-side path normalization
+  // the registry stored two distinct keys for the same file and B was
+  // wrongly told "ok" — a silent multi-agent overwrite vector.
+  const harness = await createHarness();
+  const previousHarnessFlag = Deno.env.get("OVERMIND_EDIT_HARNESS");
+  Deno.env.set("OVERMIND_EDIT_HARNESS", "1");
+
+  const fileDir = await Deno.makeTempDir();
+  try {
+    const baseUrl = `http://127.0.0.1:${harness.daemon.getHttpPort()}`;
+    const realFilePath = `${fileDir}/contested.ts`;
+    const linkPath = `${fileDir}/contested-link.ts`;
+    await Deno.writeTextFile(realFilePath, "");
+    await Deno.symlink(realFilePath, linkPath);
+
+    const first = await tryAcquire({
+      url: baseUrl,
+      path: linkPath,
+      sessionId: "session-A",
+      agentId: "drone-A",
+      mode: "swarm",
+    });
+    assertEquals(first.status, "ok");
+
+    const second = await tryAcquire({
+      url: baseUrl,
+      path: realFilePath,
+      sessionId: "session-B",
+      agentId: "drone-B",
+      mode: "swarm",
+    });
+    assertEquals(second.status, "conflict");
+    if (second.status === "conflict") {
+      assertEquals(second.holder.sessionId, "session-A");
+      assertEquals(second.holder.agentId, "drone-A");
+    }
+
+    const registry = harness.daemon.getLockRegistry();
+    assert(registry, "expected lock registry");
+    // Exactly one canonical entry — not two divergent representations.
+    assertEquals(registry.snapshot().length, 1);
+  } finally {
+    await Deno.remove(fileDir, { recursive: true });
+    if (previousHarnessFlag === undefined) {
+      Deno.env.delete("OVERMIND_EDIT_HARNESS");
+    } else {
+      Deno.env.set("OVERMIND_EDIT_HARNESS", previousHarnessFlag);
+    }
+    await shutdownHarness(harness);
+  }
+});
+
 Deno.test("integration: swarm two-agent race via lock_client", async () => {
   // M4 end-to-end: drives the hook-side `tryAcquire` against a real kernel
   // HTTP listener. Proves the full plumbing — wire-format, conflict body
