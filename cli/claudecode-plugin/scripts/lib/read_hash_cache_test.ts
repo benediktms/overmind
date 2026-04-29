@@ -199,29 +199,86 @@ Deno.test("isTransientPath leaves source files alone", () => {
   assertEquals(isTransientPath("/Users/u/code/repo/file.ts"), false);
 });
 
-Deno.test("resolvePathSafely: absolute path with cwd given is a no-op (cwd ignored)", async () => {
+Deno.test("resolvePathSafely: absolute path within cwd resolves to realPath", async () => {
   const tmp = await Deno.makeTempDir();
   try {
-    const file = `${tmp}/file.ts`;
+    // Use the canonical form of tmp as cwd so the containment check works on
+    // macOS where /var/folders -> /private/var/folders via symlink.
+    const realTmp = await Deno.realPath(tmp);
+    const file = `${realTmp}/file.ts`;
     await Deno.writeTextFile(file, "x");
     const real = await Deno.realPath(file);
-    // Pass an unrelated cwd; result must still match `realPath(file)`,
-    // not `realPath(join(cwd, file))`.
-    const resolved = await resolvePathSafely(file, "/some/other/dir");
+    // cwd matches the file's location: containment passes, realPath is returned.
+    const resolved = await resolvePathSafely(file, realTmp);
     assertEquals(resolved, real);
   } finally {
     await Deno.remove(tmp, { recursive: true });
   }
 });
 
+Deno.test("resolvePathSafely: absolute path escaping cwd returns unresolved path", async () => {
+  const tmp = await Deno.makeTempDir();
+  try {
+    const file = `${tmp}/file.ts`;
+    await Deno.writeTextFile(file, "x");
+    // Pass an unrelated cwd that doesn't contain the file.
+    // The resolved realPath will escape cwd, so the function returns the
+    // unresolved absolute path (the symlink itself, not its target).
+    const resolved = await resolvePathSafely(file, "/some/other/dir");
+    // Must equal the input (already absolute), not the realPath.
+    assertEquals(resolved, file);
+  } finally {
+    await Deno.remove(tmp, { recursive: true });
+  }
+});
+
+// Symlink containment: a symlink inside cwd that points to a target outside
+// cwd must NOT have its target returned. The unresolved symlink path (inside
+// cwd) is returned instead, so the cache key stays within the project.
+Deno.test("resolvePathSafely: symlink escaping cwd returns unresolved symlink path", async () => {
+  // Two separate temp dirs: one is our "project cwd", the other is "outside".
+  const cwdDir = await Deno.makeTempDir();
+  const outsideDir = await Deno.makeTempDir();
+  try {
+    // Canonicalize both dirs to handle macOS /var -> /private/var symlink.
+    const realCwd = await Deno.realPath(cwdDir);
+    const realOutside = await Deno.realPath(outsideDir);
+
+    // Create the escape target outside cwd.
+    const target = `${realOutside}/secret.ts`;
+    await Deno.writeTextFile(target, "secret content");
+
+    // Create a symlink inside cwd pointing to the outside target.
+    const symlink = `${realCwd}/link.ts`;
+    await Deno.symlink(target, symlink);
+
+    // resolvePathSafely must detect the escape and return the symlink path,
+    // NOT the resolved target outside cwd.
+    const result = await resolvePathSafely(symlink, realCwd);
+    assertEquals(
+      result,
+      symlink,
+      `Expected unresolved symlink path ${symlink}, got ${result}`,
+    );
+    // Sanity: the symlink really does resolve outside cwd.
+    const realTarget = await Deno.realPath(symlink);
+    assertEquals(realTarget.startsWith(realCwd), false);
+  } finally {
+    await Deno.remove(cwdDir, { recursive: true });
+    await Deno.remove(outsideDir, { recursive: true });
+  }
+});
+
 Deno.test("resolvePathSafely: relative path resolves against cwd", async () => {
   const tmp = await Deno.makeTempDir();
   try {
-    const file = `${tmp}/data.txt`;
+    // Use canonical cwd so containment check matches the realPath output.
+    const realTmp = await Deno.realPath(tmp);
+    const file = `${realTmp}/data.txt`;
     await Deno.writeTextFile(file, "x");
     const real = await Deno.realPath(file);
     // Relative path "data.txt" + cwd should land on the same realPath.
-    const resolved = await resolvePathSafely("data.txt", tmp);
+    const resolved = await resolvePathSafely("data.txt", realTmp);
     assertEquals(resolved, real);
   } finally {
     await Deno.remove(tmp, { recursive: true });

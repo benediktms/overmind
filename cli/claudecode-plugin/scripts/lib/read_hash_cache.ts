@@ -225,6 +225,20 @@ export function enforceMaxBytes(
 // happens to match today but isn't a contract. Falls back to the input
 // path on any error (missing file, permission denied) so the staleness
 // check stays fail-open.
+//
+// Symlink containment: when `cwd` is provided we enforce that the resolved
+// path stays within the cwd subtree. If `Deno.realPath` follows a symlink
+// that escapes cwd (e.g. a link pointing to /etc/passwd or any path outside
+// the project), we return the pre-resolution absolute path instead.
+//
+// Design decision — return unresolved rather than null:
+//   Returning null would cause the harness to treat the path as "no entry
+//   exists" (fail-open), which silently skips the staleness check for
+//   symlink targets. Returning the unresolved absolute path means the cache
+//   key is the symlink itself, not its target; the staleness check still fires
+//   for the symlink inode. This is marginally less accurate (two symlinks
+//   pointing to the same file get separate entries) but safe: it preserves
+//   the fail-open invariant without silently bypassing the check.
 export async function resolvePathSafely(
   path: string,
   cwd?: string,
@@ -232,7 +246,16 @@ export async function resolvePathSafely(
   if (!path) return path;
   const absolute = isAbsolute(path) || !cwd ? path : resolve(cwd, path);
   try {
-    return await Deno.realPath(absolute);
+    const real = await Deno.realPath(absolute);
+    // Containment check: if a cwd was given and the resolved path escapes it,
+    // fall back to the unresolved absolute path so the cache key stays within
+    // the project. A trailing separator is added to cwd to avoid false matches
+    // where cwd is a strict prefix of an unrelated sibling directory
+    // (e.g. cwd=/foo matching /foobar/...).
+    if (cwd && !real.startsWith(cwd + "/") && real !== cwd) {
+      return absolute;
+    }
+    return real;
   } catch {
     return absolute;
   }
