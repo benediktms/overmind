@@ -8,6 +8,7 @@ import type {
 } from "./types.ts";
 import { fromFileUrl } from "@std/path";
 import { Kernel } from "./kernel.ts";
+import { ClaudeCodeDispatcher } from "./dispatchers/claude_code.ts";
 import { LockRegistry } from "./locks.ts";
 import { OvermindHttpServer } from "./http.ts";
 
@@ -831,7 +832,14 @@ export async function runDaemon(): Promise<never> {
   // Without this the daemon only serves the Unix socket path; the MCP server
   // cannot reach the kernel because nothing is listening on localhost:8080
   // for /lock, /event, etc.
-  const kernel = new Kernel();
+  const dispatcher = new ClaudeCodeDispatcher();
+  const available = await dispatcher.probeAvailability();
+  if (!available) {
+    console.warn(
+      "[overmind] claude binary not found on PATH; falling back to NoopDispatcher (swarm/relay/scout will not actually spawn agents).",
+    );
+  }
+  const kernel = new Kernel({ dispatcher: available ? dispatcher : undefined });
   await kernel.start();
   const daemon = new OvermindDaemon({
     baseDir: Deno.env.get("OVERMIND_DAEMON_BASE_DIR") ?? undefined,

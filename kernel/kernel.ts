@@ -110,7 +110,20 @@ export class Kernel {
     // SessionEnd hook → hook POSTs /release-session-locks to the kernel. The
     // release is therefore eventual, bounded by CC's hook latency, with the
     // LockRegistry's own size cap as a safety backstop.
-    return this.cancellationRegistry.cancel(runId);
+    const cancelled = this.cancellationRegistry.cancel(runId);
+    // Dispatcher cleanup (e.g. SIGTERM in-flight subprocesses) is best-effort
+    // and intentionally fired regardless of whether a run was registered —
+    // a dispatcher may have spawned children for a run that has since
+    // unregistered itself.
+    const dispatcher = this.dispatcher ??
+      this.adapterRegistry?.getDispatcher() ??
+      null;
+    try {
+      dispatcher?.cancelRun?.(runId);
+    } catch {
+      // cancelRun is contractually best-effort; swallow.
+    }
+    return cancelled;
   }
 
   async executeMode(
