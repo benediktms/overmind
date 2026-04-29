@@ -457,7 +457,11 @@ Deno.test("load() compacts the journal — size is bounded after N acquire/relea
     const before = (await Deno.readTextFile(journalPath))
       .split("\n")
       .filter((l) => l.trim().length > 0).length;
-    assert(before > N, `expected >N lines before compaction, got ${before}`);
+    assertEquals(
+      before,
+      2 * N + 1,
+      "expected 2N+1 lines from N acquire-release pairs plus 1 final acquire",
+    );
 
     // load() triggers compaction.
     const reader = new LockRegistry(journalPath);
