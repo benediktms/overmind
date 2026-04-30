@@ -869,6 +869,64 @@ Deno.test("selectDispatcher: omitting both args defaults to subprocess (matches 
   );
 });
 
+// ── daemon lifetime advisory lock ─────────────────────────────────────────
+
+Deno.test(
+  "OvermindDaemon advisory lock prevents a second daemon while the first is running",
+  async () => {
+    const tempDir = await Deno.makeTempDir();
+    const { baseDir } = createTestPaths(tempDir);
+    const first = new OvermindDaemon({ baseDir, enableHttp: false });
+    await first.start();
+    try {
+      const second = new OvermindDaemon({ baseDir, enableHttp: false });
+      let secondError: unknown;
+      try {
+        await second.start();
+        await second.shutdown();
+      } catch (err) {
+        secondError = err;
+      }
+      assert(
+        secondError !== undefined,
+        "second daemon's start() should reject while first holds the lock",
+      );
+      assertStringIncludes(
+        String(
+          secondError instanceof Error ? secondError.message : secondError,
+        ),
+        "Daemon already running",
+      );
+    } finally {
+      await first.shutdown();
+      await Deno.remove(tempDir, { recursive: true });
+    }
+  },
+);
+
+Deno.test(
+  "OvermindDaemon advisory lock auto-releases after first daemon shuts down",
+  async () => {
+    const tempDir = await Deno.makeTempDir();
+    const { baseDir } = createTestPaths(tempDir);
+    const first = new OvermindDaemon({ baseDir, enableHttp: false });
+    await first.start();
+    await first.shutdown();
+
+    // After clean shutdown, the second daemon must be able to start
+    // without any manual lockfile cleanup. This is the core property
+    // that the OS-advisory lock provides over the old create-O_EXCL
+    // pattern: a crashed/closed first daemon never blocks the next one.
+    const second = new OvermindDaemon({ baseDir, enableHttp: false });
+    try {
+      await second.start();
+    } finally {
+      await second.shutdown();
+      await Deno.remove(tempDir, { recursive: true });
+    }
+  },
+);
+
 // ── selectDaemonSpawnArgs ─────────────────────────────────────────────────
 
 Deno.test(

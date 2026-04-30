@@ -716,8 +716,96 @@ function parseMode(raw: string): Mode | null {
   }
 }
 
+/**
+ * Probe a process for liveness without sending a real signal. Mirrors
+ * `processExists` from kernel/daemon.ts but kept local to avoid pulling
+ * the daemon module's dependency graph into the MCP bridge. POSIX
+ * convention: signal 0 is a no-op probe — returns success if the target
+ * exists and is reachable, throws NotFound otherwise. Deno passes the
+ * signal value through to the syscall so this works the same here.
+ */
+function isProcessAlive(pid: number): boolean {
+  try {
+    // deno-lint-ignore no-explicit-any
+    Deno.kill(pid, 0 as any);
+    return true;
+  } catch (err) {
+    if (err instanceof Deno.errors.PermissionDenied) {
+      // Process exists, we just can't signal it. Still alive.
+      return true;
+    }
+    return false;
+  }
+}
+
+/**
+ * Pure factory for the parent-death watchdog. Exported for testability:
+ * the actual setInterval wiring has side effects (Deno.unrefTimer, real
+ * polling), but the decision logic — "when should I exit?" — is a thin
+ * loop over an injectable `probe`.
+ *
+ * The MCP bridge is launched by Claude Code as a stdio child process.
+ * When the launching window closes, the parent dies but the child is
+ * re-parented to init and lingers — orphan bridges accumulate across
+ * sessions. Periodically probing the original parent pid catches that
+ * case and exits cleanly so the next session starts from a clean slate.
+ *
+ * Set `OVERMIND_DISABLE_PARENT_WATCHDOG=1` to suppress (used by tests
+ * and by callers that explicitly want orphan-survival semantics).
+ */
+export interface ParentWatchdogOptions {
+  parentPid: number;
+  probe: (pid: number) => boolean;
+  onParentDeath: () => void;
+  /** PID at which we declare "already orphaned" without polling. Defaults to 1 (init). */
+  orphanedPid?: number;
+}
+
+export function startParentDeathWatchdog(
+  options: ParentWatchdogOptions,
+): { tick: () => void; isOrphaned: boolean } {
+  const { parentPid, probe, onParentDeath, orphanedPid = 1 } = options;
+  // Already orphaned — re-parented to init before we even started.
+  if (parentPid <= 0 || parentPid === orphanedPid) {
+    onParentDeath();
+    return { tick: () => {}, isOrphaned: true };
+  }
+  const tick = () => {
+    if (!probe(parentPid)) onParentDeath();
+  };
+  return { tick, isOrphaned: false };
+}
+
+/**
+ * Wire the parent-death watchdog into a real Deno timer. Called once
+ * from `runMcp()`. Uses `Deno.unrefTimer` so the interval doesn't keep
+ * the event loop alive on its own — the bridge exits naturally when
+ * stdin closes; the watchdog is a backstop for the case where stdin
+ * EOF doesn't arrive (Claude Code window closed without proper teardown).
+ */
+function installParentDeathWatchdog(intervalMs = 5_000): void {
+  if (Deno.env.get("OVERMIND_DISABLE_PARENT_WATCHDOG") === "1") return;
+  const parentPid = Deno.ppid;
+  const { tick, isOrphaned } = startParentDeathWatchdog({
+    parentPid,
+    probe: isProcessAlive,
+    onParentDeath: () => {
+      console.error(
+        `[overmind-mcp] parent pid ${parentPid} no longer reachable; exiting cleanly.`,
+      );
+      Deno.exit(0);
+    },
+  });
+  if (isOrphaned) return;
+  const handle = setInterval(tick, intervalMs);
+  // Don't let the watchdog by itself keep the event loop alive — the
+  // stdin-read loop is the bridge's lifetime authority.
+  Deno.unrefTimer(handle);
+}
+
 export async function runMcp(): Promise<void> {
   console.error("[overmind-mcp] Starting stdio MCP server...");
+  installParentDeathWatchdog();
   const server = new MCPServer(loadConfig());
   await server.run();
 }

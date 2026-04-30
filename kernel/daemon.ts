@@ -70,12 +70,20 @@ function readSocketRequestTimeoutMs(): number {
 }
 const SOCKET_REQUEST_TIMEOUT_MS = readSocketRequestTimeoutMs();
 const managedDaemonChildren = new Map<string, Deno.ChildProcess>();
+// In-process spawn coordination: when N concurrent callers in the same
+// Deno process all hit `ensureDaemonRunning` for the same baseDir, only
+// one of them spawns and waits — the others await the same Promise.
+// Without this, each caller would spawn its own daemon subprocess; only
+// one wins the OS-level advisory lock (held for the daemon's lifetime),
+// but the losers leak briefly until they fail and exit. Out-of-process
+// concurrency (two Deno processes racing) still produces multiple spawns
+// but is rare and self-corrects via the lifetime lock.
+const inflightSpawns = new Map<string, Promise<void>>();
 
 export async function ensureDaemonRunning(baseDir?: string): Promise<void> {
   const resolvedBaseDir = resolveBaseDir(baseDir);
   const socketPath = `${resolvedBaseDir}/${SOCKET_FILE_NAME}`;
   const pidPath = `${resolvedBaseDir}/${PID_FILE_NAME}`;
-  const lockPath = `${resolvedBaseDir}/${LOCK_FILE_NAME}`;
 
   await Deno.mkdir(resolvedBaseDir, { recursive: true });
 
@@ -83,45 +91,31 @@ export async function ensureDaemonRunning(baseDir?: string): Promise<void> {
     return;
   }
 
-  let lockHandle: Deno.FsFile | null = null;
-  for (let attempt = 1; attempt <= STARTUP_RETRY_ATTEMPTS; attempt += 1) {
-    if (await isDaemonAvailable(pidPath, socketPath)) {
-      return;
-    }
-
-    try {
-      lockHandle = await Deno.open(lockPath, { write: true, createNew: true });
-      break;
-    } catch (err) {
-      if (!(err instanceof Deno.errors.AlreadyExists)) {
-        throw err;
+  // In-process dedupe: if another caller in this process is already
+  // spawning a daemon for this baseDir, wait on their promise instead
+  // of spawning a redundant subprocess. Out-of-process concurrency is
+  // handled by the daemon-lifetime advisory lock (acquired in
+  // OvermindDaemon.start) — losers exit fast. The lockfile itself
+  // persists on disk; the OS releases the LOCK on process death, so
+  // crashed daemons never block the next startup the way the old
+  // create-with-O_EXCL pattern did.
+  let spawnPromise = inflightSpawns.get(resolvedBaseDir);
+  if (!spawnPromise) {
+    spawnPromise = (async () => {
+      try {
+        startDaemonProcess(resolvedBaseDir);
+        await waitForSocketReady(
+          socketPath,
+          READINESS_RETRY_ATTEMPTS,
+          READINESS_RETRY_INTERVAL_MS,
+        );
+      } finally {
+        inflightSpawns.delete(resolvedBaseDir);
       }
-      await sleep(STARTUP_RETRY_INTERVAL_MS);
-    }
+    })();
+    inflightSpawns.set(resolvedBaseDir, spawnPromise);
   }
-
-  if (!lockHandle) {
-    if (await isDaemonAvailable(pidPath, socketPath)) {
-      return;
-    }
-    throw new OvermindError("Timed out waiting for daemon startup lock");
-  }
-
-  try {
-    if (await isDaemonAvailable(pidPath, socketPath)) {
-      return;
-    }
-
-    startDaemonProcess(resolvedBaseDir);
-    await waitForSocketReady(
-      socketPath,
-      READINESS_RETRY_ATTEMPTS,
-      READINESS_RETRY_INTERVAL_MS,
-    );
-  } finally {
-    lockHandle.close();
-    await removeIfExists(lockPath);
-  }
+  await spawnPromise;
 }
 
 export async function sendToSocket(
@@ -214,6 +208,15 @@ export class OvermindDaemon {
   private signalHandlersRegistered = false;
   private lockRegistry: LockRegistry | null = null;
   private httpServer: OvermindHttpServer | null = null;
+  // Held-for-lifetime advisory file lock. Acquired in start(), released
+  // implicitly by the OS when the process dies (clean exit, SIGKILL,
+  // panic) or explicitly by close() in shutdown(). Replaces the older
+  // create-with-O_EXCL pattern that left stale lockfiles when daemons
+  // crashed and blocked the next startup until manually cleaned.
+  private daemonLockHandle: Deno.FsFile | null = null;
+  private get daemonLockPath(): string {
+    return `${this.baseDir}/${LOCK_FILE_NAME}`;
+  }
 
   private readonly sigintHandler = () => {
     void this.shutdown().finally(() => Deno.exit(0));
@@ -244,6 +247,15 @@ export class OvermindDaemon {
 
     await Deno.mkdir(this.baseDir, { recursive: true });
 
+    // Acquire the daemon-lifetime advisory file lock BEFORE doing any
+    // filesystem mutation that another live daemon would conflict on.
+    // If a peer daemon already holds the lock, this throws fast — no
+    // pidfile/socket are touched, the loser exits cleanly. The OS auto-
+    // releases the lock when whichever process holds it dies, so a
+    // crashed daemon never leaves the lock blocked (the lockfile itself
+    // can persist on disk; that's fine — re-opening it just re-locks).
+    await this.acquireDaemonLifetimeLock();
+
     await this.cleanupStalePidFile();
     await this.cleanupStaleSocketFile();
 
@@ -256,6 +268,66 @@ export class OvermindDaemon {
 
     if (this.enableHttp) {
       await this.startHttp();
+    }
+  }
+
+  /**
+   * Acquire an advisory exclusive lock on `daemon.lock`, held for this
+   * daemon's lifetime. Throws an OvermindError when another process
+   * already holds the lock — that's the "Daemon already running" signal.
+   *
+   * Implementation note: Deno's `FsFile.lock(true)` blocks until the
+   * lock is acquired. We don't want to block a CLI invocation forever,
+   * so we race against a short timeout. If the timeout wins, treat as
+   * "lock held by another live daemon". The pending lock acquisition is
+   * abandoned via closing the file handle, which cancels the underlying
+   * fcntl call.
+   */
+  private async acquireDaemonLifetimeLock(): Promise<void> {
+    const file = await Deno.open(this.daemonLockPath, {
+      read: true,
+      write: true,
+      create: true,
+    });
+    const LOCK_ACQUIRE_TIMEOUT_MS = 250;
+    let timeoutId: number | null = null;
+    let acquired = false;
+    try {
+      const lockPromise = file.lock(true).then(() => {
+        acquired = true;
+      });
+      const timeoutPromise = new Promise<void>((_, reject) => {
+        timeoutId = setTimeout(
+          () =>
+            reject(
+              new OvermindError(
+                `Daemon already running (advisory lock on ${this.daemonLockPath} held by another process)`,
+              ),
+            ),
+          LOCK_ACQUIRE_TIMEOUT_MS,
+        );
+      });
+      try {
+        await Promise.race([lockPromise, timeoutPromise]);
+      } finally {
+        // Clear the pending timeout regardless of which side won — left
+        // hanging, it leaks (Deno's test sanitizer flags it; production
+        // would just keep the event loop alive briefly).
+        if (timeoutId !== null) clearTimeout(timeoutId);
+      }
+      this.daemonLockHandle = file;
+    } catch (err) {
+      // Lock not acquired (or acquired-after-timeout). Either way close
+      // the FD — closing releases the lock if we did manage to grab it
+      // post-timeout, and frees the descriptor if we didn't.
+      try {
+        file.close();
+      } catch {
+        // already closed
+      }
+      // Mark intent so future readers can see we tried and abandoned.
+      void acquired;
+      throw err;
     }
   }
 
@@ -290,6 +362,19 @@ export class OvermindDaemon {
 
     await removeIfExists(this.pidPath);
     await removeIfExists(this.socketPath);
+
+    // Release the lifetime advisory lock by closing its FD. The OS would
+    // also release on process exit, but explicit close keeps the lock
+    // released even if this Daemon instance is restarted in-process
+    // (e.g. tests that start/stop multiple times in one Deno run).
+    if (this.daemonLockHandle) {
+      try {
+        this.daemonLockHandle.close();
+      } catch {
+        // already closed
+      }
+      this.daemonLockHandle = null;
+    }
   }
 
   getLockRegistry(): LockRegistry | null {

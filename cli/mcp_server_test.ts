@@ -1,10 +1,11 @@
-import { assertEquals } from "@std/assert";
+import { assert, assertEquals } from "@std/assert";
 
 import {
   type DelegateSink,
   MCPServer,
   type MCPWriter,
   normalizeNeuralLinkBase,
+  startParentDeathWatchdog,
 } from "./mcp_server.ts";
 import type { SocketRequest, SocketResponse } from "../kernel/types.ts";
 
@@ -846,3 +847,75 @@ Deno.test("overmind_pending_dispatches idempotent-empty: socket returns empty di
   assertEquals(Array.isArray(payload.dispatches), true);
   assertEquals(payload.dispatches.length, 0);
 });
+
+// ── parent-death watchdog ─────────────────────────────────────────────────
+
+Deno.test(
+  "startParentDeathWatchdog: tick triggers onParentDeath when probe reports parent gone",
+  () => {
+    let exited = false;
+    const watchdog = startParentDeathWatchdog({
+      parentPid: 12345,
+      probe: () => false, // parent is gone
+      onParentDeath: () => {
+        exited = true;
+      },
+    });
+    assertEquals(watchdog.isOrphaned, false);
+    watchdog.tick();
+    assert(exited, "onParentDeath must fire when probe returns false");
+  },
+);
+
+Deno.test(
+  "startParentDeathWatchdog: tick is a no-op while parent is alive",
+  () => {
+    let exited = false;
+    const watchdog = startParentDeathWatchdog({
+      parentPid: 12345,
+      probe: () => true, // parent is alive
+      onParentDeath: () => {
+        exited = true;
+      },
+    });
+    watchdog.tick();
+    watchdog.tick();
+    watchdog.tick();
+    assertEquals(exited, false);
+  },
+);
+
+Deno.test(
+  "startParentDeathWatchdog: parentPid <= 0 triggers immediate orphan exit",
+  () => {
+    let exited = false;
+    const watchdog = startParentDeathWatchdog({
+      parentPid: 0,
+      probe: () => true,
+      onParentDeath: () => {
+        exited = true;
+      },
+    });
+    assert(watchdog.isOrphaned);
+    assert(exited, "onParentDeath must fire on parentPid<=0");
+  },
+);
+
+Deno.test(
+  "startParentDeathWatchdog: parentPid === 1 (init) is treated as orphaned",
+  () => {
+    // When the launching process dies, the kernel re-parents the child
+    // to PID 1 (init/launchd). Detecting this lets us bail without
+    // waiting for the first interval tick.
+    let exited = false;
+    const watchdog = startParentDeathWatchdog({
+      parentPid: 1,
+      probe: () => true,
+      onParentDeath: () => {
+        exited = true;
+      },
+    });
+    assert(watchdog.isOrphaned);
+    assert(exited);
+  },
+);
