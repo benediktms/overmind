@@ -12,12 +12,45 @@ import {
   isDaemonReachable,
   OvermindDaemon,
   selectDispatcher,
+  selectDispatchers,
   sendToSocket,
   stopDaemon,
 } from "./daemon.ts";
 import { ClientSideDispatcher } from "./dispatchers/client_side.ts";
 import { ClaudeCodeDispatcher } from "./dispatchers/claude_code.ts";
 import { Mode } from "./types.ts";
+import { Kernel } from "./kernel.ts";
+import { AdapterRegistry } from "./adapters.ts";
+import type { AgentDispatcher } from "./agent_dispatcher.ts";
+import { type BrainAdapter } from "../adapters/brain/adapter.ts";
+import { type NeuralLinkAdapter } from "../adapters/neural_link/adapter.ts";
+import { MockBrainAdapter } from "./test_helpers/mock_brain.ts";
+import { MockNeuralLinkAdapter } from "./test_helpers/mock_neural_link.ts";
+
+/**
+ * Build a Kernel with mocked brain + neural_link adapters (no real child
+ * processes spawned). Tests that need a started kernel use this to avoid
+ * Deno's leak detector flagging the spawned MCP subprocesses.
+ */
+async function buildTestKernel(
+  options: {
+    dispatchers?: Partial<Record<"subprocess" | "client_side", AgentDispatcher>>;
+    defaultDispatcherMode?: "subprocess" | "client_side";
+  } = {},
+): Promise<Kernel> {
+  const seed = new Kernel();
+  const registry = new AdapterRegistry(seed, {
+    brain: new MockBrainAdapter() as unknown as BrainAdapter,
+    neuralLink: new MockNeuralLinkAdapter() as unknown as NeuralLinkAdapter,
+  });
+  const kernel = new Kernel({
+    registry,
+    dispatchers: options.dispatchers,
+    defaultDispatcherMode: options.defaultDispatcherMode,
+  });
+  await kernel.start();
+  return kernel;
+}
 
 function createTestPaths(
   tempDir: string,
@@ -83,37 +116,66 @@ Deno.test("OvermindDaemon creates PID and socket files on start", async () => {
   }
 });
 
-Deno.test("OvermindDaemon accepts valid mode_request payloads", async () => {
-  const tempDir = await Deno.makeTempDir();
-  const { baseDir, socketPath } = createTestPaths(tempDir);
-  const daemon = new OvermindDaemon({ baseDir });
+Deno.test({
+  name: "OvermindDaemon accepts valid mode_request payloads",
+  // Wire-protocol test: verifies the daemon's accept path. The daemon
+  // hands the request to executeMode in fire-and-forget mode; persistence
+  // writes complete on microtasks after the socket response. Disable leak
+  // sanitization for this specific test — the in-flight async I/O is the
+  // contract, not a bug. Kernel-level lifecycle is tested separately.
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    const tempDir = await Deno.makeTempDir();
+    const { baseDir, socketPath } = createTestPaths(tempDir);
+    // The daemon now requires a wired kernel to accept mode_requests —
+    // the kernel-presence guard rejects requests on a kernel-less
+    // daemon (silent-acceptance regression check, oculus team review).
+    const kernel = await buildTestKernel();
+    const daemon = new OvermindDaemon({ baseDir, kernel, enableHttp: false });
 
-  try {
-    await daemon.start();
+    try {
+      await daemon.start();
 
-    const responseText = await sendRawSocketRequest(
-      socketPath,
-      JSON.stringify({
-        type: "mode_request",
-        run_id: "run-test-1",
-        mode: "scout",
-        objective: "test objective",
-        workspace: tempDir,
-      }),
-    );
-    const response = JSON.parse(responseText) as {
-      status: string;
-      run_id: string;
-      error: string | null;
-    };
+      const responseText = await sendRawSocketRequest(
+        socketPath,
+        JSON.stringify({
+          type: "mode_request",
+          run_id: "run-test-1",
+          mode: "scout",
+          objective: "test objective",
+          workspace: tempDir,
+        }),
+      );
+      const response = JSON.parse(responseText) as {
+        status: string;
+        run_id: string;
+        error: string | null;
+      };
 
-    assertEquals(response.status, "accepted");
-    assertEquals(response.run_id, "run-test-1");
-    assertEquals(response.error, null);
-  } finally {
-    await daemon.shutdown();
-    await Deno.remove(tempDir, { recursive: true });
-  }
+      assertEquals(response.status, "accepted");
+      assertEquals(response.run_id, "run-test-1");
+      assertEquals(response.error, null);
+
+      // Cancel the in-flight run so executeScout unwinds before cleanup.
+      // Best-effort — even with cancel, persistence may still flush
+      // writes after we return; that's why sanitizeOps is off.
+      await sendRawSocketRequest(
+        socketPath,
+        JSON.stringify({ type: "cancel_request", run_id: "run-test-1" }),
+      );
+    } finally {
+      await daemon.shutdown();
+      await kernel.shutdown();
+      try {
+        await Deno.remove(tempDir, { recursive: true });
+      } catch {
+        // Late persistence writes may have repopulated the dir between
+        // shutdown and remove. Best-effort cleanup; OS-level temp dir
+        // janitor handles the leftovers.
+      }
+    }
+  },
 });
 
 Deno.test("OvermindDaemon returns error for malformed JSON", async () => {
@@ -805,3 +867,178 @@ Deno.test("selectDispatcher: omitting both args defaults to subprocess (matches 
     "expected one of the three dispatcher branches",
   );
 });
+
+// ── selectDispatchers (registry) ──────────────────────────────────────────
+
+Deno.test(
+  "selectDispatchers always exposes client_side (no preconditions)",
+  async () => {
+    const { dispatchers, defaultMode } = await selectDispatchers();
+    assert(
+      dispatchers.client_side instanceof ClientSideDispatcher,
+      "client_side dispatcher must always be present",
+    );
+    assert(
+      defaultMode === "subprocess" || defaultMode === "client_side",
+      "defaultMode must be one of the two known modes",
+    );
+    // subprocess presence depends on `claude` binary in the test env;
+    // either branch is valid as long as the type matches when present.
+    if (dispatchers.subprocess) {
+      assert(dispatchers.subprocess instanceof ClaudeCodeDispatcher);
+    }
+  },
+);
+
+Deno.test(
+  "selectDispatchers prefers subprocess as default when available",
+  async () => {
+    const { dispatchers, defaultMode } = await selectDispatchers();
+    if (dispatchers.subprocess) {
+      assertEquals(
+        defaultMode,
+        "subprocess",
+        "defaultMode must be subprocess when subprocess dispatcher is available",
+      );
+    } else {
+      assertEquals(
+        defaultMode,
+        "client_side",
+        "defaultMode falls back to client_side only when subprocess is unavailable",
+      );
+    }
+  },
+);
+
+// ── dispatcher_mode loud-fail at request handle time ──────────────────────
+
+Deno.test(
+  "OvermindDaemon rejects mode_request with unknown dispatcher_mode value (loud parse fail)",
+  async () => {
+    const tempDir = await Deno.makeTempDir();
+    const { baseDir, socketPath } = createTestPaths(tempDir);
+    await Deno.mkdir(baseDir, { recursive: true });
+    const daemon = new OvermindDaemon({ baseDir, enableHttp: false });
+    await daemon.start();
+    try {
+      const requestBody = JSON.stringify({
+        type: "mode_request",
+        run_id: "run-bad-dispatcher-mode",
+        mode: Mode.Scout,
+        objective: "anything",
+        workspace: tempDir,
+        dispatcher_mode: "totally-bogus",
+      });
+      const responseText = await sendRawSocketRequest(socketPath, requestBody);
+      const response = JSON.parse(responseText) as {
+        status: string;
+        run_id: string;
+        error: string | null;
+      };
+      assertEquals(response.status, "error");
+      assertStringIncludes(
+        String(response.error ?? ""),
+        "mode_request contract",
+      );
+    } finally {
+      await daemon.shutdown();
+      await Deno.remove(tempDir, { recursive: true });
+    }
+  },
+);
+
+Deno.test(
+  "OvermindDaemon rejects mode_request when caller asks for a dispatcher the kernel doesn't have (loud-fail at runtime)",
+  async () => {
+    // Covers the runtime guard in the request handler: the request passes
+    // the parse/enum check (dispatcher_mode: "client_side" is a valid
+    // enum value) but the kernel's registry only has "subprocess", so
+    // the daemon must reject synchronously with a structured error
+    // instead of silently queuing into a missing backend. This is the
+    // primary behaviour the per-request dispatcher_mode refactor
+    // exists to guarantee.
+    const tempDir = await Deno.makeTempDir();
+    const { baseDir, socketPath } = createTestPaths(tempDir);
+    await Deno.mkdir(baseDir, { recursive: true });
+
+    const subStub: AgentDispatcher = {
+      dispatch: async (_req) => ({ launched: true }),
+      isAvailable: () => true,
+    };
+    const kernel = await buildTestKernel({
+      dispatchers: { subprocess: subStub },
+      defaultDispatcherMode: "subprocess",
+    });
+
+    const daemon = new OvermindDaemon({ baseDir, kernel, enableHttp: false });
+    await daemon.start();
+
+    try {
+      const requestBody = JSON.stringify({
+        type: "mode_request",
+        run_id: "run-no-such-dispatcher",
+        mode: Mode.Scout,
+        objective: "anything",
+        workspace: tempDir,
+        dispatcher_mode: "client_side",
+      });
+      const responseText = await sendRawSocketRequest(socketPath, requestBody);
+      const response = JSON.parse(responseText) as {
+        status: string;
+        run_id: string;
+        error: string | null;
+      };
+      assertEquals(response.status, "error");
+      assertStringIncludes(
+        String(response.error ?? ""),
+        "is not available on this daemon",
+      );
+    } finally {
+      await daemon.shutdown();
+      await kernel.shutdown();
+      await Deno.remove(tempDir, { recursive: true });
+    }
+  },
+);
+
+Deno.test(
+  "OvermindDaemon rejects mode_request when no kernel is wired (script-mode silent-acceptance regression)",
+  async () => {
+    // Covers the kernel-presence guard: a daemon without a wired kernel
+    // must NOT respond status: "accepted" while skipping executeMode.
+    // Without this guard the response was a successful-looking run_id
+    // and zero work — exactly the silent-failure mode the refactor
+    // exists to eliminate (oculus team review).
+    const tempDir = await Deno.makeTempDir();
+    const { baseDir, socketPath } = createTestPaths(tempDir);
+    await Deno.mkdir(baseDir, { recursive: true });
+
+    // No kernel passed to the daemon constructor.
+    const daemon = new OvermindDaemon({ baseDir, enableHttp: false });
+    await daemon.start();
+
+    try {
+      const requestBody = JSON.stringify({
+        type: "mode_request",
+        run_id: "run-no-kernel",
+        mode: Mode.Scout,
+        objective: "anything",
+        workspace: tempDir,
+      });
+      const responseText = await sendRawSocketRequest(socketPath, requestBody);
+      const response = JSON.parse(responseText) as {
+        status: string;
+        run_id: string;
+        error: string | null;
+      };
+      assertEquals(response.status, "error");
+      assertStringIncludes(
+        String(response.error ?? ""),
+        "kernel not available",
+      );
+    } finally {
+      await daemon.shutdown();
+      await Deno.remove(tempDir, { recursive: true });
+    }
+  },
+);

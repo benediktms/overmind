@@ -111,6 +111,12 @@ const TOOLS = [
             "Priority (0=critical, 1=high, 2=medium, 3=low, 4=backlog)",
           default: 4,
         },
+        dispatcher_mode: {
+          type: "string",
+          enum: ["subprocess", "client_side"],
+          description:
+            "Caller-declared dispatcher capability. 'client_side' means the caller will drain pending dispatches via overmind_pending_dispatches and spawn each agent as a teammate (Claude Code with experimental teams). 'subprocess' lets the daemon spawn `claude --print` subprocesses (works for any caller, slower bootstrap). Omit to use the daemon's default. The relay/swarm/scout/delegate skills set this automatically based on caller type.",
+        },
       },
       required: ["objective"],
     },
@@ -473,6 +479,9 @@ export class MCPServer {
           String(args.objective ?? ""),
           (args.mode as string) ?? "scout",
           typeof args.priority === "number" ? args.priority : 4,
+          typeof args.dispatcher_mode === "string"
+            ? args.dispatcher_mode
+            : undefined,
           signal,
         );
       case "overmind_status":
@@ -495,6 +504,7 @@ export class MCPServer {
     objective: string,
     modeRaw: string,
     _priority: number,
+    dispatcherModeRaw: string | undefined,
     signal?: AbortSignal,
   ): Promise<unknown> {
     const trimmed = objective.trim();
@@ -505,6 +515,16 @@ export class MCPServer {
     if (!mode) {
       return { success: false, error: `invalid mode: ${modeRaw}` };
     }
+    let dispatcherMode: "subprocess" | "client_side" | undefined;
+    if (dispatcherModeRaw === "subprocess" || dispatcherModeRaw === "client_side") {
+      dispatcherMode = dispatcherModeRaw;
+    } else if (dispatcherModeRaw !== undefined) {
+      return {
+        success: false,
+        error:
+          `invalid dispatcher_mode: ${dispatcherModeRaw} (expected 'subprocess' or 'client_side')`,
+      };
+    }
 
     const runId = `run-${crypto.randomUUID()}`;
     const request: SocketRequest = {
@@ -513,6 +533,7 @@ export class MCPServer {
       mode,
       objective: trimmed,
       workspace: Deno.cwd(),
+      dispatcher_mode: dispatcherMode,
       config_override: { max_fix_cycles: mode === Mode.Scout ? 0 : 3 },
     };
 

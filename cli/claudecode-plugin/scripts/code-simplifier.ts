@@ -35,11 +35,18 @@ async function main(): Promise<void> {
   }
 
   const directory = data.cwd ?? data.directory ?? Deno.cwd();
+  const sessionId = data.session_id ?? data.sessionId ?? "";
 
   // Check for incomplete work that needs summarization
   const messages: string[] = [];
 
-  const activeState = await readActiveModeState(directory);
+  // Scope to this session: don't surface another session's in-flight
+  // run as if the user about to stop owns it. See readActiveModeState
+  // doc-comment for the missing-session_id backwards-compat behaviour.
+  const activeState = await readActiveModeState(
+    directory,
+    sessionId || undefined,
+  );
   if (activeState?.active && activeState.original_prompt) {
     const resumeHint = activeState.persistence.brain.available
       ? "Brain checkpointing is active for resume support."

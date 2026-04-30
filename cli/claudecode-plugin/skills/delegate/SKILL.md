@@ -18,13 +18,23 @@ small clarification, or a single command. If you can finish confidently without
 coordination overhead, do not delegate. </when_to_use>
 
 <protocol>
-Call `mcp__overmind__overmind_delegate` with the objective and mode:
+Call `mcp__overmind__overmind_delegate` with the objective, mode, and a
+`dispatcher_mode` declaring how this caller will fulfill agent dispatches:
 
 ```
-mcp__overmind__overmind_delegate(objective: string, mode?: "scout"|"relay"|"swarm", priority?: 0-4)
+mcp__overmind__overmind_delegate(
+  objective: string,
+  mode?: "scout"|"relay"|"swarm",
+  priority?: 0-4,
+  dispatcher_mode?: "subprocess"|"client_side"
+)
 ```
 
-State the outcome you want, not just the file names. Include success criteria,
+**You are running inside Claude Code, so always pass
+`dispatcher_mode: "client_side"`** — and run the Phase-1 drain-and-spawn
+protocol below. Without that, the daemon either queues dispatches that
+nobody pulls (silent timeout) or returns an actionable error. State the
+outcome you want, not just the file names. Include success criteria,
 known constraints, and priority.
 
 Mode selection:
@@ -58,14 +68,23 @@ described clearly enough to verify, gather more context with scout first.
 
 ## Phase 1 — Client-side dispatch protocol
 
-When `OVERMIND_CLIENT_DISPATCHER=1` is set, the daemon uses an in-process queue
-instead of spawning subprocesses. The calling Claude Code session is responsible
-for draining and spawning teammates.
+Claude Code sessions invoke `overmind_delegate` with
+`dispatcher_mode: "client_side"`, which tells the daemon to queue agent
+dispatches in-process. The calling session is then responsible for
+draining the queue and spawning teammates via its own `Agent` tool. This
+gives ~0s bootstrap (no subprocess fork, no MCP re-handshake) and keeps
+permissions/env scoped to the caller. The legacy
+`OVERMIND_CLIENT_DISPATCHER=1` env var still works as a per-process
+override but is no longer the recommended path — declare capability per
+request instead.
 
 ### Protocol sequence
 
 1. **Delegate the objective** — call `mcp__overmind__overmind_delegate` with
-   your objective and mode (scout/relay/swarm). It returns `{run_id, mode}`.
+   your objective, mode (scout/relay/swarm), and
+   `dispatcher_mode: "client_side"`. It returns `{run_id, mode}`. If the
+   daemon doesn't have a client_side dispatcher available, you'll get
+   `success: false` with an actionable error instead of a silent hang.
 
 2. **Drain pending dispatches** — immediately call
    `mcp__overmind__overmind_pending_dispatches({run_id})`. Returns
@@ -97,8 +116,10 @@ for draining and spawning teammates.
 5. **Exit** — once all teammates have sent handoffs and left the room, the
    kernel closes the room and returns synthesis.
 
-If `dispatches` is empty, the daemon is using subprocess mode
-(ClaudeCodeDispatcher) — no caller action needed.
+If `dispatches` is empty, the run was routed through subprocess mode
+(ClaudeCodeDispatcher) — either you passed `dispatcher_mode: "subprocess"`
+or omitted `dispatcher_mode` entirely and the daemon defaulted. No caller
+action needed in that case; the daemon spawns workers itself.
 
 ### Role → subagent_type mapping
 
@@ -134,7 +155,8 @@ Delegate a scout investigation and spawn the resulting dispatches:
 result = mcp__overmind__overmind_delegate(
   "Investigate why the database migration fails in test",
   mode="scout",
-  priority=1
+  priority=1,
+  dispatcher_mode="client_side"
 )
 // result: {run_id: "run-abc123...", mode: "scout"}
 

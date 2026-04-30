@@ -69,6 +69,33 @@ export interface ModeRequest {
   mode: Mode;
   objective: string;
   workspace: string;
+  /**
+   * Caller-declared dispatcher capability. The caller picks which dispatcher
+   * to use based on what *it* can support, not on a global daemon setting:
+   *
+   * - "client_side": caller is a Claude Code session (or equivalent
+   *   experimental-teams-capable host) that will drain pending dispatches
+   *   via `overmind_pending_dispatches` and spawn each agent as a teammate.
+   *   Faster (~0s bootstrap) but only works inside a host that drains.
+   *
+   * - "subprocess": daemon spawns `claude --print` subprocesses for each
+   *   agent. Works for any caller (CLI, CI, OpenCode, Claude Code) at the
+   *   cost of 60-90s cold-start per worker.
+   *
+   * When unset, the daemon falls back to a safe default (subprocess); a
+   * caller explicitly opting into client_side without being able to drain
+   * is the user-visible silent-failure path that this field exists to
+   * eliminate.
+   */
+  dispatcher_mode?: DispatcherMode;
+  /**
+   * Originating session id from the caller (e.g. Claude Code session_id).
+   * Persisted on the run's state file so SessionStart/Stop hooks only
+   * report state for the session that started the run, not any active
+   * run in the workspace. Optional for backwards compat: runs without it
+   * remain visible to any session.
+   */
+  session_id?: string;
   config_override?: {
     max_fix_cycles?: number;
   };
@@ -110,6 +137,21 @@ export interface RunContext {
   isVerifying: boolean;
   /** AbortSignal for cooperative cancellation. */
   signal?: AbortSignal;
+  /**
+   * Caller-declared dispatcher capability for this run. When set, the
+   * kernel routes spawn requests through the matching dispatcher and
+   * tracks the choice for cancel. When unset, the kernel uses its
+   * configured default. See ModeRequest.dispatcher_mode for details.
+   */
+  dispatcher_mode?: DispatcherMode;
+  /**
+   * Originating session id (from the caller's host, e.g. a Claude Code
+   * session_id). Used by the persistence layer so that the SessionStart and
+   * Stop hooks only restore state owned by the session that's asking, not
+   * any active run in the same workspace. Optional for backwards compat;
+   * runs without it behave as today (visible to any session).
+   */
+  session_id?: string;
 }
 
 export interface RelayStep {

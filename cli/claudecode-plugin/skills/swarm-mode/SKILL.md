@@ -22,10 +22,17 @@ exceed throughput gains, or the objective is primarily exploratory (use scout
 first). </when_to_use>
 
 <protocol>
-Invoke via `mcp__overmind__overmind_delegate` with `mode: "swarm"`:
+Invoke via `mcp__overmind__overmind_delegate` with `mode: "swarm"` and
+`dispatcher_mode: "client_side"` (you are running inside Claude Code and
+will drain the dispatch queue yourself — see Phase-1 protocol below):
 
 ```
-mcp__overmind__overmind_delegate(objective: string, mode: "swarm", priority?: 0-4)
+mcp__overmind__overmind_delegate(
+  objective: string,
+  mode: "swarm",
+  priority?: 0-4,
+  dispatcher_mode: "client_side"
+)
 ```
 
 The kernel:
@@ -36,7 +43,7 @@ The kernel:
    planner TaskGraph).
 4. Computes dependency-ordered waves; dispatches all tasks in each wave in
    parallel.
-5. Collects `handoff` messages from each agent (30 s timeout per agent).
+5. Collects `handoff` messages from each agent (180 s timeout per agent).
 6. After all waves: runs a verification pass (agent-based via `verifier`, or a
    pipeline of LSP/bash strategies).
 7. If verification passes: records a brain memory episode, closes the room,
@@ -49,6 +56,50 @@ The kernel:
 Cancellation: signal via `mcp__overmind__overmind_cancel`; the kernel closes the
 room and marks the run `cancelled`.
 </protocol>
+
+<phase_1_protocol>
+
+## Phase 1 — Client-side dispatch protocol
+
+Claude Code sessions pass `dispatcher_mode: "client_side"`, which tells the
+daemon to queue agent dispatches for in-process spawn rather than forking
+`claude --print` subprocesses. The calling session must drain the queue
+and spawn each agent as a teammate. Skip this protocol and the run
+silently times out at 180s with zero handoffs.
+
+### Protocol sequence
+
+1. **Delegate the objective** — call `mcp__overmind__overmind_delegate`
+   with `mode: "swarm"` and `dispatcher_mode: "client_side"`. Returns
+   `{run_id, mode}` on success or `{success: false, error}` if the daemon
+   has no client_side dispatcher available.
+
+2. **Drain pending dispatches** — immediately call
+   `mcp__overmind__overmind_pending_dispatches({run_id})`. Returns
+   `{run_id, dispatches}` — the queued spawn requests for the swarm's
+   first wave.
+
+3. **Spawn teammates** — for each dispatch in the wave, spawn a teammate
+   via the `Agent` tool, in parallel:
+   ```
+   Agent(
+     subagent_type: "overmind:<role>",   # e.g. "overmind:drone"
+     team_name: <run_id>,
+     name: <participant_id>,
+     prompt: <dispatch.prompt>
+   )
+   ```
+
+4. **Wait for wave handoffs** — when each teammate posts its handoff and
+   leaves the room, the kernel computes the next wave (or moves to verify
+   / fix). Re-drain via `overmind_pending_dispatches` whenever the swarm
+   advances; spawn the new teammates the same way.
+
+5. **Exit** — when the kernel closes the room, the run is finished and
+   results are synthesized.
+
+See the `delegate` skill for the role → subagent_type mapping table.
+</phase_1_protocol>
 
 <examples>
 **Feature spanning API, domain logic, and tests:**

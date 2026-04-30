@@ -1,4 +1,9 @@
-import { Mode, type RunContext, RunState } from "../types.ts";
+import {
+  type DispatcherMode,
+  Mode,
+  type RunContext,
+  RunState,
+} from "../types.ts";
 
 interface BrainTaskWriter {
   taskComment(taskId: string, comment: string): Promise<boolean>;
@@ -17,6 +22,8 @@ export interface CreateRunContextParams {
   room_id: string;
   max_iterations?: number;
   created_at?: string;
+  dispatcher_mode?: DispatcherMode;
+  session_id?: string;
 }
 
 const DEFAULT_MAX_ITERATIONS_BY_MODE: Record<Mode, number> = {
@@ -69,6 +76,8 @@ export function createRunContext(params: CreateRunContextParams): RunContext {
       DEFAULT_MAX_ITERATIONS_BY_MODE[params.mode],
     created_at: params.created_at ?? new Date().toISOString(),
     isVerifying: false,
+    dispatcher_mode: params.dispatcher_mode,
+    session_id: params.session_id,
   };
 }
 

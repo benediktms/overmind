@@ -21,10 +21,17 @@ scout first), steps are independent and can run in parallel (use swarm), or
 acceptance criteria are not yet defined. </when_to_use>
 
 <protocol>
-Invoke via `mcp__overmind__overmind_delegate` with `mode: "relay"`:
+Invoke via `mcp__overmind__overmind_delegate` with `mode: "relay"` and
+`dispatcher_mode: "client_side"` (you are running inside Claude Code and
+will drain the dispatch queue yourself — see Phase-1 protocol below):
 
 ```
-mcp__overmind__overmind_delegate(objective: string, mode: "relay", priority?: 0-4)
+mcp__overmind__overmind_delegate(
+  objective: string,
+  mode: "relay",
+  priority?: 0-4,
+  dispatcher_mode: "client_side"
+)
 ```
 
 The kernel executes a three-step default pipeline (cortex → probe → liaison) or
@@ -32,7 +39,7 @@ a planner-supplied TaskGraph in topological order. For each step:
 
 1. Dispatches the step agent via neural_link `finding` message +
    `AgentDispatcher`.
-2. Waits for a `handoff` message (30 s timeout).
+2. Waits for a `handoff` message (180 s timeout per agent).
 3. Dispatches a `verifier` agent via `review_request` message.
 4. Waits for a `review_result` message.
 5. If verification passes, proceeds to the next step.
@@ -48,6 +55,50 @@ Room interaction mode: `supervisory`. Brain task title prefix:
 Cancellation: signal via `mcp__overmind__overmind_cancel`; the kernel closes the
 room and marks the run `cancelled`.
 </protocol>
+
+<phase_1_protocol>
+
+## Phase 1 — Client-side dispatch protocol
+
+Claude Code sessions pass `dispatcher_mode: "client_side"`, which tells the
+daemon to queue agent dispatches for in-process spawn rather than forking
+`claude --print` subprocesses. The calling session must drain the queue
+and spawn each agent as a teammate. Skip this protocol and the run
+silently times out at 180s with zero handoffs.
+
+### Protocol sequence
+
+1. **Delegate the objective** — call `mcp__overmind__overmind_delegate`
+   with `mode: "relay"` and `dispatcher_mode: "client_side"`. Returns
+   `{run_id, mode}` on success or `{success: false, error}` if the daemon
+   has no client_side dispatcher available.
+
+2. **Drain pending dispatches** — immediately call
+   `mcp__overmind__overmind_pending_dispatches({run_id})`. Returns
+   `{run_id, dispatches}` — the queued spawn requests for the relay's
+   first step.
+
+3. **Spawn teammates** — for each dispatch, spawn a teammate via the
+   `Agent` tool:
+   ```
+   Agent(
+     subagent_type: "overmind:<role>",   # e.g. "overmind:cortex"
+     team_name: <run_id>,
+     name: <participant_id>,
+     prompt: <dispatch.prompt>
+   )
+   ```
+
+4. **Wait for handoffs** — the kernel's relay executor watches the room
+   and drives subsequent steps (verify → fix → next step) by queuing more
+   dispatches. Re-drain via `overmind_pending_dispatches` whenever the
+   relay advances; spawn the new teammates the same way.
+
+5. **Exit** — when the kernel closes the room, the run is finished and
+   results are synthesized.
+
+See the `delegate` skill for the role → subagent_type mapping table.
+</phase_1_protocol>
 
 <examples>
 **Backend feature with dependency chain:**
