@@ -1,6 +1,7 @@
 #!/usr/bin/env -S deno run -A --quiet
 
 import { dirname, fromFileUrl, join, resolve } from "@std/path";
+import { stopDaemon } from "../../../kernel/daemon.ts";
 
 // Plugin IDs: <plugin-name>@<marketplace-name>. Both modes use the same
 // marketplace name ("overmind") because Claude Code requires the @<marketplace>
@@ -103,6 +104,14 @@ export interface InstallerOptions {
    * to a tmpdir path.
    */
   userConfigPath?: string;
+  /**
+   * Override for `~/.overmind` — the daemon runtime directory holding
+   * `daemon.pid`, `daemon.sock`, `daemon.lock`, and the per-workspace
+   * `state/` subdirectory. Used by `uninstallPlugin` to stop the daemon
+   * and clean install-orphaned files. Tests should set this to a
+   * tmpdir to avoid touching the operator's real runtime state.
+   */
+  overmindRuntimeDir?: string;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -136,6 +145,7 @@ function resolvePaths(opts: InstallerOptions): {
   skipCompile: boolean;
   skipDaemonStart: boolean;
   userConfigPath: string;
+  overmindRuntimeDir: string;
 } {
   const home = Deno.env.get("HOME");
   if (!home && (!opts.pluginDir || !opts.settingsPath)) {
@@ -175,6 +185,9 @@ function resolvePaths(opts: InstallerOptions): {
     skipDaemonStart: opts.skipDaemonStart ?? false,
     userConfigPath: resolve(
       opts.userConfigPath ?? `${home}/.config/overmind/overmind.toml`,
+    ),
+    overmindRuntimeDir: resolve(
+      opts.overmindRuntimeDir ?? `${home}/.overmind`,
     ),
   };
 }
@@ -718,20 +731,58 @@ export async function uninstallPlugin(
     claudeMdPath,
     pluginCacheRoot,
     binaryPath,
+    marketplaceSourcePath,
+    userConfigPath,
+    overmindRuntimeDir,
   } = resolvePaths(opts);
+
+  // Stop the daemon BEFORE touching any install files. The daemon owns
+  // the advisory lock on <runtimeDir>/daemon.lock, listens on the unix
+  // socket, and tracks its own pid in daemon.pid; sending SIGTERM lets
+  // it close the lock FD (releasing the OS lock) and remove the socket
+  // and pidfile cleanly. stopDaemon is idempotent — when no daemon is
+  // running it returns "Daemon is not running" without erroring.
+  try {
+    await stopDaemon(overmindRuntimeDir);
+  } catch (err) {
+    console.warn(
+      `uninstall: failed to stop daemon (continuing): ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+  }
 
   await removePath(pluginDir);
   await removeAgentBlock(claudeMdPath);
 
-  // Remove the PATH symlink. Leave the daemon running and the dist artifact
-  // alone — they're cheap to recreate and dropping them would be surprising
-  // for an install/uninstall cycle that the user might just be doing to
-  // reset Claude Code state.
+  // Remove the PATH symlink and the compiled binary itself. Earlier
+  // behavior preserved the dist artifact ("cheap to recreate"); the
+  // operator preference is full removal — install/uninstall is now
+  // symmetric, and a reinstall must re-compile.
   if (await pathExists(binaryPath)) {
     const stat = await Deno.lstat(binaryPath);
     if (stat.isSymlink) {
       await removePath(binaryPath);
     }
+  }
+  const compiledBinaryPath = resolve(
+    `${marketplaceSourcePath}/${COMPILED_OUTPUT_REL}`,
+  );
+  if (await pathExists(compiledBinaryPath)) {
+    await removePath(compiledBinaryPath);
+  }
+
+  // Clean up daemon runtime files. stopDaemon should have removed the
+  // pidfile already, and a clean daemon shutdown removes its socket; but
+  // the lockfile persists by design (we only release the OS-level lock
+  // by closing the FD, not by unlinking the file), and pid/sock can
+  // linger if the daemon was SIGKILLed earlier. Be defensive — these
+  // are install-orphaned, not user data, and removePath is idempotent.
+  // The `state/` subdirectory is intentionally NOT touched: per-workspace
+  // run history (capabilities, journals, mode-state files) lives there
+  // and belongs to the user, not to install state.
+  for (const f of ["daemon.lock", "daemon.pid", "daemon.sock"]) {
+    await removePath(`${overmindRuntimeDir}/${f}`);
   }
 
   // Flatten the whole marketplace cache tree under pluginCacheRoot.
@@ -745,13 +796,20 @@ export async function uninstallPlugin(
     await writeSettings(claudeJsonPath, withoutGlobalMcpServer(claudeJson));
   }
 
-  if (!(await pathExists(settingsPath))) {
-    return;
+  if (await pathExists(settingsPath)) {
+    const settings = await readSettings(settingsPath);
+    const patched = withoutAllOvemindPlugins(settings);
+    await writeSettings(settingsPath, patched);
   }
 
-  const settings = await readSettings(settingsPath);
-  const patched = withoutAllOvemindPlugins(settings);
-  await writeSettings(settingsPath, patched);
+  // Surface the preserved-state note so uninstall isn't surprising —
+  // user config is intentionally retained across uninstall/reinstall
+  // cycles so operator customizations survive a reset.
+  if (await pathExists(userConfigPath)) {
+    console.log(
+      `uninstall: user config preserved at ${userConfigPath} (delete manually for full reset).`,
+    );
+  }
 }
 
 function parseBoolean(value: string): boolean {

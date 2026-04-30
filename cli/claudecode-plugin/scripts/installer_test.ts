@@ -294,6 +294,114 @@ Deno.test("uninstallPlugin succeeds when nothing is installed", async () => {
   }
 });
 
+Deno.test(
+  "uninstallPlugin removes the compiled binary at <repo>/dist/overmind",
+  async () => {
+    const env = await createTestEnv();
+    try {
+      // Simulate a `deno compile` artifact. Earlier behavior preserved
+      // this on uninstall; the new contract is full removal so the
+      // operator gets a clean slate (binary symlink + binary itself).
+      const distDir = `${env.root}/dist`;
+      const compiledBinary = `${distDir}/overmind`;
+      await Deno.mkdir(distDir, { recursive: true });
+      await Deno.writeTextFile(compiledBinary, "fake compiled binary");
+
+      await uninstallPlugin(
+        isolated(env, { overmindRuntimeDir: `${env.root}/.overmind` }),
+      );
+
+      assertEquals(await pathExists(compiledBinary), false);
+    } finally {
+      await env.cleanup();
+    }
+  },
+);
+
+Deno.test(
+  "uninstallPlugin removes daemon runtime files (lock, pid, sock)",
+  async () => {
+    const env = await createTestEnv();
+    try {
+      const runtimeDir = `${env.root}/.overmind`;
+      await Deno.mkdir(runtimeDir, { recursive: true });
+      // Stale runtime files that a previously-crashed daemon might leave
+      // behind (or that survive when stopDaemon's SIGTERM raced shutdown).
+      await Deno.writeTextFile(`${runtimeDir}/daemon.pid`, "99999\n");
+      await Deno.writeTextFile(`${runtimeDir}/daemon.lock`, "");
+      await Deno.writeTextFile(`${runtimeDir}/daemon.sock`, "");
+
+      await uninstallPlugin(
+        isolated(env, { overmindRuntimeDir: runtimeDir }),
+      );
+
+      assertEquals(await pathExists(`${runtimeDir}/daemon.pid`), false);
+      assertEquals(await pathExists(`${runtimeDir}/daemon.lock`), false);
+      assertEquals(await pathExists(`${runtimeDir}/daemon.sock`), false);
+    } finally {
+      await env.cleanup();
+    }
+  },
+);
+
+Deno.test(
+  "uninstallPlugin preserves per-workspace state directory under runtime dir",
+  async () => {
+    const env = await createTestEnv();
+    try {
+      const runtimeDir = `${env.root}/.overmind`;
+      const stateDir = `${runtimeDir}/state`;
+      await Deno.mkdir(stateDir, { recursive: true });
+      // Simulated per-workspace run state — capabilities/journals/mode
+      // files are USER DATA, not install-owned, so they must survive
+      // an uninstall (consistent with leaving the user config alone).
+      await Deno.writeTextFile(
+        `${stateDir}/scout-state.json`,
+        '{"active":false}',
+      );
+
+      await uninstallPlugin(
+        isolated(env, { overmindRuntimeDir: runtimeDir }),
+      );
+
+      assertEquals(await pathExists(stateDir), true);
+      assertEquals(
+        await pathExists(`${stateDir}/scout-state.json`),
+        true,
+      );
+    } finally {
+      await env.cleanup();
+    }
+  },
+);
+
+Deno.test(
+  "uninstallPlugin preserves user config (intentional, surfaced in stdout)",
+  async () => {
+    const env = await createTestEnv();
+    try {
+      // Operator might have customized the user config — install seeds
+      // it once, uninstall must never touch it. The notification line
+      // helps users discover that a full reset requires manual deletion.
+      await Deno.mkdir(`${env.root}/.config/overmind`, { recursive: true });
+      await Deno.writeTextFile(
+        env.userConfigPath,
+        '# user-customized\n[dispatcher]\nmode = "client_side"\n',
+      );
+
+      await uninstallPlugin(
+        isolated(env, { overmindRuntimeDir: `${env.root}/.overmind` }),
+      );
+
+      assertEquals(await pathExists(env.userConfigPath), true);
+      const preserved = await Deno.readTextFile(env.userConfigPath);
+      assertEquals(preserved.includes("user-customized"), true);
+    } finally {
+      await env.cleanup();
+    }
+  },
+);
+
 Deno.test("installPlugin marketplace mode writes marketplace settings without creating plugin dir", async () => {
   const env = await createTestEnv();
   try {
