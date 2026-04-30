@@ -63,16 +63,30 @@ async function main(): Promise<void> {
     timestamp: new Date().toISOString(),
   });
 
-  const activeState = await readActiveModeState(directory);
+  // Scope active-state lookup to this session: only restore state
+  // for runs originated by THIS Claude Code session, not for runs from
+  // a different session that happens to share the workspace. Pre-upgrade
+  // state files without session_id are still surfaced (treated as
+  // "global") so existing in-flight runs aren't silently dropped.
+  const activeState = await readActiveModeState(
+    directory,
+    sessionId || undefined,
+  );
   if (activeState?.active) {
     const persistenceLine = activeState.persistence.brain.available
       ? `Persistence: Brain checkpointing active (${activeState.persistence.brain.brainName})`
       : `Persistence: local-only fallback (${activeState.persistence.brain.status})`;
 
+    const prompt = activeState.original_prompt ?? "";
+    const firstLine = prompt.split("\n", 1)[0].trim();
+    const taskSummary = firstLine.length > 160
+      ? `${firstLine.slice(0, 157)}...`
+      : (firstLine || "unknown");
+
     messages.push(
       `[OVERMIND ${activeState.mode.toUpperCase()} MODE RESTORED]\n` +
       `Active since: ${activeState.started_at}\n` +
-      `Original task: ${activeState.original_prompt ?? "unknown"}\n` +
+      `Original task: ${taskSummary}\n` +
       `${persistenceLine}\n`,
     );
   }

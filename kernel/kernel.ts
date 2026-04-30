@@ -3,7 +3,11 @@ import type { KernelEvent } from "./events.ts";
 import { ConfigLoader } from "./config.ts";
 import { DEFAULT_TRIGGERS, TriggerEngine } from "./triggers.ts";
 import { AdapterRegistry } from "./adapters.ts";
-import type { KernelConfig, RunContext } from "./types.ts";
+import type {
+  DispatcherMode,
+  KernelConfig,
+  RunContext,
+} from "./types.ts";
 import { Mode, RunState } from "./types.ts";
 import { OvermindError } from "./errors.ts";
 import { createRunContext } from "./modes/shared.ts";
@@ -24,10 +28,43 @@ import { GapAnalyzer } from "./planner/gap_analyzer.ts";
 import { StrictValidator } from "./planner/strict_validator.ts";
 import type { AgentDispatcher } from "./agent_dispatcher.ts";
 
+/**
+ * Per-run options passed to `Kernel.executeMode`. Carries caller-declared
+ * capabilities (which dispatcher the caller can support, which session is
+ * driving the run) so the kernel can route correctly without consulting
+ * global state.
+ */
+export interface ExecuteModeOptions {
+  dispatcherMode?: DispatcherMode;
+  sessionId?: string;
+}
+
 export interface KernelOptions {
   registry?: AdapterRegistry;
   interviewCallback?: InterviewCallback;
+  /**
+   * Single-dispatcher option (legacy). Use `dispatchers` plus
+   * `defaultDispatcherMode` to expose multiple dispatchers concurrently
+   * (one of each kind), chosen per-run by caller capability. When both are
+   * supplied, `dispatchers` wins; `dispatcher` becomes a fallback default.
+   */
   dispatcher?: AgentDispatcher;
+  /**
+   * Registry of dispatchers indexed by mode. Daemon supplies one entry per
+   * dispatcher kind it managed to instantiate (e.g. "subprocess" only when
+   * the `claude` binary is on PATH; "client_side" always — it has no
+   * preconditions). `executeMode` picks per-run from this registry based
+   * on the caller's `dispatcher_mode`.
+   */
+  dispatchers?: Partial<Record<DispatcherMode, AgentDispatcher>>;
+  /**
+   * Which dispatcher to use when a request has no `dispatcher_mode` set.
+   * Defaults to "subprocess" — the only dispatcher that works for any
+   * caller. Headless callers (CLI/CI/OpenCode) get the safe default
+   * automatically; opting into client_side requires explicit per-request
+   * declaration so a non-draining caller can never silently fail.
+   */
+  defaultDispatcherMode?: DispatcherMode;
 }
 
 export class Kernel {
@@ -41,6 +78,12 @@ export class Kernel {
   private cancellationRegistry = new CancellationRegistry();
   private interviewCallback: InterviewCallback | null;
   private dispatcher: AgentDispatcher | null;
+  private readonly dispatchers: Partial<
+    Record<DispatcherMode, AgentDispatcher>
+  >;
+  private readonly defaultDispatcherMode: DispatcherMode;
+  /** runId → dispatcher used, for routing cancelRun to the right instance. */
+  private readonly runDispatchers = new Map<string, AgentDispatcher>();
 
   constructor(options?: KernelOptions) {
     this.eventBus = new EventBus();
@@ -49,6 +92,8 @@ export class Kernel {
     this.injectedRegistry = options?.registry ?? null;
     this.interviewCallback = options?.interviewCallback ?? null;
     this.dispatcher = options?.dispatcher ?? null;
+    this.dispatchers = options?.dispatchers ?? {};
+    this.defaultDispatcherMode = options?.defaultDispatcherMode ?? "subprocess";
   }
 
   async start(): Promise<void> {
@@ -97,6 +142,34 @@ export class Kernel {
     return this.adapterRegistry;
   }
 
+  /**
+   * Returns the dispatcher for a given mode. When `mode` is omitted, uses
+   * the kernel's default. Resolution order (highest first):
+   *   1. `dispatchers[mode ?? defaultDispatcherMode]` — explicit registry hit
+   *   2. legacy `dispatcher` constructor field (single-dispatcher callers)
+   *   3. AdapterRegistry's auto-resolved dispatcher
+   *   4. null
+   */
+  getDispatcher(mode?: DispatcherMode): AgentDispatcher | null {
+    const target = mode ?? this.defaultDispatcherMode;
+    return (
+      this.dispatchers[target] ??
+      this.dispatcher ??
+      this.adapterRegistry?.getDispatcher() ??
+      null
+    );
+  }
+
+  /**
+   * True when a dispatcher of the given mode is available. Used by the
+   * daemon to validate a caller's `dispatcher_mode` request before
+   * accepting it — letting the caller fail loudly with an actionable
+   * error instead of silently queuing into a missing backend.
+   */
+  hasDispatcher(mode: DispatcherMode): boolean {
+    return Boolean(this.dispatchers[mode]);
+  }
+
   async receiveObjective(objective: string): Promise<void> {
     if (!this.running) throw new OvermindError("Kernel not running");
     this.emit(EventType.ObjectiveReceived, { objective });
@@ -110,7 +183,27 @@ export class Kernel {
     // SessionEnd hook → hook POSTs /release-session-locks to the kernel. The
     // release is therefore eventual, bounded by CC's hook latency, with the
     // LockRegistry's own size cap as a safety backstop.
-    return this.cancellationRegistry.cancel(runId);
+    const cancelled = this.cancellationRegistry.cancel(runId);
+    // Dispatcher cleanup (e.g. SIGTERM in-flight subprocesses) is best-effort
+    // and intentionally fired regardless of whether a run was registered —
+    // a dispatcher may have spawned children for a run that has since
+    // unregistered itself.
+    //
+    // Per-run routing: when this run was started with a specific dispatcher
+    // (via executeMode's dispatcherMode override), cancel that one. Otherwise
+    // fall back to the kernel's default — covers legacy single-dispatcher
+    // setups and runs whose entry already cleared the per-run map.
+    const perRun = this.runDispatchers.get(runId);
+    const dispatcher = perRun ??
+      this.dispatcher ??
+      this.adapterRegistry?.getDispatcher() ??
+      null;
+    try {
+      dispatcher?.cancelRun?.(runId);
+    } catch {
+      // cancelRun is contractually best-effort; swallow.
+    }
+    return cancelled;
   }
 
   async executeMode(
@@ -118,8 +211,16 @@ export class Kernel {
     objective: string,
     workspace = Deno.cwd(),
     runId?: string,
+    options?: ExecuteModeOptions,
   ): Promise<RunContext> {
-    return await this.executeModeImpl(mode, objective, workspace, runId);
+    return await this.executeModeImpl(
+      mode,
+      objective,
+      workspace,
+      runId,
+      undefined,
+      options,
+    );
   }
 
   private async executeModeImpl(
@@ -128,6 +229,7 @@ export class Kernel {
     workspace: string,
     runId?: string,
     graph?: TaskGraph,
+    options?: ExecuteModeOptions,
   ): Promise<RunContext> {
     if (!this.adapterRegistry) throw new OvermindError("Kernel not started");
 
@@ -148,6 +250,8 @@ export class Kernel {
       brain_task_id: "",
       room_id: "",
       max_iterations: maxIterations,
+      dispatcher_mode: options?.dispatcherMode,
+      session_id: options?.sessionId,
     });
 
     const ctxWithSignal: RunContext = { ...ctx, signal };
@@ -158,12 +262,15 @@ export class Kernel {
     await persistence.startRun(ctxWithSignal);
 
     try {
-      // Resolve dispatcher from explicit option or, failing that, from the
-      // adapter registry. This makes AdapterRegistry the single source of
-      // truth when no override is supplied at construction time.
-      const dispatcher = this.dispatcher ??
-        this.adapterRegistry?.getDispatcher() ??
+      // Resolve dispatcher per-run: caller-declared mode (from
+      // ExecuteModeOptions) > kernel default registry > legacy single
+      // dispatcher > adapter-registry-resolved fallback. Tracked in
+      // runDispatchers so cancelRun routes to the right instance.
+      const dispatcher = this.getDispatcher(options?.dispatcherMode) ??
         undefined;
+      if (dispatcher) {
+        this.runDispatchers.set(resolvedRunId, dispatcher);
+      }
       switch (mode) {
         case Mode.Scout:
           return await executeScout(
@@ -208,6 +315,7 @@ export class Kernel {
       throw err;
     } finally {
       this.cancellationRegistry.unregister(resolvedRunId);
+      this.runDispatchers.delete(resolvedRunId);
       // Lock release is no longer driven from this finally block. Locks are
       // owned by (sessionId, agentId), and CC's SessionEnd hook posts
       // /release-session-locks when a session terminates. That covers both
@@ -220,6 +328,7 @@ export class Kernel {
     objective: string,
     workspace = Deno.cwd(),
     runId?: string,
+    options?: ExecuteModeOptions,
   ): Promise<
     { runContext: RunContext; intent: IntentClassification; plannedMode: Mode }
   > {
@@ -277,6 +386,7 @@ export class Kernel {
       workspace,
       runId,
       graph,
+      options,
     );
 
     return { runContext, intent, plannedMode };

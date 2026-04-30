@@ -102,8 +102,7 @@ export class LockRegistry {
       // Replay paths verbatim. Pre-normalization journals may contain
       // non-canonical paths; those become orphans because new acquires
       // normalize and won't match the legacy keys. The orphans cannot cause
-      // false conflicts (different keys), only consume cap slots until the
-      // journal is compacted (deferred to ovr-396.23.10).
+      // false conflicts (different keys), only consume cap slots.
       if (event.kind === "acquired") {
         this.locks.set(entry.path, entry);
       } else if (event.kind === "released") {
@@ -117,6 +116,39 @@ export class LockRegistry {
         }
       }
     }
+
+    // Snapshot-rewrite compaction (ovr-396.23.10).
+    //
+    // After replaying the full history we collapse the journal to only the
+    // currently-live locks.  Without this the file grows monotonically: every
+    // acquire/release cycle appends two lines and nothing is ever removed.
+    //
+    // We chose snapshot-rewrite over per-run files because:
+    //   • simpler — one file, one writer, no directory housekeeping;
+    //   • bounded — worst case is MAX_LOCKS lines after load();
+    //   • crash-safe — we write the full snapshot to a .tmp file and then
+    //     atomically rename it into place.  A crash between the two steps
+    //     leaves the .tmp file behind but the original journal intact, so
+    //     live locks are never lost.  A stale .tmp from a previous crashed
+    //     run is silently overwritten on the next load().
+    const snapshot = Array.from(this.locks.values());
+    const compacted = snapshot
+      .map((entry) =>
+        JSON.stringify(
+          {
+            ts: entry.acquiredAt,
+            kind: "acquired",
+            entry,
+          } satisfies JournalEvent,
+        )
+      )
+      .join("\n");
+    const payload = compacted.length > 0 ? compacted + "\n" : "";
+    await Deno.mkdir(dirname(this.journalPath), { recursive: true });
+    const tmpPath = this.journalPath + ".tmp";
+    await Deno.writeTextFile(tmpPath, payload, { create: true });
+    await Deno.rename(tmpPath, this.journalPath);
+    this.journalDirReady = true;
   }
 
   async acquire(input: AcquireInput): Promise<AcquireResult> {

@@ -159,26 +159,73 @@ export function pruneStale(
   return { entries: fresh };
 }
 
+// Estimate the serialized byte cost for a single cache entry (path -> entry).
+//
+// JSON shape for one key-value pair inside "entries":
+//   "PATH":{"sha256":"HHHH...64","readAt":NNNNNNNNN,"sessionId":"SID"}
+//
+// Fixed chars per entry (excluding variable parts):
+//   "  "  :  {  "sha256":"  "  ,  "readAt":  ,  "sessionId":"  "  }
+//   1+1+1+1+8+1+64+1+1+8+1+12+1+11+1+sid+1+1  = 114 + path.length + sid.length
+// We round up to 150 to absorb readAt digit variance and any JSON encoder
+// overhead. The final boundary check (one JSON.stringify) is the authoritative
+// gate; this estimate only needs to be accurate enough to avoid under-evicting.
+const ENTRY_FIXED_OVERHEAD = 150;
+
+function estimateEntryBytes(path: string, entry: CacheEntry): number {
+  return ENTRY_FIXED_OVERHEAD + path.length + entry.sessionId.length;
+}
+
+// Outer object framing: {"entries":{}} = 14 bytes.
+const OBJECT_FRAMING = 14;
+
 export function enforceMaxBytes(
   cache: CacheFile,
   maxBytes = DEFAULT_MAX_BYTES,
 ): CacheFile {
-  let serialized = JSON.stringify(cache);
-  if (serialized.length <= maxBytes) return cache;
+  // Fast path: skip the O(n) size estimate entirely when the cache is clearly
+  // within budget. Use JSON.stringify once here (not in the loop below).
+  if (JSON.stringify(cache).length <= maxBytes) return cache;
 
+  // Sort newest-first so we keep the most recently read entries.
   const sorted = Object.entries(cache.entries).sort(
     (a, b) => b[1].readAt - a[1].readAt,
   );
-  const trimmed: Record<string, CacheEntry> = {};
+
+  // Walk entries newest-to-oldest, accumulating a byte estimate.
+  // Stop adding entries once we would exceed maxBytes. This is O(n).
+  let runningBytes = OBJECT_FRAMING;
+  let separatorBytes = 0; // commas between entries: first entry has none
+  const kept: Array<[string, CacheEntry]> = [];
   for (const [path, entry] of sorted) {
-    trimmed[path] = entry;
-    serialized = JSON.stringify({ entries: trimmed });
-    if (serialized.length > maxBytes) {
-      delete trimmed[path];
-      break;
-    }
+    const cost = estimateEntryBytes(path, entry) + separatorBytes;
+    if (runningBytes + cost > maxBytes) break;
+    runningBytes += cost;
+    separatorBytes = 1; // subsequent entries need a leading comma
+    kept.push([path, entry]);
   }
+
+  const trimmed: Record<string, CacheEntry> = Object.fromEntries(kept);
+
+  // Single authoritative boundary check. If the estimate was generous we may
+  // have kept one entry too many; drop it and re-check until we fit.
+  while (
+    JSON.stringify({ entries: trimmed }).length > maxBytes && kept.length > 0
+  ) {
+    const evicted = kept.pop()!;
+    delete trimmed[evicted[0]];
+  }
+
   return { entries: trimmed };
+}
+
+// Best-effort wrapper around Deno.realPath that never throws.
+async function safeRealPath(p: string): Promise<string | null> {
+  try {
+    return await Deno.realPath(p);
+  } catch {
+    return null;
+  }
 }
 
 // Canonicalize a path so cache keys agree across calls. With `cwd`,
@@ -187,6 +234,24 @@ export function enforceMaxBytes(
 // happens to match today but isn't a contract. Falls back to the input
 // path on any error (missing file, permission denied) so the staleness
 // check stays fail-open.
+//
+// Symlink containment: when `cwd` is provided we enforce that the resolved
+// path stays within the cwd subtree. If `Deno.realPath` follows a symlink
+// that escapes cwd (e.g. a link pointing to /etc/passwd or any path outside
+// the project), we return the pre-resolution absolute path instead.
+//
+// Callers do NOT need to pre-resolve cwd: this function resolves cwd
+// internally via safeRealPath so containment is correct even when cwd
+// itself is a symlink (e.g. macOS /var/folders -> /private/var/folders).
+//
+// Design decision — return unresolved rather than null:
+//   Returning null would cause the harness to treat the path as "no entry
+//   exists" (fail-open), which silently skips the staleness check for
+//   symlink targets. Returning the unresolved absolute path means the cache
+//   key is the symlink itself, not its target; the staleness check still fires
+//   for the symlink inode. This is marginally less accurate (two symlinks
+//   pointing to the same file get separate entries) but safe: it preserves
+//   the fail-open invariant without silently bypassing the check.
 export async function resolvePathSafely(
   path: string,
   cwd?: string,
@@ -194,7 +259,22 @@ export async function resolvePathSafely(
   if (!path) return path;
   const absolute = isAbsolute(path) || !cwd ? path : resolve(cwd, path);
   try {
-    return await Deno.realPath(absolute);
+    const real = await Deno.realPath(absolute);
+    // Containment check: if a cwd was given and the resolved path escapes it,
+    // fall back to the unresolved absolute path so the cache key stays within
+    // the project. A trailing separator is added to cwdReal to avoid false
+    // matches where cwd is a strict prefix of an unrelated sibling directory
+    // (e.g. cwd=/foo matching /foobar/...).
+    // cwdReal resolves cwd itself through any symlinks so the comparison
+    // works correctly even when cwd is a symlink (e.g. macOS
+    // /var/folders -> /private/var/folders).
+    if (cwd) {
+      const cwdReal = (await safeRealPath(cwd)) ?? cwd;
+      if (!real.startsWith(cwdReal + "/") && real !== cwdReal) {
+        return absolute;
+      }
+    }
+    return real;
   } catch {
     return absolute;
   }

@@ -18,7 +18,10 @@ import { type AgentDispatcher, safeDispatch } from "../agent_dispatcher.ts";
 import { CancellationError, throwIfAborted } from "../cancellation.ts";
 
 const DEFAULT_SCOUT_PARALLEL = 3;
-const DEFAULT_WAIT_TIMEOUT_MS = 30_000;
+// Worker bootstrap (claude --print + MCP handshakes + 6-step protocol) takes
+// 60-90s in practice; 30s timeout produced silent data loss in smoke runs
+// (see ovr-3ae).
+const DEFAULT_WAIT_TIMEOUT_MS = 180_000;
 const LEAD_PARTICIPANT_ID = "overmind-scout-lead";
 const LEAD_DISPLAY_NAME = "Overmind Scout Lead";
 

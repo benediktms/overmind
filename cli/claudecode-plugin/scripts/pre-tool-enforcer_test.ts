@@ -374,6 +374,127 @@ Deno.test("parseBashWriteCandidates: no writes returns empty", () => {
   assertEquals(parseBashWriteCandidates(""), []);
 });
 
+// --- ovr-396.23.8: cp / mv / dd / perl -i / ruby -i / patch / truncate / install ---
+
+// cp
+Deno.test("parseBashWriteCandidates: cp captures destination (dangerous)", () => {
+  const c = parseBashWriteCandidates("cp src.ts dest.ts");
+  assertEquals(c.includes("dest.ts"), true);
+  assertEquals(c.includes("src.ts"), false);
+});
+
+Deno.test("parseBashWriteCandidates: cp -r copies dir — dest captured (dangerous)", () => {
+  const c = parseBashWriteCandidates("cp -r src/ dest/");
+  assertEquals(c.includes("dest/"), true);
+  assertEquals(c.includes("src/"), false);
+});
+
+Deno.test("parseBashWriteCandidates: cp with only one arg — no destination (safe form)", () => {
+  // A bare `cp file` is invalid bash; we must not emit a false positive.
+  const c = parseBashWriteCandidates("cp onlyone");
+  assertEquals(c.includes("onlyone"), false);
+});
+
+// mv
+Deno.test("parseBashWriteCandidates: mv captures destination (dangerous)", () => {
+  const c = parseBashWriteCandidates("mv old.ts new.ts");
+  assertEquals(c.includes("new.ts"), true);
+  assertEquals(c.includes("old.ts"), false);
+});
+
+Deno.test("parseBashWriteCandidates: mv -f src dest — dest captured", () => {
+  const c = parseBashWriteCandidates("mv -f old.ts new.ts");
+  assertEquals(c.includes("new.ts"), true);
+});
+
+Deno.test("parseBashWriteCandidates: mv with only one arg — no false positive (safe form)", () => {
+  const c = parseBashWriteCandidates("mv onlyone");
+  assertEquals(c.includes("onlyone"), false);
+});
+
+// dd
+Deno.test("parseBashWriteCandidates: dd of=<file> captures output file (dangerous)", () => {
+  const c = parseBashWriteCandidates(
+    "dd if=/dev/urandom of=random.bin bs=1M count=1",
+  );
+  assertEquals(c.includes("random.bin"), true);
+});
+
+Deno.test("parseBashWriteCandidates: dd without of= — no false positive (safe form)", () => {
+  // dd if=src | something — no of= so nothing to capture.
+  const c = parseBashWriteCandidates("dd if=src.bin bs=512");
+  assertEquals(c.some((p) => p.startsWith("if=")), false);
+  assertEquals(c.length, 0);
+});
+
+// perl -i
+Deno.test("parseBashWriteCandidates: perl -i captures file (dangerous)", () => {
+  const c = parseBashWriteCandidates("perl -i -pe 's/foo/bar/' file.txt");
+  assertEquals(c.includes("file.txt"), true);
+});
+
+Deno.test("parseBashWriteCandidates: perl -i.bak captures file (dangerous)", () => {
+  const c = parseBashWriteCandidates("perl -i.bak -pe 's/x/y/' notes.md");
+  assertEquals(c.includes("notes.md"), true);
+});
+
+Deno.test("parseBashWriteCandidates: perl without -i — no false positive (safe form)", () => {
+  const c = parseBashWriteCandidates("perl -ne 'print' file.txt");
+  assertEquals(c.includes("file.txt"), false);
+});
+
+// ruby -i
+Deno.test("parseBashWriteCandidates: ruby -i captures file (dangerous)", () => {
+  const c = parseBashWriteCandidates(
+    "ruby -i -pe 'gsub(/foo/, \"bar\")' file.rb",
+  );
+  assertEquals(c.includes("file.rb"), true);
+});
+
+Deno.test("parseBashWriteCandidates: ruby without -i — no false positive (safe form)", () => {
+  const c = parseBashWriteCandidates("ruby script.rb");
+  assertEquals(c.includes("script.rb"), false);
+});
+
+// patch
+Deno.test("parseBashWriteCandidates: patch <file> captures file (dangerous)", () => {
+  const c = parseBashWriteCandidates("patch -p1 src/main.ts < changes.patch");
+  assertEquals(c.includes("src/main.ts"), true);
+});
+
+Deno.test("parseBashWriteCandidates: patch with no positional file — no false positive (safe form)", () => {
+  // `patch -p1 < changes.patch` applies to files listed in the patch; we
+  // can't know them statically, so nothing is captured. This is acceptable —
+  // fail-open: no spurious warning when there's nothing to match.
+  const c = parseBashWriteCandidates("patch -p1 < changes.patch");
+  assertEquals(c.length, 0);
+});
+
+// truncate
+Deno.test("parseBashWriteCandidates: truncate -s 0 <file> captures file (dangerous)", () => {
+  const c = parseBashWriteCandidates("truncate -s 0 secrets.txt");
+  assertEquals(c.includes("secrets.txt"), true);
+});
+
+Deno.test("parseBashWriteCandidates: truncate --size 0 captures file (dangerous)", () => {
+  const c = parseBashWriteCandidates("truncate --size 0 secrets.txt");
+  assertEquals(c.includes("secrets.txt"), true);
+});
+
+// install
+Deno.test("parseBashWriteCandidates: install src dest captures destination (dangerous)", () => {
+  const c = parseBashWriteCandidates(
+    "install -m 755 bin/app /usr/local/bin/app",
+  );
+  assertEquals(c.includes("/usr/local/bin/app"), true);
+  assertEquals(c.includes("bin/app"), false);
+});
+
+Deno.test("parseBashWriteCandidates: install with only one positional — no false positive (safe form)", () => {
+  const c = parseBashWriteCandidates("install onlyone");
+  assertEquals(c.includes("onlyone"), false);
+});
+
 Deno.test("evaluateBashCacheBypass: harness off → no warning", async () => {
   await withTempHomeAndFile(async (home, cwd, filePath) => {
     const cachePath = getCachePath(cwd, home);
@@ -488,6 +609,93 @@ Deno.test("parseBashWriteCandidates: subshell doesn't trap trailing paren in pat
   const c = parseBashWriteCandidates("(echo hi > inner.txt)");
   assertEquals(c.includes("inner.txt"), true);
   assertEquals(c.some((p) => p.endsWith(")")), false);
+});
+
+// --- ovr-396.23.7: $() / backtick nesting in splitTopLevelSegments ---
+
+Deno.test("splitTopLevelSegments: does not split inside $()", () => {
+  // cmd1 $(rm -rf foo && rm bar) cmd2 must produce ONE segment, not three.
+  // Previously `&&` inside $() was treated as a top-level separator.
+  const c = parseBashWriteCandidates(
+    "cmd1 $(rm -rf foo && rm bar) > out.txt",
+  );
+  // The redirect target is still captured — but the $() body is not split.
+  assertEquals(c.includes("out.txt"), true);
+});
+
+Deno.test("splitTopLevelSegments: does not split inside backtick substitution", () => {
+  // Backtick body `rm -rf /tmp && echo x` must not cause a mid-backtick split.
+  const c = parseBashWriteCandidates(
+    "echo `cat foo && cat bar` > result.txt",
+  );
+  assertEquals(c.includes("result.txt"), true);
+});
+
+Deno.test("splitTopLevelSegments: nested $() — outer separator still splits", () => {
+  // The && outside the $() is a real separator.
+  const c = parseBashWriteCandidates(
+    "echo $(cat file) && tee out.log",
+  );
+  assertEquals(c.includes("out.log"), true);
+});
+
+// --- ovr-396.23.7: evaluateBash recursion through bash -c / eval / backtick ---
+
+Deno.test("evaluateBash: detects danger inside bash -c '...'", () => {
+  const d = evaluateBash("bash -c 'rm -rf /'");
+  assertEquals(d.kind, "allow");
+  if (d.kind === "allow") {
+    assertEquals(d.message?.includes("Dangerous"), true);
+  }
+});
+
+Deno.test("evaluateBash: detects danger inside sh -c '...'", () => {
+  const d = evaluateBash("sh -c 'rm -rf /'");
+  assertEquals(d.kind, "allow");
+  if (d.kind === "allow") {
+    assertEquals(d.message?.includes("Dangerous"), true);
+  }
+});
+
+Deno.test("evaluateBash: detects danger inside eval '...'", () => {
+  const d = evaluateBash("eval 'rm -rf /'");
+  assertEquals(d.kind, "allow");
+  if (d.kind === "allow") {
+    assertEquals(d.message?.includes("Dangerous"), true);
+  }
+});
+
+Deno.test("evaluateBash: detects danger inside backtick wrapper", () => {
+  const d = evaluateBash("`rm -rf /`");
+  assertEquals(d.kind, "allow");
+  if (d.kind === "allow") {
+    assertEquals(d.message?.includes("Dangerous"), true);
+  }
+});
+
+Deno.test("evaluateBash: safe bash -c does not false-positive", () => {
+  const d = evaluateBash("bash -c 'ls -la'");
+  assertEquals(d.kind, "allow");
+  if (d.kind === "allow") {
+    assertEquals(d.message, undefined);
+  }
+});
+
+Deno.test("evaluateBash: safe eval does not false-positive", () => {
+  const d = evaluateBash("eval 'echo hello'");
+  assertEquals(d.kind, "allow");
+  if (d.kind === "allow") {
+    assertEquals(d.message, undefined);
+  }
+});
+
+Deno.test("evaluateBash: detects danger nested two levels deep", () => {
+  // bash -c 'eval "rm -rf /"' — two hops before the danger.
+  const d = evaluateBash(`bash -c 'eval "rm -rf /"'`);
+  assertEquals(d.kind, "allow");
+  if (d.kind === "allow") {
+    assertEquals(d.message?.includes("Dangerous"), true);
+  }
 });
 
 // --- M2 review: handleBashTool integration / precedence ---
@@ -1222,6 +1430,224 @@ Deno.test(
     } finally {
       await Deno.remove(home, { recursive: true });
       await Deno.remove(cwd, { recursive: true });
+    }
+  },
+);
+
+// --- B1: whitespace/escape normalization in evaluateBash ---
+
+Deno.test("evaluateBash B1: double-space rm -rf / is flagged", () => {
+  const d = evaluateBash("rm  -rf /");
+  assertEquals(d.kind, "allow");
+  if (d.kind === "allow") {
+    assertEquals(d.message?.includes("Dangerous"), true);
+  }
+});
+
+Deno.test("evaluateBash B1: escaped slash rm -rf \\/ is flagged", () => {
+  const d = evaluateBash("rm -rf \\/");
+  assertEquals(d.kind, "allow");
+  if (d.kind === "allow") {
+    assertEquals(d.message?.includes("Dangerous"), true);
+  }
+});
+
+Deno.test("evaluateBash B1: backslash-newline continuation is flagged", () => {
+  const d = evaluateBash("rm -rf\\\n/");
+  assertEquals(d.kind, "allow");
+  if (d.kind === "allow") {
+    assertEquals(d.message?.includes("Dangerous"), true);
+  }
+});
+
+// Strengthen existing $() test: assert that the result is exactly one segment
+// so that `&&` inside $() does NOT cause a split (B1 / regression).
+Deno.test(
+  "splitTopLevelSegments B1: $() body is one segment, foo not present as separate",
+  () => {
+    const { parseBashWriteCandidates: _p } = {
+      parseBashWriteCandidates,
+    };
+    // Use parseBashWriteCandidates as a proxy — only out.txt (the redirect
+    // target) should be captured, and there should not be a segment for `foo`.
+    const c = parseBashWriteCandidates(
+      "cmd1 $(rm -rf foo && rm bar) > out.txt",
+    );
+    assertEquals(c.includes("out.txt"), true);
+    assertEquals(c.includes("foo"), false);
+  },
+);
+
+// B1: recursion test where the OUTER literal scan misses the whitespace-
+// mutated form but recursion catches it after normalization.
+Deno.test(
+  "evaluateBash B1: outer scan misses double-space but recursion catches it",
+  () => {
+    // "bash -c 'rm  -rf /'" — outer string does NOT contain "rm -rf /"
+    // verbatim (there are two spaces). The recursive descent must normalize
+    // the extracted inner body and catch it.
+    const outer = "bash -c 'rm  -rf /'";
+    // Confirm the outer literal is NOT the plain single-space form.
+    assertEquals(outer.includes("rm -rf /"), false);
+    const d = evaluateBash(outer);
+    assertEquals(d.kind, "allow");
+    if (d.kind === "allow") {
+      assertEquals(d.message?.includes("Dangerous"), true);
+    }
+  },
+);
+
+// --- B2: recursion bypass forms ---
+
+Deno.test("evaluateBash B2: bash -ic 'rm -rf /' (clustered flags)", () => {
+  const d = evaluateBash("bash -ic 'rm -rf /'");
+  assertEquals(d.kind, "allow");
+  if (d.kind === "allow") {
+    assertEquals(d.message?.includes("Dangerous"), true);
+  }
+});
+
+Deno.test(
+  "evaluateBash B2: bash --norc -c 'rm -rf /' (long flag before -c)",
+  () => {
+    const d = evaluateBash("bash --norc -c 'rm -rf /'");
+    assertEquals(d.kind, "allow");
+    if (d.kind === "allow") {
+      assertEquals(d.message?.includes("Dangerous"), true);
+    }
+  },
+);
+
+Deno.test("evaluateBash B2: bash -c -- 'rm -rf /' (-- separator)", () => {
+  const d = evaluateBash("bash -c -- 'rm -rf /'");
+  assertEquals(d.kind, "allow");
+  if (d.kind === "allow") {
+    assertEquals(d.message?.includes("Dangerous"), true);
+  }
+});
+
+Deno.test("evaluateBash B2: eval 'rm' '-rf' '/' (multi-arg eval)", () => {
+  const d = evaluateBash("eval 'rm' '-rf' '/'");
+  assertEquals(d.kind, "allow");
+  if (d.kind === "allow") {
+    assertEquals(d.message?.includes("Dangerous"), true);
+  }
+});
+
+Deno.test("evaluateBash B2: command eval 'rm -rf /' (command prefix)", () => {
+  const d = evaluateBash("command eval 'rm -rf /'");
+  assertEquals(d.kind, "allow");
+  if (d.kind === "allow") {
+    assertEquals(d.message?.includes("Dangerous"), true);
+  }
+});
+
+Deno.test(
+  "evaluateBash B2: \\eval 'rm -rf /' (backslash-prefixed eval)",
+  () => {
+    const d = evaluateBash("\\eval 'rm -rf /'");
+    assertEquals(d.kind, "allow");
+    if (d.kind === "allow") {
+      assertEquals(d.message?.includes("Dangerous"), true);
+    }
+  },
+);
+
+Deno.test("evaluateBash B2: builtin eval 'rm -rf /' (builtin prefix)", () => {
+  const d = evaluateBash("builtin eval 'rm -rf /'");
+  assertEquals(d.kind, "allow");
+  if (d.kind === "allow") {
+    assertEquals(d.message?.includes("Dangerous"), true);
+  }
+});
+
+// --- N1: perl/ruby clustered -pi flags ---
+
+Deno.test("parseBashWriteCandidates N1: perl -pi -e captures file", () => {
+  const c = parseBashWriteCandidates("perl -pi -e 's/foo/bar/' file.txt");
+  assertEquals(c.includes("file.txt"), true);
+});
+
+Deno.test("parseBashWriteCandidates N1: ruby -pi -e captures file", () => {
+  const c = parseBashWriteCandidates(
+    "ruby -pi -e 'gsub(/foo/, \"bar\")' file.rb",
+  );
+  assertEquals(c.includes("file.rb"), true);
+});
+
+// --- N4: INPUT_REDIRECT_RE must not eat <<EOF or <<< heredoc/here-string ---
+
+Deno.test(
+  "parseBashWriteCandidates N4: patch <<<EOF does not strip heredoc tag",
+  () => {
+    // `patch <<<EOF` — the `<<<` is a here-string; the tag `EOF` is NOT a file
+    // path and must not be consumed as a redirect target. Because patch has no
+    // positional file argument here, the result should be empty.
+    const c = parseBashWriteCandidates("patch <<<EOF");
+    assertEquals(c.includes("EOF"), false);
+  },
+);
+
+Deno.test(
+  "parseBashWriteCandidates N4: bash <<EOF heredoc body not stripped",
+  () => {
+    // `bash <<EOF\nrm /tmp/y\nEOF` — the `<<EOF` opens a heredoc. The tag
+    // `EOF` is not a file argument. Nothing should be captured here.
+    const c = parseBashWriteCandidates("bash <<EOF\nrm /tmp/y\nEOF");
+    assertEquals(c.includes("EOF"), false);
+  },
+);
+
+Deno.test(
+  "parseBashWriteCandidates N4: single < redirect still captured",
+  () => {
+    // Sanity check: a regular input redirect is still stripped from positional
+    // parsing. patch -p1 file.ts < changes.patch should capture file.ts and
+    // NOT capture changes.patch (it's an input, not an output).
+    const c = parseBashWriteCandidates(
+      "patch -p1 src/main.ts < changes.patch",
+    );
+    assertEquals(c.includes("src/main.ts"), true);
+    assertEquals(c.includes("changes.patch"), false);
+  },
+);
+
+// --- N5: splitTopLevelSegments inside [[ ... =~ (foo|bar) ]] ---
+
+Deno.test(
+  "splitTopLevelSegments N5: bare ( inside [[ ]] does not swallow &&",
+  () => {
+    // [[ "$x" =~ (foo|bar) ]] && rm /tmp/y
+    // The `(` inside `[[ ]]` must NOT increment subshellDepth, so the `&&`
+    // after `]]` is correctly treated as a top-level separator and the second
+    // segment (`rm /tmp/y`) is parsed. The test verifies parseBashWriteCandidates
+    // finds no write candidate in the first segment and that the split happens.
+    const c = parseBashWriteCandidates(
+      '[[ "$x" =~ (foo|bar) ]] && sed -i "" "s/a/b/" file.txt',
+    );
+    // sed -i in the second segment (after &&) should be detected.
+    assertEquals(c.includes("file.txt"), true);
+  },
+);
+
+// --- N6: depth guard does not suppress literal scan ---
+
+Deno.test(
+  "evaluateBash N6: extreme nesting still flags literal rm -rf / at any depth",
+  () => {
+    // Build a command that is 10 levels of bash -c nesting. At depth > 5 the
+    // recursive descent stops — but the literal-substring scan should still
+    // fire for any string that reaches evaluateBash at any depth.
+    // We achieve this by passing the literal directly; the depth guard only
+    // gates the recursive descent, not the literal scan.
+    let cmd = "rm -rf /";
+    for (let i = 0; i < 10; i++) {
+      cmd = `bash -c '${cmd}'`;
+    }
+    const d = evaluateBash(cmd);
+    assertEquals(d.kind, "allow");
+    if (d.kind === "allow") {
+      assertEquals(d.message?.includes("Dangerous"), true);
     }
   },
 );

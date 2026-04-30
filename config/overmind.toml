@@ -61,3 +61,46 @@ room_ttl_seconds = 3600
 [skills]
 auto_inject = true
 project_overrides = true
+
+# Selects how the kernel turns dispatch requests into running agents.
+#
+# Two modes, with very different operational characteristics:
+#
+# - "subprocess" (default): the daemon spawns one `claude --print`
+#   subprocess per agent dispatch. Each worker is a full fresh Claude
+#   Code session that cold-starts a Node process, loads the CLI, runs
+#   MCP server handshakes, and only then begins its 6-step bootstrap
+#   protocol (room_join → inbox_read → role-skill → message_send →
+#   room_leave → exit). Works for ANY caller — CLI, CI, OpenCode, or
+#   Claude Code — because the daemon does the spawning.
+#
+#   Costs: ~150–300 MB RAM per worker, 60–90s of cold-start latency
+#   before the first model turn, full env inheritance into the worker
+#   (`Deno.env.toObject()` minus an allowlist), `--permission-mode
+#   bypassPermissions` on each worker (no permission inheritance from
+#   the lead), the user objective passed via stdin to avoid argv leak,
+#   and per-worker MCP server re-handshakes.
+#
+# - "client_side": the daemon QUEUES dispatch requests instead of
+#   spawning anything. The calling session must drain them via the
+#   `overmind_pending_dispatches` MCP tool and spawn each agent as a
+#   teammate via the calling session's own `Agent` tool, with
+#   `team_name=run_id`, `name=participant_id`, `subagent_type=<role>`.
+#   Teammates run in-process — no subprocess fork, no Node cold start,
+#   no MCP re-handshake — and inherit the parent session's permissions,
+#   env, and tool registry directly. ~0s effective bootstrap.
+#
+#   Requires: caller MUST be a Claude Code session with the experimental
+#   teams feature enabled (`CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`) AND
+#   the caller must run the drain-and-spawn protocol from the
+#   `delegate` skill. Headless callers (CLI, CI, OpenCode) cannot drain,
+#   so the queue would sit forever and the kernel would synthesise
+#   0/N handoffs after timeout — silent failure. That is why this is
+#   never the default.
+#
+# Override at runtime without editing this file:
+#   `OVERMIND_CLIENT_DISPATCHER=1` forces client_side
+#   `OVERMIND_CLIENT_DISPATCHER=0` forces subprocess
+#   (env var > config; useful for one-off testing.)
+[dispatcher]
+mode = "subprocess"

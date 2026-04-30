@@ -4,6 +4,8 @@ import {
   PersistenceCoordinator,
   readActiveModeState,
   readCapabilities,
+  resolveModeStatePath,
+  resolveRunStatePath,
 } from "./persistence.ts";
 import { Mode, type RunContext, RunState } from "./types.ts";
 import { MockBrainAdapter } from "./test_helpers/mock_brain.ts";
@@ -50,6 +52,125 @@ Deno.test("PersistenceCoordinator writes local state and capabilities", async ()
     await Deno.remove(tempDir, { recursive: true });
   }
 });
+
+Deno.test("readActiveModeState filters by session_id when provided", async () => {
+  const tempDir = await Deno.makeTempDir();
+  const brain = new MockBrainAdapter();
+  brain.connected = true;
+  const coordinator = new PersistenceCoordinator(tempDir, brain);
+
+  try {
+    // Two runs in different modes (so they hit different state files),
+    // owned by different sessions. SessionStart hooks must only see
+    // their own session's state.
+    const sessionA = "session-aaa";
+    const sessionB = "session-bbb";
+    await coordinator.startRun(
+      buildRunContext({
+        run_id: "run-A",
+        mode: Mode.Scout,
+        workspace: tempDir,
+        session_id: sessionA,
+      }),
+    );
+    await coordinator.startRun(
+      buildRunContext({
+        run_id: "run-B",
+        mode: Mode.Relay,
+        workspace: tempDir,
+        session_id: sessionB,
+      }),
+    );
+
+    const seenByA = await readActiveModeState(tempDir, sessionA);
+    const seenByB = await readActiveModeState(tempDir, sessionB);
+    const seenByC = await readActiveModeState(tempDir, "session-other");
+
+    assert(seenByA);
+    assertEquals(seenByA.run_id, "run-A");
+    assert(seenByB);
+    assertEquals(seenByB.run_id, "run-B");
+    // A session that owns nothing in this workspace gets nothing.
+    assertEquals(seenByC, null);
+  } finally {
+    await Deno.remove(tempDir, { recursive: true });
+  }
+});
+
+Deno.test(
+  "PersistenceCoordinator round-trips session_id through both run-state and mode-state files",
+  async () => {
+    const tempDir = await Deno.makeTempDir();
+    const brain = new MockBrainAdapter();
+    brain.connected = true;
+    const coordinator = new PersistenceCoordinator(tempDir, brain);
+
+    const sessionId = "session-abc";
+
+    try {
+      const ctx = buildRunContext({
+        run_id: "run-session-roundtrip",
+        mode: Mode.Scout,
+        workspace: tempDir,
+        session_id: sessionId,
+      });
+      await coordinator.startRun(ctx);
+
+      // Read the per-run state file directly from disk — bypasses all
+      // in-process readers so dropping session_id from createSnapshot
+      // would be caught here even if the filter tests stayed green.
+      const rawJson = await Deno.readTextFile(
+        resolveRunStatePath(tempDir, ctx.run_id),
+      );
+      const persisted = JSON.parse(rawJson);
+      assertEquals(persisted.session_id, sessionId);
+
+      // Read the per-mode state file directly from disk — this is the
+      // file that readActiveModeState actually consumes.
+      const modeRaw = await Deno.readTextFile(
+        resolveModeStatePath(tempDir, ctx.mode),
+      );
+      const modePersisted = JSON.parse(modeRaw);
+      assertEquals(modePersisted.session_id, sessionId);
+    } finally {
+      await Deno.remove(tempDir, { recursive: true });
+    }
+  },
+);
+
+Deno.test(
+  "readActiveModeState treats missing session_id as global match (backwards compat)",
+  async () => {
+    const tempDir = await Deno.makeTempDir();
+    const brain = new MockBrainAdapter();
+    brain.connected = true;
+    const coordinator = new PersistenceCoordinator(tempDir, brain);
+
+    try {
+      // Run started before the session_id field existed (or by a caller
+      // that doesn't carry one). Pre-existing runs should not silently
+      // black out resurrect in upgraded sessions.
+      await coordinator.startRun(
+        buildRunContext({
+          run_id: "run-legacy",
+          mode: Mode.Swarm,
+          workspace: tempDir,
+          // session_id intentionally omitted
+        }),
+      );
+
+      const seenWithFilter = await readActiveModeState(tempDir, "session-X");
+      assert(seenWithFilter);
+      assertEquals(seenWithFilter.run_id, "run-legacy");
+
+      const seenWithoutFilter = await readActiveModeState(tempDir);
+      assert(seenWithoutFilter);
+      assertEquals(seenWithoutFilter.run_id, "run-legacy");
+    } finally {
+      await Deno.remove(tempDir, { recursive: true });
+    }
+  },
+);
 
 Deno.test("PersistenceCoordinator marks run inactive on completion", async () => {
   const tempDir = await Deno.makeTempDir();

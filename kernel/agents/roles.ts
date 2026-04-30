@@ -13,7 +13,17 @@ export type BaseAgentRole =
   | "sentinel"
   | "guardian"
   | "style-reviewer"
-  | "gauge";
+  | "gauge"
+  | "weaver"
+  | "scribe"
+  | "evolver"
+  | "arbiter"
+  | "contrarian"
+  | "inquisitor"
+  | "lacuna"
+  | "neocortex"
+  | "oculus"
+  | "pruner";
 
 /** An agent role, optionally suffixed with a numeric instance index (e.g. "probe-2"). */
 export type AgentRole = BaseAgentRole | `${BaseAgentRole}-${number}`;

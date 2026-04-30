@@ -36,6 +36,14 @@ export interface PersistedRunState {
   last_error?: string;
   checkpoint_summary?: string;
   persistence: PersistedCapabilities;
+  /**
+   * Originating session id (Claude Code session_id, etc.). Optional for
+   * backwards compat — pre-existing run state files written before this
+   * field was introduced won't have it. Hooks that read active state
+   * with a session filter treat missing session_id as "global" (matches
+   * any session) so an upgrade doesn't silently black out resurrect.
+   */
+  session_id?: string;
 }
 
 export interface PersistedJournalEvent {
@@ -111,6 +119,7 @@ export async function readModeState(
 
 export async function readActiveModeState(
   workspace: string,
+  sessionId?: string,
 ): Promise<PersistedRunState | null> {
   const states = await Promise.all([
     readModeState(workspace, Mode.Scout),
@@ -125,8 +134,25 @@ export async function readActiveModeState(
     return null;
   }
 
-  active.sort((left, right) => right.updated_at.localeCompare(left.updated_at));
-  return active[0];
+  // Session-scoped filter: when sessionId is supplied, return only runs
+  // owned by that session. Treat runs missing session_id as "global"
+  // (matches any session) so pre-upgrade state files don't silently
+  // black out the resurrect path. When sessionId is omitted, return
+  // any active state — preserves the legacy contract for callers that
+  // legitimately want any active run (CLI tooling, resurrect scripts).
+  const filtered = sessionId === undefined
+    ? active
+    : active.filter((state) =>
+      state.session_id === undefined || state.session_id === sessionId
+    );
+  if (filtered.length === 0) {
+    return null;
+  }
+
+  filtered.sort((left, right) =>
+    right.updated_at.localeCompare(left.updated_at)
+  );
+  return filtered[0];
 }
 
 export class PersistenceCoordinator {
@@ -239,6 +265,7 @@ export class PersistenceCoordinator {
         updated_at: now,
         brain: this.brain.getConnectionStatus(),
       },
+      session_id: ctx.session_id,
     };
   }
 

@@ -167,6 +167,42 @@
           }
         ]
       }
+    ],
+    "TeammateIdle": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "deno run -A --quiet --config \"${CLAUDE_PLUGIN_ROOT}/../../deno.json\" \"${CLAUDE_PLUGIN_ROOT}/scripts/teammate-idle.ts\"",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "TaskCreated": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "deno run -A --quiet --config \"${CLAUDE_PLUGIN_ROOT}/../../deno.json\" \"${CLAUDE_PLUGIN_ROOT}/scripts/task-created.ts\"",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "TaskCompleted": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "deno run -A --quiet --config \"${CLAUDE_PLUGIN_ROOT}/../../deno.json\" \"${CLAUDE_PLUGIN_ROOT}/scripts/task-completed.ts\"",
+            "timeout": 5
+          }
+        ]
+      }
     ]
   }
 }

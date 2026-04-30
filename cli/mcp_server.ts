@@ -111,6 +111,12 @@ const TOOLS = [
             "Priority (0=critical, 1=high, 2=medium, 3=low, 4=backlog)",
           default: 4,
         },
+        dispatcher_mode: {
+          type: "string",
+          enum: ["subprocess", "client_side"],
+          description:
+            "Caller-declared dispatcher capability. 'client_side' means the caller will drain pending dispatches via overmind_pending_dispatches and spawn each agent as a teammate (Claude Code with experimental teams). 'subprocess' lets the daemon spawn `claude --print` subprocesses (works for any caller, slower bootstrap). Omit to use the daemon's default. The relay/swarm/scout/delegate skills set this automatically based on caller type.",
+        },
       },
       required: ["objective"],
     },
@@ -148,6 +154,21 @@ const TOOLS = [
         },
       },
       required: ["room_id"],
+    },
+  },
+  {
+    name: "overmind_pending_dispatches",
+    description:
+      "Return and drain pending agent dispatches for a run. Used by client-side orchestrators to retrieve queued agent spawn requests from the kernel.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        run_id: {
+          type: "string",
+          description: "Run ID whose pending dispatches should be drained",
+        },
+      },
+      required: ["run_id"],
     },
   },
 ];
@@ -458,6 +479,9 @@ export class MCPServer {
           String(args.objective ?? ""),
           (args.mode as string) ?? "scout",
           typeof args.priority === "number" ? args.priority : 4,
+          typeof args.dispatcher_mode === "string"
+            ? args.dispatcher_mode
+            : undefined,
           signal,
         );
       case "overmind_status":
@@ -469,6 +493,8 @@ export class MCPServer {
           String(args.room_id ?? ""),
           (args.display_name as string) ?? "Claude Code",
         );
+      case "overmind_pending_dispatches":
+        return await this.pendingDispatches(String(args.run_id ?? ""));
       default:
         throw new Error(`Unknown tool: ${name}`);
     }
@@ -478,6 +504,7 @@ export class MCPServer {
     objective: string,
     modeRaw: string,
     _priority: number,
+    dispatcherModeRaw: string | undefined,
     signal?: AbortSignal,
   ): Promise<unknown> {
     const trimmed = objective.trim();
@@ -488,6 +515,16 @@ export class MCPServer {
     if (!mode) {
       return { success: false, error: `invalid mode: ${modeRaw}` };
     }
+    let dispatcherMode: "subprocess" | "client_side" | undefined;
+    if (dispatcherModeRaw === "subprocess" || dispatcherModeRaw === "client_side") {
+      dispatcherMode = dispatcherModeRaw;
+    } else if (dispatcherModeRaw !== undefined) {
+      return {
+        success: false,
+        error:
+          `invalid dispatcher_mode: ${dispatcherModeRaw} (expected 'subprocess' or 'client_side')`,
+      };
+    }
 
     const runId = `run-${crypto.randomUUID()}`;
     const request: SocketRequest = {
@@ -496,6 +533,7 @@ export class MCPServer {
       mode,
       objective: trimmed,
       workspace: Deno.cwd(),
+      dispatcher_mode: dispatcherMode,
       config_override: { max_fix_cycles: mode === Mode.Scout ? 0 : 3 },
     };
 
@@ -641,6 +679,28 @@ export class MCPServer {
         "room_join over neural_link MCP not yet supported — use neural_link's MCP server directly",
     };
   }
+
+  private async pendingDispatches(runId: string): Promise<unknown> {
+    const trimmed = runId.trim();
+    if (!trimmed) {
+      return { success: false, error: "run_id is required" };
+    }
+    const request: SocketRequest = {
+      type: "drain_dispatches",
+      run_id: trimmed,
+    };
+    try {
+      const response = await this.delegateSink(request, this.config.baseDir);
+      const dispatches =
+        (response as unknown as Record<string, unknown>).dispatches ?? [];
+      return { run_id: trimmed, dispatches };
+    } catch (err) {
+      return {
+        success: false,
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
+  }
 }
 
 function parseMode(raw: string): Mode | null {
@@ -656,8 +716,96 @@ function parseMode(raw: string): Mode | null {
   }
 }
 
+/**
+ * Probe a process for liveness without sending a real signal. Mirrors
+ * `processExists` from kernel/daemon.ts but kept local to avoid pulling
+ * the daemon module's dependency graph into the MCP bridge. POSIX
+ * convention: signal 0 is a no-op probe — returns success if the target
+ * exists and is reachable, throws NotFound otherwise. Deno passes the
+ * signal value through to the syscall so this works the same here.
+ */
+function isProcessAlive(pid: number): boolean {
+  try {
+    // deno-lint-ignore no-explicit-any
+    Deno.kill(pid, 0 as any);
+    return true;
+  } catch (err) {
+    if (err instanceof Deno.errors.PermissionDenied) {
+      // Process exists, we just can't signal it. Still alive.
+      return true;
+    }
+    return false;
+  }
+}
+
+/**
+ * Pure factory for the parent-death watchdog. Exported for testability:
+ * the actual setInterval wiring has side effects (Deno.unrefTimer, real
+ * polling), but the decision logic — "when should I exit?" — is a thin
+ * loop over an injectable `probe`.
+ *
+ * The MCP bridge is launched by Claude Code as a stdio child process.
+ * When the launching window closes, the parent dies but the child is
+ * re-parented to init and lingers — orphan bridges accumulate across
+ * sessions. Periodically probing the original parent pid catches that
+ * case and exits cleanly so the next session starts from a clean slate.
+ *
+ * Set `OVERMIND_DISABLE_PARENT_WATCHDOG=1` to suppress (used by tests
+ * and by callers that explicitly want orphan-survival semantics).
+ */
+export interface ParentWatchdogOptions {
+  parentPid: number;
+  probe: (pid: number) => boolean;
+  onParentDeath: () => void;
+  /** PID at which we declare "already orphaned" without polling. Defaults to 1 (init). */
+  orphanedPid?: number;
+}
+
+export function startParentDeathWatchdog(
+  options: ParentWatchdogOptions,
+): { tick: () => void; isOrphaned: boolean } {
+  const { parentPid, probe, onParentDeath, orphanedPid = 1 } = options;
+  // Already orphaned — re-parented to init before we even started.
+  if (parentPid <= 0 || parentPid === orphanedPid) {
+    onParentDeath();
+    return { tick: () => {}, isOrphaned: true };
+  }
+  const tick = () => {
+    if (!probe(parentPid)) onParentDeath();
+  };
+  return { tick, isOrphaned: false };
+}
+
+/**
+ * Wire the parent-death watchdog into a real Deno timer. Called once
+ * from `runMcp()`. Uses `Deno.unrefTimer` so the interval doesn't keep
+ * the event loop alive on its own — the bridge exits naturally when
+ * stdin closes; the watchdog is a backstop for the case where stdin
+ * EOF doesn't arrive (Claude Code window closed without proper teardown).
+ */
+function installParentDeathWatchdog(intervalMs = 5_000): void {
+  if (Deno.env.get("OVERMIND_DISABLE_PARENT_WATCHDOG") === "1") return;
+  const parentPid = Deno.ppid;
+  const { tick, isOrphaned } = startParentDeathWatchdog({
+    parentPid,
+    probe: isProcessAlive,
+    onParentDeath: () => {
+      console.error(
+        `[overmind-mcp] parent pid ${parentPid} no longer reachable; exiting cleanly.`,
+      );
+      Deno.exit(0);
+    },
+  });
+  if (isOrphaned) return;
+  const handle = setInterval(tick, intervalMs);
+  // Don't let the watchdog by itself keep the event loop alive — the
+  // stdin-read loop is the bridge's lifetime authority.
+  Deno.unrefTimer(handle);
+}
+
 export async function runMcp(): Promise<void> {
   console.error("[overmind-mcp] Starting stdio MCP server...");
+  installParentDeathWatchdog();
   const server = new MCPServer(loadConfig());
   await server.run();
 }

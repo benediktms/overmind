@@ -2,12 +2,18 @@ import { OvermindError } from "./errors.ts";
 import { EventType, Mode } from "./types.ts";
 import type {
   CancelRequest,
+  DispatcherMode,
+  DrainDispatchesRequest,
   ModeRequest,
   SocketRequest,
   SocketResponse,
 } from "./types.ts";
 import { fromFileUrl } from "@std/path";
 import { Kernel } from "./kernel.ts";
+import { ConfigLoader } from "./config.ts";
+import type { AgentDispatcher } from "./agent_dispatcher.ts";
+import { ClaudeCodeDispatcher } from "./dispatchers/claude_code.ts";
+import { ClientSideDispatcher } from "./dispatchers/client_side.ts";
 import { LockRegistry } from "./locks.ts";
 import { OvermindHttpServer } from "./http.ts";
 
@@ -34,19 +40,50 @@ const HTTP_DEFAULT_PORT = 8080;
 const HTTP_DEFAULT_BIND = "127.0.0.1";
 const STARTUP_RETRY_ATTEMPTS = 5;
 const STARTUP_RETRY_INTERVAL_MS = 200;
+// Daemon-readiness probe gets a larger retry budget than the socket-connect
+// retry: a freshly spawned daemon has to boot Deno, load config, instantiate
+// the kernel, and connect adapters before its socket is responsive. 1s
+// (the previous shared budget) was tight enough to manifest as flaky
+// `Daemon socket timeout` errors in agent transcripts. 6s covers warm
+// hosts; cold hosts can override via env.
+const READINESS_RETRY_ATTEMPTS = 30;
+const READINESS_RETRY_INTERVAL_MS = 200;
 // Per-attempt cap on a single socket round-trip. Without this, a half-open
 // connection (daemon accepted the connect but never wrote a response — e.g.
 // stuck inside executeMode's synchronous prefix) hangs the client forever
 // because Deno.Conn.read has no inherent timeout. Crossed this and the conn
 // is force-closed, the read throws BadResource, and the retry loop kicks in.
-const SOCKET_REQUEST_TIMEOUT_MS = 5_000;
+//
+// Tunable via `OVERMIND_SOCKET_TIMEOUT_MS` env var: 5s is the lower-bound
+// default that's fine for steady-state, but the first request after auto-
+// spawn can take longer (Deno cold-start + adapter wiring). Bump to 15s in
+// CI/slow-host scenarios; floor at 1s to keep it sane.
+const DEFAULT_SOCKET_REQUEST_TIMEOUT_MS = 15_000;
+function readSocketRequestTimeoutMs(): number {
+  const raw = Deno.env.get("OVERMIND_SOCKET_TIMEOUT_MS");
+  if (!raw) return DEFAULT_SOCKET_REQUEST_TIMEOUT_MS;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed < 1_000) {
+    return DEFAULT_SOCKET_REQUEST_TIMEOUT_MS;
+  }
+  return Math.floor(parsed);
+}
+const SOCKET_REQUEST_TIMEOUT_MS = readSocketRequestTimeoutMs();
 const managedDaemonChildren = new Map<string, Deno.ChildProcess>();
+// In-process spawn coordination: when N concurrent callers in the same
+// Deno process all hit `ensureDaemonRunning` for the same baseDir, only
+// one of them spawns and waits — the others await the same Promise.
+// Without this, each caller would spawn its own daemon subprocess; only
+// one wins the OS-level advisory lock (held for the daemon's lifetime),
+// but the losers leak briefly until they fail and exit. Out-of-process
+// concurrency (two Deno processes racing) still produces multiple spawns
+// but is rare and self-corrects via the lifetime lock.
+const inflightSpawns = new Map<string, Promise<void>>();
 
 export async function ensureDaemonRunning(baseDir?: string): Promise<void> {
   const resolvedBaseDir = resolveBaseDir(baseDir);
   const socketPath = `${resolvedBaseDir}/${SOCKET_FILE_NAME}`;
   const pidPath = `${resolvedBaseDir}/${PID_FILE_NAME}`;
-  const lockPath = `${resolvedBaseDir}/${LOCK_FILE_NAME}`;
 
   await Deno.mkdir(resolvedBaseDir, { recursive: true });
 
@@ -54,45 +91,31 @@ export async function ensureDaemonRunning(baseDir?: string): Promise<void> {
     return;
   }
 
-  let lockHandle: Deno.FsFile | null = null;
-  for (let attempt = 1; attempt <= STARTUP_RETRY_ATTEMPTS; attempt += 1) {
-    if (await isDaemonAvailable(pidPath, socketPath)) {
-      return;
-    }
-
-    try {
-      lockHandle = await Deno.open(lockPath, { write: true, createNew: true });
-      break;
-    } catch (err) {
-      if (!(err instanceof Deno.errors.AlreadyExists)) {
-        throw err;
+  // In-process dedupe: if another caller in this process is already
+  // spawning a daemon for this baseDir, wait on their promise instead
+  // of spawning a redundant subprocess. Out-of-process concurrency is
+  // handled by the daemon-lifetime advisory lock (acquired in
+  // OvermindDaemon.start) — losers exit fast. The lockfile itself
+  // persists on disk; the OS releases the LOCK on process death, so
+  // crashed daemons never block the next startup the way the old
+  // create-with-O_EXCL pattern did.
+  let spawnPromise = inflightSpawns.get(resolvedBaseDir);
+  if (!spawnPromise) {
+    spawnPromise = (async () => {
+      try {
+        startDaemonProcess(resolvedBaseDir);
+        await waitForSocketReady(
+          socketPath,
+          READINESS_RETRY_ATTEMPTS,
+          READINESS_RETRY_INTERVAL_MS,
+        );
+      } finally {
+        inflightSpawns.delete(resolvedBaseDir);
       }
-      await sleep(STARTUP_RETRY_INTERVAL_MS);
-    }
+    })();
+    inflightSpawns.set(resolvedBaseDir, spawnPromise);
   }
-
-  if (!lockHandle) {
-    if (await isDaemonAvailable(pidPath, socketPath)) {
-      return;
-    }
-    throw new OvermindError("Timed out waiting for daemon startup lock");
-  }
-
-  try {
-    if (await isDaemonAvailable(pidPath, socketPath)) {
-      return;
-    }
-
-    startDaemonProcess(resolvedBaseDir);
-    await waitForSocketReady(
-      socketPath,
-      STARTUP_RETRY_ATTEMPTS,
-      STARTUP_RETRY_INTERVAL_MS,
-    );
-  } finally {
-    lockHandle.close();
-    await removeIfExists(lockPath);
-  }
+  await spawnPromise;
 }
 
 export async function sendToSocket(
@@ -185,6 +208,15 @@ export class OvermindDaemon {
   private signalHandlersRegistered = false;
   private lockRegistry: LockRegistry | null = null;
   private httpServer: OvermindHttpServer | null = null;
+  // Held-for-lifetime advisory file lock. Acquired in start(), released
+  // implicitly by the OS when the process dies (clean exit, SIGKILL,
+  // panic) or explicitly by close() in shutdown(). Replaces the older
+  // create-with-O_EXCL pattern that left stale lockfiles when daemons
+  // crashed and blocked the next startup until manually cleaned.
+  private daemonLockHandle: Deno.FsFile | null = null;
+  private get daemonLockPath(): string {
+    return `${this.baseDir}/${LOCK_FILE_NAME}`;
+  }
 
   private readonly sigintHandler = () => {
     void this.shutdown().finally(() => Deno.exit(0));
@@ -215,6 +247,15 @@ export class OvermindDaemon {
 
     await Deno.mkdir(this.baseDir, { recursive: true });
 
+    // Acquire the daemon-lifetime advisory file lock BEFORE doing any
+    // filesystem mutation that another live daemon would conflict on.
+    // If a peer daemon already holds the lock, this throws fast — no
+    // pidfile/socket are touched, the loser exits cleanly. The OS auto-
+    // releases the lock when whichever process holds it dies, so a
+    // crashed daemon never leaves the lock blocked (the lockfile itself
+    // can persist on disk; that's fine — re-opening it just re-locks).
+    await this.acquireDaemonLifetimeLock();
+
     await this.cleanupStalePidFile();
     await this.cleanupStaleSocketFile();
 
@@ -227,6 +268,66 @@ export class OvermindDaemon {
 
     if (this.enableHttp) {
       await this.startHttp();
+    }
+  }
+
+  /**
+   * Acquire an advisory exclusive lock on `daemon.lock`, held for this
+   * daemon's lifetime. Throws an OvermindError when another process
+   * already holds the lock — that's the "Daemon already running" signal.
+   *
+   * Implementation note: Deno's `FsFile.lock(true)` blocks until the
+   * lock is acquired. We don't want to block a CLI invocation forever,
+   * so we race against a short timeout. If the timeout wins, treat as
+   * "lock held by another live daemon". The pending lock acquisition is
+   * abandoned via closing the file handle, which cancels the underlying
+   * fcntl call.
+   */
+  private async acquireDaemonLifetimeLock(): Promise<void> {
+    const file = await Deno.open(this.daemonLockPath, {
+      read: true,
+      write: true,
+      create: true,
+    });
+    const LOCK_ACQUIRE_TIMEOUT_MS = 250;
+    let timeoutId: number | null = null;
+    let acquired = false;
+    try {
+      const lockPromise = file.lock(true).then(() => {
+        acquired = true;
+      });
+      const timeoutPromise = new Promise<void>((_, reject) => {
+        timeoutId = setTimeout(
+          () =>
+            reject(
+              new OvermindError(
+                `Daemon already running (advisory lock on ${this.daemonLockPath} held by another process)`,
+              ),
+            ),
+          LOCK_ACQUIRE_TIMEOUT_MS,
+        );
+      });
+      try {
+        await Promise.race([lockPromise, timeoutPromise]);
+      } finally {
+        // Clear the pending timeout regardless of which side won — left
+        // hanging, it leaks (Deno's test sanitizer flags it; production
+        // would just keep the event loop alive briefly).
+        if (timeoutId !== null) clearTimeout(timeoutId);
+      }
+      this.daemonLockHandle = file;
+    } catch (err) {
+      // Lock not acquired (or acquired-after-timeout). Either way close
+      // the FD — closing releases the lock if we did manage to grab it
+      // post-timeout, and frees the descriptor if we didn't.
+      try {
+        file.close();
+      } catch {
+        // already closed
+      }
+      // Mark intent so future readers can see we tried and abandoned.
+      void acquired;
+      throw err;
     }
   }
 
@@ -261,6 +362,19 @@ export class OvermindDaemon {
 
     await removeIfExists(this.pidPath);
     await removeIfExists(this.socketPath);
+
+    // Release the lifetime advisory lock by closing its FD. The OS would
+    // also release on process exit, but explicit close keeps the lock
+    // released even if this Daemon instance is restarted in-process
+    // (e.g. tests that start/stop multiple times in one Deno run).
+    if (this.daemonLockHandle) {
+      try {
+        this.daemonLockHandle.close();
+      } catch {
+        // already closed
+      }
+      this.daemonLockHandle = null;
+    }
   }
 
   getLockRegistry(): LockRegistry | null {
@@ -364,10 +478,29 @@ export class OvermindDaemon {
       }
       const parsed = this.parseRequest(requestRaw);
 
-      let response: SocketResponse;
+      let responseBody: string;
       if (parsed.request) {
-        if (parsed.request.type === "cancel_request") {
+        if (parsed.request.type === "drain_dispatches") {
+          const req = parsed.request as DrainDispatchesRequest;
+          // Drain semantics apply only to the client_side dispatcher —
+          // subprocess spawns inline and has no queue to drain. Querying
+          // the default via `getDispatcher()` was a regression after the
+          // dispatcher registry landed: when both dispatchers exist the
+          // default resolves to subprocess (when `claude` is on PATH),
+          // and subprocess has no `drainPending`, so callers received
+          // an empty list even when the run had legitimately queued
+          // dispatches via client_side. Always query client_side here.
+          const dispatcher = this.kernel?.getDispatcher?.("client_side");
+          const dispatches = dispatcher?.drainPending?.(req.run_id) ?? [];
+          responseBody = JSON.stringify({
+            status: "accepted",
+            run_id: req.run_id,
+            error: null,
+            dispatches,
+          }) + "\n";
+        } else if (parsed.request.type === "cancel_request") {
           const req = parsed.request as CancelRequest;
+          let response: SocketResponse;
           if (this.kernel) {
             const cancelled = this.kernel.cancelRun(req.run_id);
             response = cancelled
@@ -380,30 +513,79 @@ export class OvermindDaemon {
               error: "No kernel available",
             };
           }
+          responseBody = JSON.stringify(response) + "\n";
         } else {
           const req = parsed.request as ModeRequest;
-          response = { status: "accepted", run_id: req.run_id, error: null };
-          // Fire-and-forget mode execution if kernel is available
-          if (this.kernel) {
+          // Kernel-presence guard. A daemon process without a kernel
+          // (misconfigured embed, test harness, or future script-mode
+          // that hasn't wired runDaemon) cannot actually execute the
+          // request. Without this guard the response below would set
+          // status: "accepted" while the inner `if (this.kernel)`
+          // silently skipped executeMode — the exact silent-failure
+          // mode that this whole change exists to eliminate (oculus,
+          // team review).
+          if (!this.kernel) {
+            const response: SocketResponse = {
+              status: "error",
+              run_id: req.run_id,
+              error:
+                "kernel not available in this daemon process (no executor wired); " +
+                "the request would have been accepted but no work would run.",
+            };
+            responseBody = JSON.stringify(response) + "\n";
+          } else if (
+            // Loud-fail policy: if the caller asked for a dispatcher mode
+            // the daemon doesn't have, reject the request synchronously.
+            // The alternative is silent failure — `ClientSideDispatcher.
+            // dispatch` returns `launched: true` and queues, but the
+            // verify path then times out at 180s with no handoffs. That
+            // was the user-visible "delegation succeeded but nothing
+            // ran" symptom this fix exists to eliminate.
+            req.dispatcher_mode &&
+            !this.kernel.hasDispatcher(req.dispatcher_mode)
+          ) {
+            const response: SocketResponse = {
+              status: "error",
+              run_id: req.run_id,
+              error:
+                `dispatcher_mode '${req.dispatcher_mode}' is not available on this daemon ` +
+                `(install/configure the matching dispatcher, or omit dispatcher_mode to use the default).`,
+            };
+            responseBody = JSON.stringify(response) + "\n";
+          } else {
+            const response: SocketResponse = {
+              status: "accepted",
+              run_id: req.run_id,
+              error: null,
+            };
+            // Fire-and-forget mode execution. dispatcher_mode and
+            // session_id thread through executeMode so the kernel
+            // routes spawn requests through the matching dispatcher and
+            // persists the originating session for hook scoping.
             this.kernel.executeMode(
               req.mode,
               req.objective,
               req.workspace,
               req.run_id,
+              {
+                dispatcherMode: req.dispatcher_mode,
+                sessionId: req.session_id,
+              },
             ).catch((err) => {
               console.error(`Mode execution error for ${req.run_id}:`, err);
             });
+            responseBody = JSON.stringify(response) + "\n";
           }
         }
       } else {
-        response = {
+        const response: SocketResponse = {
           status: "error",
           run_id: "",
           error: parsed.error ?? "Invalid request",
         };
+        responseBody = JSON.stringify(response) + "\n";
       }
 
-      const responseBody = JSON.stringify(response) + "\n";
       await conn.write(new TextEncoder().encode(responseBody));
     } finally {
       conn.close();
@@ -423,6 +605,10 @@ export class OvermindDaemon {
     }
 
     if (this.isCancelRequest(payload)) {
+      return { request: payload, error: null };
+    }
+
+    if (this.isDrainDispatchesRequest(payload)) {
       return { request: payload, error: null };
     }
 
@@ -446,12 +632,36 @@ export class OvermindDaemon {
       typeof value.run_id === "string" && value.run_id.length > 0;
   }
 
+  private isDrainDispatchesRequest(
+    payload: unknown,
+  ): payload is DrainDispatchesRequest {
+    if (!payload || typeof payload !== "object") {
+      return false;
+    }
+    const value = payload as Record<string, unknown>;
+    return value.type === "drain_dispatches" &&
+      typeof value.run_id === "string" && value.run_id.length > 0;
+  }
+
   private isModeRequest(payload: unknown): payload is ModeRequest {
     if (!payload || typeof payload !== "object") {
       return false;
     }
 
     const value = payload as Record<string, unknown>;
+    if (
+      value.dispatcher_mode !== undefined &&
+      value.dispatcher_mode !== "subprocess" &&
+      value.dispatcher_mode !== "client_side"
+    ) {
+      return false;
+    }
+    if (
+      value.session_id !== undefined &&
+      typeof value.session_id !== "string"
+    ) {
+      return false;
+    }
     return value.type === "mode_request" &&
       typeof value.run_id === "string" && value.run_id.length > 0 &&
       typeof value.mode === "string" &&
@@ -601,10 +811,44 @@ export async function isDaemonReachable(baseDir?: string): Promise<boolean> {
   );
 }
 
+/**
+ * Decide how to invoke the daemon process given the running executable.
+ *
+ * Dual-use: `kernel/daemon.ts` runs both as a script (during dev, via
+ * `deno run kernel/daemon.ts`) and as a subcommand of the compiled
+ * `overmind` binary (in production — the MCP server is the compiled
+ * binary). The two invocation shapes need different argv:
+ *
+ *   dev (`execPath` ends with "deno")
+ *     → `[deno, "run", "--allow-all", daemonPath]`
+ *
+ *   compiled (anything else; e.g. `…/overmind`)
+ *     → `[overmind, "daemon", "start"]` (cli/overmind.ts routes this
+ *       to `runDaemon()` — same entry point as dev mode).
+ *
+ * Without this branching, auto-spawn from the compiled MCP server
+ * invoked `[overmind, "run", …]`, which fell through `runCli`'s
+ * default branch (prints help, exits 1). The socket never appeared,
+ * and the caller saw "Daemon socket was not ready" with no diagnostic
+ * indicating the spawn itself never actually started a daemon.
+ *
+ * Exported for testability — the spawn itself has side effects, but
+ * the argv decision is pure.
+ */
+export function selectDaemonSpawnArgs(
+  execPath: string,
+  daemonPath: string,
+): string[] {
+  const isDeno = execPath.endsWith("/deno") || execPath.endsWith("\\deno");
+  return isDeno ? ["run", "--allow-all", daemonPath] : ["daemon", "start"];
+}
+
 function startDaemonProcess(baseDir: string): void {
   const daemonPath = fromFileUrl(import.meta.url);
-  const command = new Deno.Command(Deno.execPath(), {
-    args: ["run", "--allow-all", daemonPath],
+  const exec = Deno.execPath();
+  const args = selectDaemonSpawnArgs(exec, daemonPath);
+  const command = new Deno.Command(exec, {
+    args,
     env: {
       HOME: Deno.env.get("HOME") ?? ".",
       OVERMIND_DAEMON_BASE_DIR: baseDir,
@@ -826,12 +1070,117 @@ export async function stopDaemon(
   return `Daemon did not exit within ${timeoutMs}ms (PID ${pid}); send SIGKILL manually if needed`;
 }
 
+/**
+ * Pick the daemon-default dispatcher. Precedence (highest first):
+ *   1. `OVERMIND_CLIENT_DISPATCHER` env var: "1" forces client_side, "0"
+ *      forces subprocess. Useful for one-off testing without editing the
+ *      toml.
+ *   2. `configMode` argument (loaded from `[dispatcher] mode` in
+ *      overmind.toml): "client_side" or "subprocess".
+ *   3. Default "subprocess" if neither is set.
+ *
+ * client_side returns a ClientSideDispatcher unconditionally — there is
+ * no precondition to verify on the daemon side. subprocess probes for
+ * the `claude` binary and falls back to NoopDispatcher (returns
+ * undefined) if it's missing.
+ *
+ * Note: as of the per-request `dispatcher_mode` change, the daemon also
+ * exposes BOTH dispatchers concurrently via `selectDispatchers` (plural)
+ * so callers can pick per-run. This single-result helper is kept for
+ * backwards compatibility with existing tests and for callers that want
+ * a one-shot default.
+ */
+export async function selectDispatcher(
+  configMode: "subprocess" | "client_side" = "subprocess",
+  env: (key: string) => string | undefined = (k) => Deno.env.get(k),
+): Promise<ClientSideDispatcher | ClaudeCodeDispatcher | undefined> {
+  const envOverride = env("OVERMIND_CLIENT_DISPATCHER");
+  let mode: "subprocess" | "client_side" = configMode;
+  if (envOverride === "1") {
+    console.warn(
+      "[overmind] OVERMIND_CLIENT_DISPATCHER=1 is deprecated; prefer passing dispatcher_mode: \"client_side\" per-request via overmind_delegate.",
+    );
+    mode = "client_side";
+  } else if (envOverride === "0") {
+    mode = "subprocess";
+  }
+
+  if (mode === "client_side") {
+    console.log(
+      "[overmind] using ClientSideDispatcher (in-process teammate spawning); caller must drain via overmind_pending_dispatches",
+    );
+    return new ClientSideDispatcher();
+  }
+  const subprocess = new ClaudeCodeDispatcher();
+  const ok = await subprocess.probeAvailability();
+  if (ok) {
+    return subprocess;
+  }
+  console.warn(
+    "[overmind] claude binary not found on PATH; falling back to NoopDispatcher (swarm/relay/scout will not actually spawn agents).",
+  );
+  return undefined;
+}
+
+/**
+ * Build the daemon's dispatcher registry — one entry per dispatcher kind
+ * the host can support. Result:
+ *   - `client_side` is always present (no preconditions).
+ *   - `subprocess` is present iff the `claude` binary is on PATH.
+ *
+ * The kernel is constructed with this registry plus a `defaultDispatcherMode`
+ * so caller-declared `dispatcher_mode` is honoured per-run, and requests
+ * that don't declare one fall back to the default. Loud-fail at the daemon
+ * request handler covers the case where a caller asks for a dispatcher
+ * the daemon doesn't have.
+ */
+export async function selectDispatchers(): Promise<{
+  dispatchers: Partial<Record<DispatcherMode, AgentDispatcher>>;
+  defaultMode: DispatcherMode;
+}> {
+  const dispatchers: Partial<Record<DispatcherMode, AgentDispatcher>> = {};
+  dispatchers.client_side = new ClientSideDispatcher();
+
+  const subprocess = new ClaudeCodeDispatcher();
+  const subprocessOk = await subprocess.probeAvailability();
+  if (subprocessOk) {
+    dispatchers.subprocess = subprocess;
+  } else {
+    console.warn(
+      "[overmind] claude binary not found on PATH; subprocess dispatcher unavailable. " +
+        "Caller-driven client_side requests still work; headless callers (CLI/CI) without dispatcher_mode set will fail loudly at request time.",
+    );
+  }
+
+  // Default is always "subprocess" when available — the only mode that
+  // works for any caller. When subprocess isn't available the daemon falls
+  // back to "client_side" as the default, but unspecifying callers in that
+  // posture will silently queue; the loud-fail at request handle time
+  // catches that. We keep the default field accurate so kernel.getDispatcher()
+  // without a mode still resolves to something.
+  const defaultMode: DispatcherMode = dispatchers.subprocess
+    ? "subprocess"
+    : "client_side";
+  return { dispatchers, defaultMode };
+}
+
 export async function runDaemon(): Promise<never> {
   // Attach a Kernel so the HTTP listener (on port 8080 by default) starts.
   // Without this the daemon only serves the Unix socket path; the MCP server
   // cannot reach the kernel because nothing is listening on localhost:8080
   // for /lock, /event, etc.
-  const kernel = new Kernel();
+  //
+  // Dispatcher policy: the daemon exposes BOTH dispatcher kinds (where
+  // available) and lets callers pick per-request via `dispatcher_mode`.
+  // The toml `[dispatcher] mode` setting is no longer load-bearing for
+  // caller correctness — it survives only as the env-var-overridable
+  // default surfaced via `selectDispatcher` for tests and one-off CLI
+  // invocations.
+  const { dispatchers, defaultMode } = await selectDispatchers();
+  const kernel = new Kernel({
+    dispatchers,
+    defaultDispatcherMode: defaultMode,
+  });
   await kernel.start();
   const daemon = new OvermindDaemon({
     baseDir: Deno.env.get("OVERMIND_DAEMON_BASE_DIR") ?? undefined,

@@ -34,6 +34,20 @@ export interface AgentDispatcher {
 
   /** Check if the dispatcher is available/configured. */
   isAvailable(): boolean;
+
+  /**
+   * Best-effort cancel of all in-flight agents belonging to a run. Called by
+   * the kernel when `cancelRun` fires. Implementations that have no
+   * resources to release (noop, mock) can ignore. Should not throw.
+   */
+  cancelRun?(runId: string): void;
+
+  /**
+   * Optional. Drain pending agent dispatches for a run. Implemented by
+   * ClientSideDispatcher; returns an empty array on dispatchers that spawn
+   * synchronously (subprocess, noop).
+   */
+  drainPending?(runId: string): AgentDispatchRequest[];
 }
 
 /**

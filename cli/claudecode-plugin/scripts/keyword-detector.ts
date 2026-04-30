@@ -164,12 +164,24 @@ Recording session completion. Summarize what was accomplished and close relevant
   if (modeMatch) {
     try {
       await ensureDaemonRunning();
+      const sessionId = data.session_id ?? data.sessionId;
       const request: SocketRequest = {
         type: "mode_request",
         run_id: `run-${crypto.randomUUID()}`,
         mode: modeMatch.mode as Mode,
         objective: prompt,
         workspace: data.cwd ?? data.directory ?? Deno.cwd(),
+        // The hook fires inside a Claude Code session — declare client_side
+        // capability so the daemon queues dispatches in-process rather than
+        // spawning subprocesses. The hook itself does not drive the drain
+        // protocol; the user-facing skill that consumes the keyword detection
+        // (delegate / relay-mode / swarm-mode / scout-mode) is responsible
+        // for calling overmind_pending_dispatches and spawning teammates.
+        dispatcher_mode: "client_side",
+        // Tag the run with the originating session so SessionStart/Stop
+        // hooks in other Claude Code sessions don't surface it as their
+        // own active state.
+        session_id: sessionId,
       };
       const response = await sendToSocket(request);
       daemonStatus = response.status === "accepted"
@@ -183,8 +195,7 @@ Recording session completion. Summarize what was accomplished and close relevant
   const additionalContext =
     `[OVERMIND KEYWORD DETECTED: ${matches.map((m) => m.mode.toUpperCase()).join(", ")}]\n\n` +
     modeBlocks.join("\n\n---\n\n") +
-    daemonStatus +
-    `\n\n---\nUser request: ${prompt}`;
+    daemonStatus;
 
   console.log(createHookOutput(additionalContext));
 }

@@ -20,6 +20,31 @@ const PROJECT_CONFIG_PATHS = [
   ".overmind/overmind.toml",
 ];
 
+/**
+ * Recursively convert snake_case keys to camelCase. Only walks plain
+ * objects — arrays, dates, primitives are returned as-is. Used at the
+ * TOML→TS boundary because the TS config types are camelCase but TOML
+ * idiomatically uses snake_case (`http_url`, `room_ttl_seconds`).
+ *
+ * Idempotent: keys already in camelCase pass through unchanged.
+ */
+function camelizeKeys(value: unknown): unknown {
+  if (value === null || typeof value !== "object") return value;
+  if (Array.isArray(value)) return value.map(camelizeKeys);
+  // Skip Date and other non-plain objects. parse() from @std/toml only
+  // returns plain objects, arrays, primitives, and Dates.
+  if (Object.prototype.toString.call(value) !== "[object Object]") return value;
+  const out: Record<string, unknown> = {};
+  for (const [key, val] of Object.entries(value as Record<string, unknown>)) {
+    out[snakeToCamel(key)] = camelizeKeys(val);
+  }
+  return out;
+}
+
+function snakeToCamel(key: string): string {
+  return key.replace(/_([a-zA-Z0-9])/g, (_, c: string) => c.toUpperCase());
+}
+
 export class ConfigLoader {
   private loaded = false;
   private cfg: OvermindConfig | null = null;
@@ -39,7 +64,14 @@ export class ConfigLoader {
     try {
       if (!await exists(path)) return null;
       const content = await Deno.readTextFile(path);
-      return parse(content) as Partial<OvermindConfig>;
+      const parsed = parse(content);
+      // TOML idiomatically uses snake_case keys; the TS types declare
+      // camelCase. Convert at the load boundary so the rest of the loader
+      // (defaults, merge, validate) speaks one dialect. Without this the
+      // user's `http_url` lands alongside the default's `httpUrl` rather
+      // than overriding it, and `httpUrl` is then absent after a wholesale
+      // section override — the adapter sees undefined and crashes.
+      return camelizeKeys(parsed) as Partial<OvermindConfig>;
     } catch {
       return null;
     }
@@ -70,7 +102,7 @@ export class ConfigLoader {
       },
       agents: {},
       brain: { enabled: true, brainName: "overmind", taskPrefix: "OVR" },
-      neural_link: {
+      neuralLink: {
         enabled: true,
         // Base URL only — the adapter appends `/health` and `/mcp` itself.
         // Existing configs that bake `/mcp` in still work via the
@@ -79,6 +111,12 @@ export class ConfigLoader {
         roomTtlSeconds: 3600,
       },
       skills: { autoInject: true, projectOverrides: true },
+      // Default to subprocess so any caller (CLI, CI, OpenCode) Just Works.
+      // Setting to "client_side" requires the caller to drain dispatches
+      // via overmind_pending_dispatches and spawn teammates itself; that's
+      // safe for Claude Code with experimental teams enabled but silently
+      // fails for headless callers, so it's never the default.
+      dispatcher: { mode: "subprocess" },
     } as OvermindConfig;
 
     if (!base && !override) return defaults;
@@ -94,8 +132,9 @@ export class ConfigLoader {
       "modes",
       "agents",
       "brain",
-      "neural_link",
+      "neuralLink",
       "skills",
+      "dispatcher",
     ];
     for (const key of required) {
       if (!(key in cfg)) {
@@ -110,9 +149,10 @@ export class ConfigLoader {
       mode: overmindCfg.modes.default,
       agents: overmindCfg.agents,
       brain: overmindCfg.brain,
-      neuralLink: overmindCfg.neural_link,
+      neuralLink: overmindCfg.neuralLink,
       skills: overmindCfg.skills,
       modes: overmindCfg.modes,
+      dispatcher: overmindCfg.dispatcher,
     };
   }
 }

@@ -22,21 +22,16 @@ import {
 } from "./lib/read_hash_cache.ts";
 import { isHarnessEnabled } from "./lib/harness_config.ts";
 import { tryAcquire, type TryAcquireResult } from "./lib/lock_client.ts";
+import type { BaseHookData } from "./lib/hook_data.ts";
 
 export { isHarnessEnabled };
+export type { BaseHookData };
 
-export interface HookData {
-  tool_name?: string;
-  toolName?: string;
-  tool_input?: Record<string, unknown>;
-  toolInput?: Record<string, unknown>;
-  cwd?: string;
-  directory?: string;
-  // CC's hook payload identity. Mirrors `post-tool-verifier.ts:35-37` and
-  // the M1 hash-cache identity tuple. `agentId` (subagents) and `agent_type`
-  // (some payload shapes) are equivalent — see `subagent-coordinator.ts`.
-  session_id?: string;
-  sessionId?: string;
+// PreToolUse-specific hook payload. Extends BaseHookData with the agent
+// identity fields used for the cross-agent lock check (M4).
+// CC's hook payload identity. `agentId` (subagents) and `agent_type`
+// (some payload shapes) are equivalent — see `subagent-coordinator.ts`.
+export interface HookData extends BaseHookData {
   agentId?: string;
   agent_type?: string;
 }
@@ -75,12 +70,58 @@ function outputDeny(reason: string): void {
   console.log(JSON.stringify({ continue: false, stopReason: reason }));
 }
 
-export function evaluateBash(command: string): Decision {
+// Normalize a command string before danger-pattern matching (B1):
+// 1. Remove backslash-newline continuations (\ at end of line).
+// 2. Outside single-quoted regions, unescape \<char> → <char>
+//    (catches "rm -rf \/").
+// 3. Collapse runs of whitespace to a single space (catches "rm  -rf /").
+// Single-quoted regions are passed through verbatim per POSIX quoting rules.
+function normalizeDangerInput(s: string): string {
+  // Step 1: strip backslash-newline continuations.
+  let r = s.replace(/\\\n/g, " ");
+
+  // Step 2: unescape backslash sequences outside single-quoted regions.
+  let out = "";
+  let inSingle = false;
+  for (let i = 0; i < r.length; i++) {
+    const ch = r[i];
+    if (ch === "'" && !inSingle) {
+      inSingle = true;
+      out += ch;
+      continue;
+    }
+    if (ch === "'" && inSingle) {
+      inSingle = false;
+      out += ch;
+      continue;
+    }
+    if (!inSingle && ch === "\\" && i + 1 < r.length) {
+      // Skip the backslash, keep the next character as-is.
+      out += r[++i];
+      continue;
+    }
+    out += ch;
+  }
+  r = out;
+
+  // Step 3: collapse whitespace runs.
+  return r.replace(/\s+/g, " ");
+}
+
+export function evaluateBash(command: string, _depth = 0): Decision {
+  // Normalize before matching so whitespace mutations and escape tricks don't
+  // evade the literal-substring scan (B1).
+  const normalized = normalizeDangerInput(command);
+
+  // Direct danger patterns run FIRST at every depth — the depth guard below
+  // only gates the more-expensive recursive descent, not this check (N6).
+  // Applied to the normalized command string so whitespace/escape mutations
+  // are caught (B1, N6).
   if (
-    command.includes("rm -rf /") ||
-    command.includes("rm -f /") ||
-    command.includes(":(){ :|:& };:") ||
-    command.includes("> /dev/sda")
+    normalized.includes("rm -rf /") ||
+    normalized.includes("rm -f /") ||
+    normalized.includes(":(){ :|:& };:") ||
+    normalized.includes("> /dev/sda")
   ) {
     return {
       kind: "allow",
@@ -88,6 +129,83 @@ export function evaluateBash(command: string): Decision {
         "[OVERMIND SAFETY] Dangerous command detected. Verify this is intentional before executing.",
     };
   }
+
+  // Guard against infinite recursion in adversarial inputs. Only the recursive
+  // descent is gated — the literal scan above already ran (N6).
+  if (_depth > 5) return { kind: "allow" };
+
+  // Recursive check: detect `bash -c '...'`, `sh -c '...'`, `eval '...'`, and
+  // backtick-wrapped commands. These wrappers allow an agent to embed a
+  // dangerous inner command that the top-level scan would otherwise miss.
+  // We extract the inner body and re-run evaluateBash on it.
+  for (const segment of splitTopLevelSegments(normalized)) {
+    const tokens = tokenizeQuoteAware(segment.trim());
+    if (tokens.length === 0) continue;
+
+    // bash -c <body> / sh -c <body>
+    // Handles:
+    //   bash -c 'cmd'           (position +1)
+    //   bash -ic 'cmd'          (clustered flags — B2)
+    //   bash --norc -c 'cmd'    (long flags before -c — B2)
+    //   bash -c -- 'cmd'        (-- separator — B2)
+    const shellIdx = tokens.findIndex(
+      (t) =>
+        t === "bash" || t === "sh" || t.endsWith("/bash") || t.endsWith("/sh"),
+    );
+    if (shellIdx > -1) {
+      // Walk all tokens after the shell binary looking for -c anywhere in the
+      // flag walk (not only position +1). Clustered flags like `-ic` also
+      // count. Stop scanning once we hit a non-flag or `--`.
+      let cIdx = -1;
+      for (let i = shellIdx + 1; i < tokens.length; i++) {
+        const t = tokens[i];
+        if (t === "--") {
+          // `--` ends flag processing; body is the next token.
+          cIdx = i; // treat `--` position so body = tokens[cIdx+1]
+          break;
+        }
+        if (t.startsWith("-") && t.includes("c")) {
+          cIdx = i;
+          break;
+        }
+        if (!t.startsWith("-")) break; // non-flag positional ends the flag walk
+      }
+      if (cIdx > -1) {
+        const bodyTok = tokens[cIdx + 1];
+        if (bodyTok) {
+          const inner = evaluateBash(stripQuotes(bodyTok), _depth + 1);
+          if (inner.kind === "allow" && inner.message) return inner;
+        }
+      }
+    }
+
+    // eval <body> — accept `eval` anywhere in the token list, not only at
+    // index 0. Also handles `command eval`, `\eval`, `builtin eval` (B2).
+    const evalIdx = tokens.findIndex((t) => {
+      // Strip a leading backslash (e.g. `\eval`) before comparing so `\eval`
+      // also matches.
+      const bare = t.replace(/^\\/, "").split("/").pop()!;
+      return bare === "eval";
+    });
+    if (evalIdx > -1 && tokens.length > evalIdx + 1) {
+      // De-quote each arg individually then join with a space so multi-arg
+      // forms like `eval 'rm' '-rf' '/'` produce `rm -rf /` (B2).
+      const body = tokens
+        .slice(evalIdx + 1)
+        .map(stripQuotes)
+        .join(" ");
+      const inner = evaluateBash(body, _depth + 1);
+      if (inner.kind === "allow" && inner.message) return inner;
+    }
+
+    // Backtick command substitution: extract content between first pair of ``.
+    const backtickMatch = segment.match(/`([^`]+)`/);
+    if (backtickMatch) {
+      const inner = evaluateBash(backtickMatch[1], _depth + 1);
+      if (inner.kind === "allow" && inner.message) return inner;
+    }
+  }
+
   return { kind: "allow" };
 }
 
@@ -136,41 +254,104 @@ function stripQuotes(s: string): string {
 }
 
 // Split a command on top-level shell separators (|, ||, &, &&, ;) so that
-// `sed -i ... file && other` doesn't pull tokens past the `&&`. Quote-aware.
+// `sed -i ... file && other` doesn't pull tokens past the `&&`. Quote-aware
+// and $() / backtick nesting-aware: separators inside command substitutions
+// are never treated as top-level splits.
+//
+// N5: also tracks `[[ ... ]]` test-bracket context. Bare `(` inside a `[[`
+// block (e.g. in a regex like `[[ x =~ (foo|bar) ]]`) must NOT increment
+// subshellDepth — otherwise the `]]` that closes the test-bracket would leave
+// a phantom open depth and subsequent `&&` would be swallowed.
 function splitTopLevelSegments(command: string): string[] {
   const segments: string[] = [];
   let buf = "";
   let inSingle = false;
   let inDouble = false;
+  // Tracks $( ... ) nesting depth. Every `$(` increments, every unquoted `)`
+  // at depth > 0 decrements. Backtick substitutions use a separate flag
+  // because they don't nest (a second backtick always closes the first).
+  let subshellDepth = 0;
+  let inBacktick = false;
+  // Tracks whether we are inside a [[ ... ]] test-bracket context (N5).
+  // Only the outermost `[[` opens the context; nested `[[` is unusual but
+  // we track depth to handle it correctly.
+  let testBracketDepth = 0;
   for (let i = 0; i < command.length; i++) {
     const ch = command[i];
-    if (!inDouble && ch === "'") {
+    if (!inDouble && !inBacktick && ch === "'") {
       inSingle = !inSingle;
       buf += ch;
       continue;
     }
-    if (!inSingle && ch === '"') {
+    if (!inSingle && !inBacktick && ch === '"') {
       inDouble = !inDouble;
       buf += ch;
       continue;
     }
-    if (!inSingle && !inDouble) {
-      // Noclobber `>|` is a single redirect operator, not a pipe. Detect
-      // by looking at the most recent non-whitespace char; if it's `>`,
-      // keep the `|` attached to the buffer.
-      if (ch === "|") {
-        const prevNonSpace = buf.replace(/\s+$/, "");
-        if (prevNonSpace.endsWith(">")) {
+    // Backtick command substitution: toggle outside of single-quotes.
+    if (!inSingle && !inDouble && ch === "`") {
+      inBacktick = !inBacktick;
+      buf += ch;
+      continue;
+    }
+    if (!inSingle && !inDouble && !inBacktick) {
+      // Detect `[[` (opening test-bracket) and `]]` (closing test-bracket).
+      if (ch === "[" && command[i + 1] === "[") {
+        testBracketDepth++;
+        buf += "[[";
+        i++; // consume second `[`
+        continue;
+      }
+      if (ch === "]" && command[i + 1] === "]") {
+        if (testBracketDepth > 0) testBracketDepth--;
+        buf += "]]";
+        i++; // consume second `]`
+        continue;
+      }
+
+      // $( opens a subshell — track depth so inner `&&`/`|`/`;` are not splits.
+      if (ch === "$" && command[i + 1] === "(") {
+        subshellDepth++;
+        buf += ch;
+        continue;
+      }
+      if (ch === "(") {
+        // A bare `(` also opens a subshell context (subshell grouping), but
+        // NOT when we are inside a [[ ... ]] test-bracket — there `(` is part
+        // of a regex alternation pattern and must not affect split depth (N5).
+        if (testBracketDepth === 0) subshellDepth++;
+        buf += ch;
+        continue;
+      }
+      if (ch === ")") {
+        if (subshellDepth > 0 && testBracketDepth === 0) {
+          subshellDepth--;
           buf += ch;
           continue;
         }
-      }
-      if (ch === "|" || ch === "&" || ch === ";") {
-        if (buf.trim()) segments.push(buf);
-        buf = "";
-        // Skip the second char of "||" or "&&".
-        if (command[i + 1] === ch) i++;
+        // Unmatched `)` or `)` inside [[ ]] — pass through.
+        buf += ch;
         continue;
+      }
+      // Only split on separators at depth 0 (not inside a $() or backtick).
+      if (subshellDepth === 0 && testBracketDepth === 0) {
+        // Noclobber `>|` is a single redirect operator, not a pipe. Detect
+        // by looking at the most recent non-whitespace char; if it's `>`,
+        // keep the `|` attached to the buffer.
+        if (ch === "|") {
+          const prevNonSpace = buf.replace(/\s+$/, "");
+          if (prevNonSpace.endsWith(">")) {
+            buf += ch;
+            continue;
+          }
+        }
+        if (ch === "|" || ch === "&" || ch === ";") {
+          if (buf.trim()) segments.push(buf);
+          buf = "";
+          // Skip the second char of "||" or "&&".
+          if (command[i + 1] === ch) i++;
+          continue;
+        }
       }
     }
     buf += ch;
@@ -186,6 +367,16 @@ function splitTopLevelSegments(command: string): string[] {
 // the fail-open warn-not-block contract.
 const REDIRECT_RE =
   /(?:^|\s)(?:1|2|&)?>{1,2}\|?\s*("([^"]+)"|'([^']+)'|([^\s|;&<>()]+))/g;
+
+// Input redirect: `< file` or `0< file`. Strip these so that `patch -p1
+// src/main.ts < changes.patch` doesn't count `changes.patch` as a positional
+// argument to patch. Capture group 1 holds the path (unused — we only strip).
+//
+// N4: the lookbehind `(?<!<)` prevents matching `<<` (heredoc) and `<<<`
+// (here-string) forms, which should be left intact in the segment so that
+// parsers downstream don't accidentally treat heredoc tag names as file paths.
+const INPUT_REDIRECT_RE =
+  /(?:^|\s)(?:0)?(?<!<)<(?!<)\s*("([^"]+)"|'([^']+)'|([^\s|;&<>()]+))/g;
 
 function isSedExpressionLike(token: string): boolean {
   // Crude heuristic: sed substitution / transliteration / address forms.
@@ -208,12 +399,44 @@ function tokenIsAwkCommand(token: string): boolean {
   return token === "awk" || token.endsWith("/awk");
 }
 
+function tokenIsCpCommand(token: string): boolean {
+  return token === "cp" || token.endsWith("/cp");
+}
+
+function tokenIsMvCommand(token: string): boolean {
+  return token === "mv" || token.endsWith("/mv");
+}
+
+function tokenIsDdCommand(token: string): boolean {
+  return token === "dd" || token.endsWith("/dd");
+}
+
+function tokenIsPerlCommand(token: string): boolean {
+  return token === "perl" || token.endsWith("/perl");
+}
+
+function tokenIsRubyCommand(token: string): boolean {
+  return token === "ruby" || token.endsWith("/ruby");
+}
+
+function tokenIsPatchCommand(token: string): boolean {
+  return token === "patch" || token.endsWith("/patch");
+}
+
+function tokenIsTruncateCommand(token: string): boolean {
+  return token === "truncate" || token.endsWith("/truncate");
+}
+
+function tokenIsInstallCommand(token: string): boolean {
+  return token === "install" || token.endsWith("/install");
+}
+
 // Parse a Bash command for tokens that look like file writes the harness
-// won't see (sed -i, awk -i inplace, output redirection, tee). Permissive on
-// purpose: we surface a warning, never block, so over-matching is preferred
-// to under-matching. False positives are noisy; false negatives let stale
-// writes through silently. Known limitations: no `bash -c '...'` recursion,
-// no $() / backtick nesting tracking — both documented in ovr-396.23.1.
+// won't see (sed -i, awk -i inplace, output redirection, tee, cp, mv, dd,
+// perl -i, ruby -i, patch, truncate, install). Permissive on purpose: we
+// surface a warning, never block, so over-matching is preferred to under-
+// matching. False positives are noisy; false negatives let stale writes
+// through silently.
 export function parseBashWriteCandidates(command: string): string[] {
   const found = new Set<string>();
   const addCandidate = (raw: string) => {
@@ -225,10 +448,13 @@ export function parseBashWriteCandidates(command: string): string[] {
   };
 
   for (const segment of splitTopLevelSegments(command)) {
-    // Strip redirect sequences before sed/awk file detection so that
-    // `sed -i 'expr' file.txt > /dev/null` doesn't mis-pick `/dev/null`
-    // as the sed file. Redirects are still captured separately below.
-    const segmentNoRedir = segment.replace(REDIRECT_RE, "");
+    // Strip redirect sequences before file detection so that neither output
+    // redirects (`> /dev/null`) nor input redirects (`< patch.diff`) are
+    // mistaken for positional file arguments. Output redirects are still
+    // captured separately below via matchAll(REDIRECT_RE).
+    const segmentNoRedir = segment
+      .replace(REDIRECT_RE, "")
+      .replace(INPUT_REDIRECT_RE, "");
     const tokens = tokenizeQuoteAware(segmentNoRedir);
 
     // sed [-i|--in-place ...] <file>. Detection accepts `sed` or any
@@ -268,6 +494,191 @@ export function parseBashWriteCandidates(command: string): string[] {
           addCandidate(t);
           break;
         }
+      }
+    }
+
+    // cp <src> <dest> — the destination (last non-flag token) is the write target.
+    // cp -r src/ dest/ and cp -f src dest are both captured via the same rule.
+    // cp -i (interactive) is the safe flag — we still capture the dest since the
+    // file may be overwritten.
+    const cpIdx = tokens.findIndex(tokenIsCpCommand);
+    if (cpIdx > -1) {
+      const args = tokens.slice(cpIdx + 1).filter((t) => !t.startsWith("-"));
+      // cp requires at least two positional args: source(s) + destination.
+      // The last positional arg is the destination.
+      if (args.length >= 2) {
+        addCandidate(args[args.length - 1]);
+      }
+    }
+
+    // mv <src> <dest> — same shape as cp: last positional arg is the destination.
+    const mvIdx = tokens.findIndex(tokenIsMvCommand);
+    if (mvIdx > -1) {
+      const args = tokens.slice(mvIdx + 1).filter((t) => !t.startsWith("-"));
+      if (args.length >= 2) {
+        addCandidate(args[args.length - 1]);
+      }
+    }
+
+    // dd: look for of=<file> among tokens.
+    const ddIdx = tokens.findIndex(tokenIsDdCommand);
+    if (ddIdx > -1) {
+      for (let i = ddIdx + 1; i < tokens.length; i++) {
+        const t = stripQuotes(tokens[i]);
+        if (t.startsWith("of=")) {
+          addCandidate(t.slice(3));
+        }
+      }
+    }
+
+    // perl -i ... <file> / perl -i.bak ... <file>
+    // The `-i` flag (with or without an extension suffix) marks in-place editing.
+    // Also detects clustered forms like `-pi` (N1).
+    // The file is the last non-flag, non-program token.
+    const perlIdx = tokens.findIndex(tokenIsPerlCommand);
+    if (perlIdx > -1) {
+      const hasInPlace = tokens.some(
+        (t, i) =>
+          i > perlIdx &&
+          // anchored: -i or -i.bak (extension suffix)
+          (/^-i/.test(t) ||
+            // clustered: -pi, -pie, etc. — contains `i` in the short flag cluster
+            (t.startsWith("-") && !t.startsWith("--") && t.includes("i"))),
+      );
+      if (hasInPlace) {
+        // Walk backward: skip flags and -e program strings; first plain token is the file.
+        let skipNext = false;
+        for (let i = tokens.length - 1; i > perlIdx; i--) {
+          const t = tokens[i];
+          if (skipNext) {
+            skipNext = false;
+            continue;
+          }
+          if (t === "-e" || t === "-E") {
+            skipNext = true;
+            continue;
+          }
+          if (t.startsWith("-")) continue;
+          if (t.startsWith("'") || t.startsWith('"')) continue;
+          addCandidate(t);
+          break;
+        }
+      }
+    }
+
+    // ruby -i ... <file> — same shape as perl -i.
+    // Also detects clustered forms like `-pi` (N1).
+    const rubyIdx = tokens.findIndex(tokenIsRubyCommand);
+    if (rubyIdx > -1) {
+      const hasInPlace = tokens.some(
+        (t, i) =>
+          i > rubyIdx &&
+          (/^-i/.test(t) ||
+            (t.startsWith("-") && !t.startsWith("--") && t.includes("i"))),
+      );
+      if (hasInPlace) {
+        let skipNext = false;
+        for (let i = tokens.length - 1; i > rubyIdx; i--) {
+          const t = tokens[i];
+          if (skipNext) {
+            skipNext = false;
+            continue;
+          }
+          if (t === "-e" || t === "-E") {
+            skipNext = true;
+            continue;
+          }
+          if (t.startsWith("-")) continue;
+          if (t.startsWith("'") || t.startsWith('"')) continue;
+          addCandidate(t);
+          break;
+        }
+      }
+    }
+
+    // patch [-p<n>] [-i <patchfile>] [<file>]
+    // patch modifies files in place. The target file is the last non-flag arg,
+    // or the file listed inside the patch (we can't know that statically, so we
+    // capture the last positional token if present).
+    const patchIdx = tokens.findIndex(tokenIsPatchCommand);
+    if (patchIdx > -1) {
+      // Collect positional args (non-flags, skipping the arg after -i/-F/-r/-o).
+      const skipFlagArgs = new Set(["-i", "-F", "-r", "-o", "-b", "-z"]);
+      const positionals: string[] = [];
+      let skipNext = false;
+      for (let i = patchIdx + 1; i < tokens.length; i++) {
+        const t = tokens[i];
+        if (skipNext) {
+          skipNext = false;
+          continue;
+        }
+        if (skipFlagArgs.has(t)) {
+          skipNext = true;
+          continue;
+        }
+        if (t.startsWith("-")) continue;
+        positionals.push(t);
+      }
+      if (positionals.length > 0) {
+        addCandidate(positionals[positionals.length - 1]);
+      }
+    }
+
+    // truncate -s <size> <file> — truncates (overwrites) a file to a given size.
+    const truncIdx = tokens.findIndex(tokenIsTruncateCommand);
+    if (truncIdx > -1) {
+      const args = tokens.slice(truncIdx + 1);
+      let skipNext = false;
+      for (let i = 0; i < args.length; i++) {
+        const t = args[i];
+        if (skipNext) {
+          skipNext = false;
+          continue;
+        }
+        if (t === "-s" || t === "--size" || t === "-c" || t === "--no-create") {
+          if (t === "-s" || t === "--size") skipNext = true;
+          continue;
+        }
+        if (t.startsWith("-")) continue;
+        addCandidate(t);
+      }
+    }
+
+    // install <src> <dest> — copies src to dest, creating the destination.
+    // The last positional arg is the destination (file or directory).
+    const installIdx = tokens.findIndex(tokenIsInstallCommand);
+    if (installIdx > -1) {
+      // Flags that consume a following argument.
+      const installFlagArgs = new Set([
+        "-g",
+        "--group",
+        "-m",
+        "--mode",
+        "-o",
+        "--owner",
+        "-t",
+        "--target-directory",
+        "-S",
+        "--suffix",
+      ]);
+      const positionals: string[] = [];
+      let skipNext = false;
+      for (let i = installIdx + 1; i < tokens.length; i++) {
+        const t = tokens[i];
+        if (skipNext) {
+          skipNext = false;
+          continue;
+        }
+        if (installFlagArgs.has(t)) {
+          skipNext = true;
+          continue;
+        }
+        if (t.startsWith("-")) continue;
+        positionals.push(t);
+      }
+      // Need at least src + dest.
+      if (positionals.length >= 2) {
+        addCandidate(positionals[positionals.length - 1]);
       }
     }
 
@@ -368,8 +779,12 @@ export async function evaluateHarness(
   const home = opts.home ?? Deno.env.get("HOME") ?? "/";
   const cachePath = getCachePath(cwd, home);
   const cacheDir = cachePath.substring(0, cachePath.lastIndexOf("/"));
-  const filePath = await resolvePathSafely(rawPath, cwd);
+  // Resolve cwd first so the containment check inside resolvePathSafely uses
+  // the real path (e.g. /private/var/... on macOS) rather than the symlink
+  // form (/var/...). Without this, temp-dir paths used in tests would fail the
+  // containment check and return the unresolved key, missing the cache entry.
   const cwdReal = await resolvePathSafely(cwd);
+  const filePath = await resolvePathSafely(rawPath, cwdReal);
 
   if (isTransientPath(filePath, cacheDir, cwdReal)) return { kind: "allow" };
 
@@ -432,8 +847,8 @@ export async function evaluateLockClaim(
   const home = opts.home ?? env.get("HOME") ?? "/";
   const cachePath = getCachePath(cwd, home);
   const cacheDir = cachePath.substring(0, cachePath.lastIndexOf("/"));
-  const filePath = await resolvePathSafely(rawPath, cwd);
   const cwdReal = await resolvePathSafely(cwd);
+  const filePath = await resolvePathSafely(rawPath, cwdReal);
 
   // Mirror `evaluateHarness`: transient files (`/tmp`, `/var/folders/`, the
   // hash cache itself) are out of scope for the harness. Skipping them here
@@ -512,10 +927,11 @@ export async function evaluateBashCacheBypass(
   // Match evaluateHarness's pipeline (prune + cap) so a bloated cache file
   // doesn't blow up memory on the Bash check path.
   const cache = enforceMaxBytes(pruneStale(await loadCache(cachePath)));
+  const cwdReal = await resolvePathSafely(cwd);
 
   const hits: string[] = [];
   for (const raw of candidates) {
-    const resolved = await resolvePathSafely(raw, cwd);
+    const resolved = await resolvePathSafely(raw, cwdReal);
     if (getEntry(cache, resolved)) hits.push(raw);
   }
   if (hits.length === 0) return { kind: "allow" };

@@ -58,9 +58,34 @@ install-opencode:
 
 # ── Uninstall ────────────────────────────────────────────────────────────────
 
-uninstall:
-    rm -rf "{{OPENCODE_PLUGIN_DIR}}"
+# Full uninstall: removes Claude Code plugin (binary, symlink, MCP entry,
+# CLAUDE.md block, settings entries, marketplace cache, daemon runtime
+# files) AND OpenCode plugin (symlinked plugin dir). Stops the daemon
+# before removing files. Preserves the user config at
+# ~/.config/overmind/overmind.toml so operator customizations survive
+# a re-install — delete it manually for a true clean slate.
+uninstall: uninstall-claudecode uninstall-opencode
+    @echo "Overmind uninstalled."
+    @echo "  - Daemon: stopped"
+    @echo "  - Binary: {{OVERMIND_BIN}} (symlink) and {{DIST_BIN}} (compiled artifact) removed"
+    @echo "  - Claude Code: plugin, MCP entry, CLAUDE.md block, marketplace cache removed"
+    @echo "  - OpenCode: plugin dir removed"
+    @echo ""
+    @echo "Preserved (delete manually for a full reset):"
+    @echo "  - User config:    {{OVERMIND_DIR}}/overmind.toml  (~/.config/overmind/overmind.toml)"
+    @echo "  - Run state:      ~/.overmind/state/* (per-workspace history)"
+
+# Uninstall the Claude Code plugin only. Stops the daemon, removes the
+# binary + symlink, the plugin/cache/settings entries, the CLAUDE.md
+# block, and any orphaned daemon runtime files. Idempotent: safe to
+# re-run when nothing is installed.
+uninstall-claudecode:
     deno task uninstall-plugin
+
+# Uninstall the OpenCode plugin only — symlink-based install, so just
+# remove the plugin directory.
+uninstall-opencode:
+    rm -rf "{{OPENCODE_PLUGIN_DIR}}"
 
 # ── Development ──────────────────────────────────────────────────────────────
 
