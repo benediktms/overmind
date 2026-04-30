@@ -90,15 +90,30 @@ silently times out at 180s with zero handoffs.
    )
    ```
 
-4. **Wait for wave handoffs** — when each teammate posts its handoff and
-   leaves the room, the kernel computes the next wave (or moves to verify
-   / fix). Re-drain via `overmind_pending_dispatches` whenever the swarm
-   advances; spawn the new teammates the same way.
+4. **Wait for wave handoffs** — teammates settle via the team mailbox;
+   the kernel observes neural_link handoffs and queues the next wave's
+   dispatches (or moves to verify, then fix on failure).
 
-5. **Exit** — when the kernel closes the room, the run is finished and
-   results are synthesized.
+5. **RE-DRAIN** — `overmind_pending_dispatches({run_id})` again. **A swarm
+   run drains once per wave plus once for verification** (and again per
+   fix iteration). For a 3-wave swarm with one fix cycle, expect ~5
+   drains. Skipping re-drains wedges the run: the kernel queues
+   verifier/fix dispatches you never spawn, exhausts max_iterations,
+   ends in failure with no diagnostic.
 
-See the `delegate` skill for the role → subagent_type mapping table.
+6. **Exit** — empty re-drain + closed room = done. Synthesize from the
+   wave handoff summaries.
+
+### Lead steering
+
+The kernel is a state machine; **you have full context** (the objective,
+each wave's outputs). If a teammate aborts, deviates, or reports a
+blocker, intervene via `SendMessage(to=teammate_name, …)` (team mode)
+or `mcp__neural_link__message_send` (subprocess mode). For swarms,
+deviations within a wave compound: catch them before the wave's verify
+gate to avoid having to re-dispatch the entire wave. See the `delegate`
+skill for the full lead-steering protocol and the role → subagent_type
+mapping table.
 </phase_1_protocol>
 
 <examples>

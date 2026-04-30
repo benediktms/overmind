@@ -83,14 +83,29 @@ silently times out at 180s with zero handoffs.
    )
    ```
 
-4. **Wait for handoffs** — when all Probes have posted findings and left
-   the room, the scout executor synthesizes the brain memory episode and
-   closes the room.
+4. **Wait for handoffs** — Probes settle via the team mailbox; the kernel
+   observes neural_link handoffs from each angle.
 
-5. **Exit** — the run completes when the room closes; the synthesis is
-   available via the brain memory episode.
+5. **RE-DRAIN** — `overmind_pending_dispatches({run_id})` again. **A
+   scout run usually drains once** (the angle fan-out) — but if the
+   planner produced a multi-stage TaskGraph, additional drains may be
+   needed. Always re-drain at least once after the initial wave to
+   confirm the kernel has nothing more queued before declaring the run
+   done.
 
-See the `delegate` skill for the role → subagent_type mapping table.
+6. **Exit** — empty re-drain + closed room = done. Synthesis is in the
+   brain memory episode.
+
+### Lead steering
+
+The kernel is a state machine; **you have full context** (the objective,
+the user's actual question, prior context). If a Probe aborts or
+deviates from its assigned angle, intervene via
+`SendMessage(to=teammate_name, …)` (team mode) or `mcp__neural_link__message_send`
+(subprocess mode). Scout has no fix loop — a Probe that goes off-task
+just produces lower-quality findings; the lead is the only safeguard.
+See the `delegate` skill for the full lead-steering protocol and the
+role → subagent_type mapping table.
 </phase_1_protocol>
 
 <examples>

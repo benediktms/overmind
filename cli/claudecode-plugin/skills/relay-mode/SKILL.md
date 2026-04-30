@@ -89,15 +89,31 @@ silently times out at 180s with zero handoffs.
    )
    ```
 
-4. **Wait for handoffs** — the kernel's relay executor watches the room
-   and drives subsequent steps (verify → fix → next step) by queuing more
-   dispatches. Re-drain via `overmind_pending_dispatches` whenever the
-   relay advances; spawn the new teammates the same way.
+4. **Wait for teammates to settle** — teammates report completion via
+   the team mailbox; the kernel observes neural_link handoffs and queues
+   the next step's dispatches (verifier first, then either next-step
+   cortex/probe/liaison or a fix-iteration cortex).
 
-5. **Exit** — when the kernel closes the room, the run is finished and
-   results are synthesized.
+5. **RE-DRAIN** — `overmind_pending_dispatches({run_id})` again. **A relay
+   run drains 4+ times for a clean 3-step pipeline** (step 1 cortex →
+   verifier → step 2 probe → verifier → step 3 liaison → verifier), more
+   on fix loops. Skipping a re-drain wedges the run: the kernel queues
+   verifier/fix dispatches you never spawn, exhausts max_iterations, and
+   ends in failure with no diagnostic.
 
-See the `delegate` skill for the role → subagent_type mapping table.
+6. **Exit** — empty re-drain + closed room = done. Synthesize from the
+   step handoff summaries.
+
+### Lead steering
+
+The kernel is a state machine; **you have full context** (the objective,
+prior step outputs). If a teammate aborts, deviates, or reports a
+blocker, intervene via `SendMessage(to=teammate_name, …)` (team mode)
+or `mcp__neural_link__message_send` (subprocess mode). The verify step
+will eventually catch deviation but burns a fix iteration to do it —
+correct early via direct steering instead. See the `delegate` skill for
+the full lead-steering protocol and the role → subagent_type mapping
+table.
 </phase_1_protocol>
 
 <examples>

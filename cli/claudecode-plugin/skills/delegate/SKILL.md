@@ -78,7 +78,27 @@ permissions/env scoped to the caller. The legacy
 override but is no longer the recommended path — declare capability per
 request instead.
 
-### Protocol sequence
+### Coordination modes
+
+Two distinct channels carry messages in an Overmind run; which one matters
+depends on the dispatcher mode:
+
+| Mode | Agent ↔ agent | Agent ↔ kernel |
+|---|---|---|
+| `client_side` (Claude Code teams) | Team mailbox (`SendMessage`) — fast, in-process | neural_link (kernel listens here for handoffs) |
+| `subprocess` (CLI/CI/OpenCode/headless) | neural_link only | neural_link |
+
+In team mode, prefer the team mailbox for ad-hoc lead↔teammate steering.
+The kernel still observes neural_link for state-machine signals
+(handoffs, review_results), so anything that needs to advance the run's
+state must go through neural_link too.
+
+### Protocol sequence — drain LOOP, not one-shot
+
+The lead enters a coordination loop after delegating. **Re-drain whenever
+the run advances** — the kernel queues new dispatches at every step
+transition (verify, fix, next-step), and skipping a re-drain is the most
+common way to wedge a relay/swarm/scout run with no diagnostic.
 
 1. **Delegate the objective** — call `mcp__overmind__overmind_delegate` with
    your objective, mode (scout/relay/swarm), and
@@ -109,17 +129,63 @@ request instead.
    )
    ```
 
-4. **Wait for handoffs** — the kernel's executor watches the room for teammate
-   handoff messages and synthesizes results automatically. No further action
-   needed in Phase 1.
+4. **Wait for teammates to settle** — teammates report completion via the
+   team mailbox (idle notifications + their handoff text appears in your
+   conversation). The kernel observes their neural_link `handoff` messages
+   and queues the next step's dispatches.
 
-5. **Exit** — once all teammates have sent handoffs and left the room, the
-   kernel closes the room and returns synthesis.
+5. **RE-DRAIN** — call `overmind_pending_dispatches({run_id})` again. If
+   the array is non-empty, the run has advanced (verify step, next plan
+   step, fix iteration, next swarm wave). Go back to step 3 and spawn
+   the new teammates. **Do not assume drain is one-shot.** A typical
+   relay run drains 3+ times (initial step, verifier, optional fix,
+   next step…); a swarm drains once per wave plus verify; a scout drains
+   once for the angle fan-out plus optionally a synthesis pass.
 
-If `dispatches` is empty, the run was routed through subprocess mode
-(ClaudeCodeDispatcher) — either you passed `dispatcher_mode: "subprocess"`
-or omitted `dispatcher_mode` entirely and the daemon defaulted. No caller
-action needed in that case; the daemon spawns workers itself.
+6. **Exit** — when a re-drain returns an empty array AND the kernel has
+   closed the room (you'll see the run no longer appears active), the
+   run is complete. Synthesize results from the teammates' handoff
+   summaries.
+
+If the FIRST drain returns empty, the run was routed through subprocess
+mode (ClaudeCodeDispatcher) — either you passed
+`dispatcher_mode: "subprocess"` or omitted `dispatcher_mode` entirely and
+the daemon defaulted. No caller action needed in that case; the daemon
+spawns workers itself.
+
+### Lead steering responsibility
+
+You are the **only entity with full context** — the original objective,
+the user's intent, the prior steps' artifacts. The kernel is a state
+machine: it advances on handoffs and review_results but cannot judge
+"agent went off-task" vs "agent solved it differently than expected."
+That judgment is yours. Do not treat the kernel as authoritative; treat
+it as your dispatcher.
+
+**When to intervene:**
+
+- **Teammate goes silent / aborts** — idles without producing a handoff,
+  or its turn ends with an error. Read the lead's neural_link inbox via
+  `mcp__neural_link__inbox_read({room_id, participant_id: "overmind-<mode>-lead"})`
+  to see what they posted before stopping. Either redirect with a
+  `decision`/`proposal` message and re-spawn, or `overmind_cancel` and
+  re-delegate with a sharper brief.
+- **Teammate deviates from the brief** — they're solving the wrong
+  problem, or the right problem the wrong way. Don't wait for the verify
+  step to fail; that wastes a fix iteration. Send a correction now via
+  `SendMessage(to=teammate_name, …)` (team mode) or `message_send`
+  (subprocess mode).
+- **Teammate reports a `blocker`** (kind in inbox or via SendMessage) —
+  the kernel won't unblock for you. Resolve with a `decision` message,
+  or escalate to the user.
+
+**Channels by mode:**
+
+- `client_side`: lead → teammate via `SendMessage(to=teammate_name, …)`;
+  teammate → lead via team mailbox (auto-delivered to your turn).
+  Reserve neural_link for messages the kernel needs to observe.
+- `subprocess`: everything via neural_link `message_send` /
+  `inbox_read` — the team mailbox doesn't reach spawned subprocesses.
 
 ### Role → subagent_type mapping
 
