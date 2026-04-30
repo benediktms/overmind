@@ -397,7 +397,15 @@ export class OvermindDaemon {
       if (parsed.request) {
         if (parsed.request.type === "drain_dispatches") {
           const req = parsed.request as DrainDispatchesRequest;
-          const dispatcher = this.kernel?.getDispatcher?.();
+          // Drain semantics apply only to the client_side dispatcher —
+          // subprocess spawns inline and has no queue to drain. Querying
+          // the default via `getDispatcher()` was a regression after the
+          // dispatcher registry landed: when both dispatchers exist the
+          // default resolves to subprocess (when `claude` is on PATH),
+          // and subprocess has no `drainPending`, so callers received
+          // an empty list even when the run had legitimately queued
+          // dispatches via client_side. Always query client_side here.
+          const dispatcher = this.kernel?.getDispatcher?.("client_side");
           const dispatches = dispatcher?.drainPending?.(req.run_id) ?? [];
           responseBody = JSON.stringify({
             status: "accepted",
@@ -718,10 +726,44 @@ export async function isDaemonReachable(baseDir?: string): Promise<boolean> {
   );
 }
 
+/**
+ * Decide how to invoke the daemon process given the running executable.
+ *
+ * Dual-use: `kernel/daemon.ts` runs both as a script (during dev, via
+ * `deno run kernel/daemon.ts`) and as a subcommand of the compiled
+ * `overmind` binary (in production — the MCP server is the compiled
+ * binary). The two invocation shapes need different argv:
+ *
+ *   dev (`execPath` ends with "deno")
+ *     → `[deno, "run", "--allow-all", daemonPath]`
+ *
+ *   compiled (anything else; e.g. `…/overmind`)
+ *     → `[overmind, "daemon", "start"]` (cli/overmind.ts routes this
+ *       to `runDaemon()` — same entry point as dev mode).
+ *
+ * Without this branching, auto-spawn from the compiled MCP server
+ * invoked `[overmind, "run", …]`, which fell through `runCli`'s
+ * default branch (prints help, exits 1). The socket never appeared,
+ * and the caller saw "Daemon socket was not ready" with no diagnostic
+ * indicating the spawn itself never actually started a daemon.
+ *
+ * Exported for testability — the spawn itself has side effects, but
+ * the argv decision is pure.
+ */
+export function selectDaemonSpawnArgs(
+  execPath: string,
+  daemonPath: string,
+): string[] {
+  const isDeno = execPath.endsWith("/deno") || execPath.endsWith("\\deno");
+  return isDeno ? ["run", "--allow-all", daemonPath] : ["daemon", "start"];
+}
+
 function startDaemonProcess(baseDir: string): void {
   const daemonPath = fromFileUrl(import.meta.url);
-  const command = new Deno.Command(Deno.execPath(), {
-    args: ["run", "--allow-all", daemonPath],
+  const exec = Deno.execPath();
+  const args = selectDaemonSpawnArgs(exec, daemonPath);
+  const command = new Deno.Command(exec, {
+    args,
     env: {
       HOME: Deno.env.get("HOME") ?? ".",
       OVERMIND_DAEMON_BASE_DIR: baseDir,

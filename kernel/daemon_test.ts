@@ -11,6 +11,7 @@ import {
   ensureDaemonRunning,
   isDaemonReachable,
   OvermindDaemon,
+  selectDaemonSpawnArgs,
   selectDispatcher,
   selectDispatchers,
   sendToSocket,
@@ -868,6 +869,50 @@ Deno.test("selectDispatcher: omitting both args defaults to subprocess (matches 
   );
 });
 
+// ── selectDaemonSpawnArgs ─────────────────────────────────────────────────
+
+Deno.test(
+  "selectDaemonSpawnArgs: dev mode (deno binary) uses `run --allow-all`",
+  () => {
+    const args = selectDaemonSpawnArgs(
+      "/usr/local/bin/deno",
+      "/repo/kernel/daemon.ts",
+    );
+    assertEquals(args, ["run", "--allow-all", "/repo/kernel/daemon.ts"]);
+  },
+);
+
+Deno.test(
+  "selectDaemonSpawnArgs: compiled binary uses `daemon start` subcommand",
+  () => {
+    // The compiled binary path is whatever the user installed; the
+    // decision must NOT bake in a specific name — just absence of a
+    // trailing "deno" segment. Auto-respawn from a compiled MCP server
+    // (regression: the previous code used `run --allow-all`, which
+    // fell through cli/overmind.ts's runCli default and printed help
+    // instead of starting the daemon).
+    const args = selectDaemonSpawnArgs(
+      "/Users/x/.local/bin/overmind",
+      "/repo/kernel/daemon.ts",
+    );
+    assertEquals(args, ["daemon", "start"]);
+  },
+);
+
+Deno.test(
+  "selectDaemonSpawnArgs: compiled binary path with non-overmind name still uses subcommand form",
+  () => {
+    // Robustness: the decision is "is this deno or not" — any non-deno
+    // path is treated as a compiled binary, since the compile step
+    // emits `runDaemon` behind the `daemon start` subcommand.
+    const args = selectDaemonSpawnArgs(
+      "/some/wrapper/path",
+      "/repo/kernel/daemon.ts",
+    );
+    assertEquals(args, ["daemon", "start"]);
+  },
+);
+
 // ── selectDispatchers (registry) ──────────────────────────────────────────
 
 Deno.test(
@@ -993,6 +1038,76 @@ Deno.test(
         String(response.error ?? ""),
         "is not available on this daemon",
       );
+    } finally {
+      await daemon.shutdown();
+      await kernel.shutdown();
+      await Deno.remove(tempDir, { recursive: true });
+    }
+  },
+);
+
+Deno.test(
+  "OvermindDaemon drain_dispatches queries client_side dispatcher (regression: registry default may be subprocess)",
+  async () => {
+    // Regression: after the dispatcher registry landed, `getDispatcher()`
+    // (no mode) resolves to the registry's default — which is `subprocess`
+    // when `claude` is on PATH. drain_dispatches was using that default
+    // and querying subprocess's nonexistent `drainPending`, so callers
+    // received empty arrays even when client_side had legitimately
+    // queued dispatches for the run. Verify the handler queries
+    // client_side explicitly regardless of what the default is.
+    const tempDir = await Deno.makeTempDir();
+    const { baseDir, socketPath } = createTestPaths(tempDir);
+    await Deno.mkdir(baseDir, { recursive: true });
+
+    // Manually queue a dispatch on the client_side dispatcher so we can
+    // observe the drain returning it. We don't actually run executeScout —
+    // this test is a focused unit-of-routing test.
+    // The runId must be a UUID-shaped `run-<uuid>` so ClientSideDispatcher's
+    // `extractRunId` regex matches and keys the queue by the run prefix
+    // rather than the full agentId.
+    const runId = "run-deadbeef-1234-5678-9abc-def012345678";
+    const clientSide = new ClientSideDispatcher();
+    await clientSide.dispatch({
+      agentId: `${runId}-probe-1`,
+      role: "probe" as unknown as string,
+      prompt: "test",
+      roomId: "room-test",
+      participantId: "p1",
+      workspace: tempDir,
+    } as unknown as Parameters<typeof clientSide.dispatch>[0]);
+
+    // Subprocess stub deliberately has no drainPending — proving the
+    // handler doesn't accidentally pick it as the default.
+    const subStub: AgentDispatcher = {
+      dispatch: async () => ({ launched: true }),
+      isAvailable: () => true,
+    };
+
+    const kernel = await buildTestKernel({
+      dispatchers: { subprocess: subStub, client_side: clientSide },
+      defaultDispatcherMode: "subprocess",
+    });
+
+    const daemon = new OvermindDaemon({ baseDir, kernel, enableHttp: false });
+    await daemon.start();
+
+    try {
+      const requestBody = JSON.stringify({
+        type: "drain_dispatches",
+        run_id: runId,
+      });
+      const responseText = await sendRawSocketRequest(socketPath, requestBody);
+      const response = JSON.parse(responseText) as {
+        status: string;
+        run_id: string;
+        error: string | null;
+        dispatches: unknown[];
+      };
+      assertEquals(response.status, "accepted");
+      assertEquals(response.dispatches.length, 1);
+      const drained = response.dispatches[0] as { agentId?: string };
+      assertEquals(drained.agentId, `${runId}-probe-1`);
     } finally {
       await daemon.shutdown();
       await kernel.shutdown();
